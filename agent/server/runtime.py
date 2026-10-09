@@ -266,6 +266,10 @@ class ConversationRunner(TaskRunner):
             self.persist('user_input_applied', {'id': turn['id']})
         self.state.pop('turn_status', None)
         response = messages_from_dict([raw])[0] if raw else None
+        if raw:
+            # Public commentary must survive preparation errors as well as
+            # successful tool execution; publish deduplicates the call ID.
+            dialogue.publish(self, raw)
         blocked = response and len(response.tool_calls) == 1 and response.tool_calls[0]['name'] == 'submit_work' and response.tool_calls[0]['args'].get('kind') == 'blocked'
         if not self.state.get('baseline') and not blocked:
             if not self.repo or not Path(self.repo).is_dir():

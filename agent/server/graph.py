@@ -22,6 +22,11 @@ ACTIVE = {'needs_plan', 'executing'}
 FINISHED = {'chat_complete', 'verified_success', 'task_blocked', 'settings_required'}
 
 
+def finished(session, store):
+    return session['status'] in FINISHED or (session['status'] == 'runtime_error'
+                                            and store.error_is_settled(session['task_id']))
+
+
 class ConversationState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     repo: str
@@ -85,7 +90,7 @@ def intake(state: ConversationState, config: RunnableConfig):
     if session and record['applied']:
         can_resume = session['status'] in {'paused', 'awaiting_user'} and bool(store.pending(thread))
         return {**presentation, 'task_id': session['task_id'], 'status': 'needs_plan' if can_resume else session['status']}
-    if session and session['status'] not in FINISHED:
+    if session and not finished(session, store):
         if session['repo'] != repo:
             raise ValueError('Open a new conversation to change the active workspace')
         session.update(last_input=latest.id, read_roots=roots)
@@ -124,7 +129,7 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
     queued = store.pending(thread)
     # A message racing the final checkpoint starts the next turn, not a
     # second owner or an automatic retry of the just-completed task.
-    if status in FINISHED and any(r['kind'] == 'message' for r in queued):
+    if finished({'status': status, 'task_id': session['task_id']}, store) and any(r['kind'] == 'message' for r in queued):
         updates.extend(HumanMessage(content=r['text'], id=r['id']) for r in queued if r['kind'] == 'message')
         status = 'new_input'
     elif status in {'paused', 'awaiting_user'} and queued:

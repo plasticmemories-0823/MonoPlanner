@@ -133,6 +133,23 @@ class ConversationTests(unittest.TestCase):
         self.assertIn('第一次', repr(model.calls[-1]))
         self.assertNotIn('PRIVATE_REASONING', repr(model.calls[-1]))
 
+    def test_chat_after_runtime_error_starts_a_new_task_without_replaying_failed_work(self):
+        from agent.source.snapshots import SnapshotError
+        model = ScriptedModel([investigation(['first.py']), text_reply('你好，上一项工作仍保留失败现场。')])
+        with patch('agent.server.runtime.ConversationRunner.bootstrap_work', side_effect=SnapshotError('ignored cache link')):
+            failed = self.invoke(model, '直接读取源码', 'work-request')
+        self.assertEqual(failed['status'], 'runtime_error')
+        self.assertTrue(any(m.type == 'ai' and m.content == '先读取必要的源码。' for m in failed['messages']))
+        old_root = self.root/'runs'/'tasks'/failed['task_id']
+        originals = {str(p.relative_to(old_root)): p.read_bytes() for p in old_root.rglob('*') if p.is_file()}
+        chatted = self.invoke(model, '你好', 'after-error')
+        self.assertEqual(chatted['status'], 'chat_complete')
+        self.assertNotEqual(chatted['task_id'], failed['task_id'])
+        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(originals, {str(p.relative_to(old_root)): p.read_bytes() for p in old_root.rglob('*') if p.is_file()})
+        self.assertFalse(list((self.root/'runs'/'tasks').glob('*/plans/*/plan.json')))
+        self.assertFalse(self.store.pending(self.thread))
+
     def test_pause_during_model_saves_response_and_resume_does_not_resend(self):
         model = ScriptedModel([investigation(['first.py']), text_reply()],
             hook=lambda n: self.store.enqueue(self.thread, 'pause', 'pause') if n == 1 else None)
@@ -192,6 +209,21 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(first['status'], 'runtime_error')
         self.invoke(model, '继续', 'user-two')
         self.assertEqual(len(model.calls), 1)
+
+    def test_error_with_unknown_execution_or_compaction_cannot_start_another_task(self):
+        from agent.storage.history import LocalHistory
+        for marker, value in [('running_step', 'write'), ('assistant_running', {'id': 'run'}),
+                              ('verification_running', True), ('compaction_pending', {'stage': 'committing'})]:
+            with self.subTest(marker=marker):
+                task = uuid.uuid4().hex
+                archive = LocalHistory(self.root/'runs'/'tasks'/task)
+                try:
+                    with archive.lease():
+                        archive.record({'status': 'runtime_error', 'history': [],
+                                        'budget': {'unknown_usage_steps': 0}, marker: value}, 'task_returned', {})
+                    self.assertFalse(self.store.error_is_settled(task))
+                finally:
+                    archive.close()
 
     def test_mailbox_rejects_changed_content_and_can_be_reopened(self):
         self.store.enqueue(self.thread, 'x', 'message', '原文')

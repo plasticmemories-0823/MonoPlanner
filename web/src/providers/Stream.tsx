@@ -5,6 +5,7 @@ import React, {
   useState,
   useEffect,
   useMemo,
+  useRef,
 } from "react";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import { type Message } from "@langchain/langgraph-sdk";
@@ -25,6 +26,7 @@ import { ArrowRight } from "lucide-react";
 import { PasswordInput } from "@/components/ui/password-input";
 import { getApiKey, setApiKey as storeApiKey } from "@/lib/api-key";
 import { resolveApiUrl } from "@/lib/resolve-api-url";
+import { mergePublicMessages } from "@/lib/public-messages";
 import { useThreads } from "./Thread";
 import { toast } from "sonner";
 import type { RuntimeSettings } from "@/components/thread/model-settings";
@@ -102,7 +104,19 @@ const StreamSession = ({
   const [threadId, setThreadId] = useQueryState("threadId");
   const { getThreads, setThreads } = useThreads();
   const [progress, setProgress] = useState<ProgressEvent>();
-  const [recovered, setRecovered] = useState<StateType>();
+  const [recovery, setRecovered] = useState<{
+    key: string;
+    value: StateType;
+  }>();
+  const key = `${apiUrl}\0${threadId || ""}`;
+  const recovered = recovery?.key === key ? recovery.value : undefined;
+  const activeKey = useRef(key);
+  activeKey.current = key;
+  const recoveryVersion = useRef(0);
+  const [archive, setArchive] = useState<{ key: string; messages: Message[] }>({
+    key: "",
+    messages: [],
+  });
   const streamValue = useTypedStream({
     apiUrl,
     apiKey: apiKey ?? undefined,
@@ -118,8 +132,23 @@ const StreamSession = ({
     onFinish: async (_state, metadata) => {
       const finishedThread = metadata?.thread_id || threadId;
       if (!finishedThread) return;
-      const r = await fetch(`${apiUrl}/threads/${finishedThread}/control`);
-      if (r.ok) setRecovered(await r.json());
+      const expectedKey = `${apiUrl}\0${finishedThread}`;
+      const version = ++recoveryVersion.current;
+      try {
+        const r = await fetch(`${apiUrl}/threads/${finishedThread}/control`, {
+          cache: "no-store",
+        });
+        if (r.ok) {
+          const value = await r.json();
+          if (
+            activeKey.current === expectedKey &&
+            recoveryVersion.current === version
+          )
+            setRecovered({ key: expectedKey, value });
+        }
+      } catch (error) {
+        console.error("Public message recovery failed", error);
+      }
     },
     onCustomEvent: (event, options) => {
       if ("type" in event && event.type === "progress") {
@@ -143,16 +172,23 @@ const StreamSession = ({
 
   useEffect(() => setProgress(undefined), [threadId]);
   useEffect(() => {
-    if (streamValue.isLoading) setRecovered(undefined);
+    if (streamValue.isLoading) recoveryVersion.current += 1;
   }, [streamValue.isLoading]);
   useEffect(() => {
     setRecovered(undefined);
     if (!threadId) return;
     let cancelled = false;
+    const version = ++recoveryVersion.current;
     fetch(`${apiUrl}/threads/${threadId}/control`)
       .then((r) => (r.ok ? r.json() : null))
       .then((r) => {
-        if (r && Array.isArray(r.messages) && !cancelled) setRecovered(r);
+        if (
+          r &&
+          Array.isArray(r.messages) &&
+          !cancelled &&
+          recoveryVersion.current === version
+        )
+          setRecovered({ key, value: r });
       })
       .catch(console.error);
     return () => {
@@ -160,6 +196,22 @@ const StreamSession = ({
     };
   }, [apiUrl, threadId]);
   const publicFallback = !streamValue.isLoading && recovered?.messages?.length;
+  // The SDK clears a previous thread in an effect. Do not archive its last
+  // render under the newly selected thread while that reset is pending.
+  const loadedThread = streamValue.history[0]?.checkpoint.thread_id;
+  const liveMessages =
+    loadedThread && loadedThread !== threadId && !streamValue.isLoading
+      ? []
+      : streamValue.messages;
+  const messages = mergePublicMessages(
+    archive.key === key ? archive.messages : [],
+    mergePublicMessages(recovered?.messages || [], liveMessages),
+  );
+  useEffect(() => {
+    setArchive((old) =>
+      old.key === key && old.messages === messages ? old : { key, messages },
+    );
+  }, [key, messages]);
 
   useEffect(() => {
     checkGraphStatus(apiUrl, apiKey, authScheme).then((ok) => {
@@ -185,9 +237,9 @@ const StreamSession = ({
         ...(publicFallback
           ? {
               values: { ...streamValue.values, ...recovered },
-              messages: recovered.messages,
             }
           : {}),
+        messages,
         apiUrl,
         progress,
       }}

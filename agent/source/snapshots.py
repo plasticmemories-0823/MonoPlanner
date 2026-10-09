@@ -101,14 +101,18 @@ def _safe_file(root, relative):
     return path
 
 
-def _walk(root, preserve_files=()):
+def _walk(root, preserve_files=(), ignored_directories=()):
     """Never follow even an internal link; report it instead of copying a target."""
     retained_directories = {parent for name in preserve_files for parent in Path(name).parents}
+    ignored_directories = set(ignored_directories)
     for directory, directories, files in os.walk(root, followlinks=False):
         parent = Path(directory)
         for name in list(directories):
             relative = (parent / name).relative_to(root)
-            if (relative not in retained_directories and (name.lower() in _DERIVED_DIRS or tuple(
+            if relative in ignored_directories and relative not in retained_directories:
+                directories.remove(name)
+                yield relative, "git_ignored_directory"
+            elif (relative not in retained_directories and (name.lower() in _DERIVED_DIRS or tuple(
                     part.lower() for part in relative.parts[:2]) in _DERIVED_PATHS)):
                 directories.remove(name)
                 yield relative, "generated_directory"
@@ -140,6 +144,14 @@ def _selected_files(root, runtime_files=()):
             raise SnapshotError("git ls-files failed to distinguish tracked source files.")
         tracked = {Path(os.fsdecode(item)) for item in tracked_result.stdout.split(b"\0") if item}
         selected = {Path(os.fsdecode(item)) for item in listed.stdout.split(b"\0") if item}
+        ignored_result = subprocess.run([
+            "git", "-C", str(root), "ls-files", "--others", "--ignored",
+            "--exclude-standard", "--directory", "-z",
+        ], capture_output=True, timeout=30, **options)
+        if ignored_result.returncode != 0:
+            raise SnapshotError("git ls-files failed to identify ignored directories.")
+        ignored_directories = {Path(os.fsdecode(item).rstrip("/"))
+                               for item in ignored_result.stdout.split(b"\0") if item.endswith(b"/")}
         for name in runtime_files:
             relative = Path(name)
             if not relative.parts or relative.is_absolute() or ".." in relative.parts or _reason(relative):
@@ -147,7 +159,7 @@ def _selected_files(root, runtime_files=()):
             selected.add(relative)
         # Include named secret exclusions in the manifest even when Git ignores
         # them. Hashes let a later candidate report unverified changes safely.
-        selected.update(relative for relative, skip in _walk(root)
+        selected.update(relative for relative, skip in _walk(root, tracked, ignored_directories)
                         if not skip and _reason(relative) in _SECRET_REASONS)
         return "git", [(relative, None, relative in tracked) for relative in sorted(selected)]
     return "source_walk", [(relative, skip, False) for relative, skip in _walk(root)]

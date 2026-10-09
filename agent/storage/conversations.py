@@ -5,6 +5,8 @@ from pathlib import Path
 import sqlite3
 import uuid
 
+from agent.storage.activity import checked
+
 
 class ConversationStore:
     def __init__(self, root):
@@ -36,6 +38,24 @@ class ConversationStore:
         with self.connection() as db:
             row = db.execute('SELECT data FROM sessions WHERE thread=?', (self.thread(thread),)).fetchone()
             return json.loads(row['data']) if row else None
+
+    def error_is_settled(self, task):
+        """Read the failed checkpoint without restoring or changing execution."""
+        if not isinstance(task, str) or len(task) != 32 or any(c not in '0123456789abcdef' for c in task):
+            return False
+        root = self.path.parent/'tasks'/task
+        try:
+            with closing(sqlite3.connect((root/'history.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
+                row = db.execute('SELECT path,sha256 FROM commits ORDER BY seq DESC LIMIT 1').fetchone()
+            state = checked(root, *row)['state'] if row else {}
+            unknown = ('request_pending', 'running_step', 'verification_running', 'acceptance_running',
+                       'assistant_running', 'web_running', 'web_request_pending')
+            return (state.get('status') == 'runtime_error'
+                    and not any(state.get(key) for key in unknown)
+                    and not state.get('budget', {}).get('unknown_usage_steps', 0)
+                    and (state.get('compaction_pending') or {}).get('stage') != 'committing')
+        except (OSError, ValueError, sqlite3.Error, KeyError):
+            return False
 
     def save_session(self, thread, value):
         with self.connection() as db:

@@ -103,6 +103,32 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.verify_integrity()["modified"], ["build/tool.py"])
 
     @unittest.skipUnless(shutil.which("git"), "Git is not installed")
+    def test_git_ignored_directory_is_not_traversed_for_secret_discovery(self):
+        subprocess.run(["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True)
+        self.write(".gitignore", "validation/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True, capture_output=True)
+        self.write("validation/pnpm-store/link/private.txt", "ignored cache")
+        from agent.source.snapshots import _link
+        with patch("agent.source.snapshots._link", side_effect=lambda p: p.name == "link" or _link(p)):
+            snapshot = self.capture()
+        self.assertIn("module.py", snapshot.files)
+        self.assertFalse((snapshot.root / "validation").exists())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is not installed")
+    def test_tracked_source_inside_ignored_directory_still_rejects_links(self):
+        subprocess.run(["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True)
+        self.write(".gitignore", "validation/\n")
+        self.write("validation/tracked.py", "VALUE = 1\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-f", "validation/tracked.py"],
+                       check=True, capture_output=True)
+        snapshot = self.capture("tracked")
+        self.assertIn("validation/tracked.py", snapshot.files)
+        from agent.source.snapshots import _link
+        with patch("agent.source.snapshots._link", side_effect=lambda p: p.name == "tracked.py" or _link(p)):
+            with self.assertRaisesRegex(SnapshotError, "Links"):
+                self.capture("linked")
+
+    @unittest.skipUnless(shutil.which("git"), "Git is not installed")
     def test_tracked_secrets_in_generated_directories_still_take_exclusion_priority(self):
         subprocess.run(["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True)
         paths = ("build/.env", "dist/.env.local", "build/server.key", "eval/runs/id_rsa")

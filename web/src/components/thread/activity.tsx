@@ -99,8 +99,12 @@ export function useActivity(
             model_seconds: 0,
           },
         );
-        setUsage(totals);
-        setItems([...archive.current.rows.values()]);
+        setUsage((previous) =>
+          JSON.stringify(previous) === JSON.stringify(totals)
+            ? previous
+            : totals,
+        );
+        if (result.items.length) setItems([...archive.current.rows.values()]);
         setError("");
         if (result.more || running)
           timer = setTimeout(poll, result.more ? 20 : 800);
