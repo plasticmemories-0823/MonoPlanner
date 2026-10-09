@@ -1,0 +1,9 @@
+{
+  "context_window_tokens": 1000000,
+  "threshold_ratio": 0.8,
+  "headroom_tokens": 65536,
+  "retain_ratio": 0.16,
+  "summary_max_tokens": 65536,
+  "max_summaries_per_trigger": 2,
+  "max_overflow_retries": 1
+}

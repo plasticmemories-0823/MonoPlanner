@@ -1,0 +1,96 @@
+{
+  "properties": {
+    "kind": {
+      "enum": [
+        "inspect",
+        "candidate",
+        "blocked"
+      ],
+      "type": "string"
+    },
+    "note": {
+      "type": "string"
+    },
+    "steps": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$",
+            "type": "string"
+          },
+          "op": {
+            "enum": [
+              "read",
+              "search",
+              "shell"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "limit": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "from_step": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "expected_exit": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "op",
+          "path",
+          "query",
+          "offset",
+          "limit",
+          "from_step",
+          "command",
+          "expected_exit"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "test_code": {
+      "type": "string"
+    },
+    "regression_command": {
+      "type": "string"
+    },
+    "test_driver": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "kind",
+    "note",
+    "steps",
+    "test_code",
+    "test_driver",
+    "regression_command"
+  ],
+  "type": "object",
+  "additionalProperties": false
+}

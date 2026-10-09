@@ -1,0 +1,41 @@
+# Local credentials and machine configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor state and generated runtime data
+.vs/
+.idea/
+.coding_agent/
+*.log
+
+# Large local evaluation workspaces, downloaded images and dependencies.
+# Selected small evidence files are explicitly tracked in the initial snapshot.
+/eval/runs/
+/eval/checks/
+/eval/vendor/
+
+/validation/
+/runs/
+*.pending
+/tests/.work/
+/web/node_modules/
+/web/.next/
+/web/.env.local
+*.tsbuildinfo
+/.langgraph_api/
+/.venv-web/
+/launcher/runtime/

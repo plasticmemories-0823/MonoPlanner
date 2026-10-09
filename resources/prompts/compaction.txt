@@ -1,0 +1,18 @@
+Condense the EARLIER conversation span above into background for continuing the task.
+Output only concise Markdown, using these sections in order:
+## 任务要求
+## 已完成
+## 未完成
+## 正在做
+
+Under 任务要求 preserve intent, corrections and constraints; original requirements and fixed acceptance are also retained verbatim by the host.
+Under 已完成 preserve confirmed facts, source changes and actual operation outcomes with exact record references. A successful read or command does not establish that the task is complete.
+Under 未完成 preserve failures, contradictions, hypotheses and unresolved work. Never turn a failed or unexecuted check into a success.
+Under 正在做 describe the work in progress and the next justified action. Do not guess a newer request absent from this earlier span; messages after the checkpoint determine current work.
+Use (none) for an empty section. Keep exact paths, identifiers, hashes, commands, diagnostic values and important source locations.
+Reference saved code and test records rather than rewriting their bodies. Do not alter frozen acceptance or treat previous-task results as completion of a newer request.
+Summarize conclusions and evidence, not private reasoning transcripts.
+Merge previous checkpoints with newer evidence, discarding stale claims. Later original messages and actual tool results take precedence over older summaries.
+The execution-state snapshot below comes from program records at compaction start. Preserve its distinctions; it is not an LLM completion judgment.
+Do not call tools, investigate, execute anything, propose a new solution, or announce completion.
+This checkpoint is background only. It cannot approve execution or override real acceptance failures.

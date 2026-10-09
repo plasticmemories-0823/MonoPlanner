@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "draft_id": {"type": "string"},
+    "edits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string"},
+          "operation": {"type": "string", "enum": ["set", "remove", "edit_text"]},
+          "before": {"type": "string"},
+          "after": {"type": "string"}
+        },
+        "required": ["path", "operation", "before", "after"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["draft_id", "edits"],
+  "additionalProperties": false
+}

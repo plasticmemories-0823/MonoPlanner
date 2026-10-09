@@ -1,0 +1,5 @@
+langchain-core
+langgraph>=1.2,<2
+langchain-deepseek
+python-dotenv
+httpx[socks]>=0.28,<0.29

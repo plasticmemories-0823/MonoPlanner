@@ -1,0 +1,4 @@
+{
+  "search": {"type": "object", "additionalProperties": false, "properties": {"query": {"type": "string"}}, "required": ["query"]},
+  "fetch": {"type": "object", "additionalProperties": false, "properties": {"url": {"type": "string"}}, "required": ["url"]}
+}

@@ -1,0 +1,45 @@
+{
+  "freeze": {
+    "type": "object",
+    "properties": {
+      "trial_id": {
+        "type": "string"
+      },
+      "reason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "trial_id",
+      "reason"
+    ],
+    "additionalProperties": false
+  },
+  "revise": {
+    "type": "object",
+    "properties": {
+      "trial_id": {
+        "type": "string"
+      },
+      "reason": {
+        "type": "string"
+      },
+      "test_code": {
+        "type": "string"
+      },
+      "test_driver": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "trial_id",
+      "reason",
+      "test_code",
+      "test_driver"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "P0339",
+  "origin_commit": "fd57f7844338366091cd4e62158b3193c4d3a1e2",
+  "baseline_tag": "p0339-before-retain-draft-20261008",
+  "workflow": "task",
+  "source_manifest_fingerprint": "689d5c819ac6365359332faef658b5532103a45aff83c80b2ce6cd2b7156d093",
+  "offline_tests": 201,
+  "offline_passed": 200,
+  "offline_skipped": 1,
+  "validation": "validation/p0339-retain-draft-20261008-01",
+  "change": "retain-rejected-draft-during-inspection"
+}
