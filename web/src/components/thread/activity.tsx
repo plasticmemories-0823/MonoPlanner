@@ -207,11 +207,14 @@ export function ActivityRows({ items }: { items: Activity[] }) {
   const needsAttention = items.some((row) =>
     ["failed", "error", "unknown"].includes(row.status),
   );
+  const interrupted = items.some((row) => row.status === "interrupted");
   const label = running
     ? running.label
     : needsAttention
       ? "步骤已结束，有结果需要核对"
-      : "思考与工作步骤已完成";
+      : interrupted
+        ? "当前回复已中断"
+        : "思考与工作步骤已完成";
   return (
     <details
       data-testid="activity-group"

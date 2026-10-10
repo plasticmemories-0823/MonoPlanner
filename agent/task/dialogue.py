@@ -32,7 +32,7 @@ PROGRESS = {
     'final_acceptance_finished': ('acceptance_finished', '实际验收结果已保存'),
     'plan_rejected': ('repair', '提交信息需要修正，正在处理'),
     'user_input_applied': ('updated', '新要求已接入，重新安排剩余工作'),
-    'paused': ('paused', '已在安全位置暂停'),
+    'paused': ('paused', '已暂停'),
 }
 
 
@@ -90,10 +90,11 @@ def apply_controls(loop):
             loop.state.update(status='needs_plan', reason='User supplemented the task')
             changed = True
         elif control['kind'] == 'pause':
-            loop.state.update(status='paused', reason='User requested pause at a safe boundary')
+            loop.state.update(status='paused', reason='User requested pause', pause_requested=True)
             changed = True
         elif control['kind'] == 'resume':
-            loop.state.update(status='executing' if loop.state.get('pending') else 'needs_plan', reason='User resumed task')
+            loop.state.update(status='executing' if loop.state.get('pending') else 'needs_plan', reason='User resumed task',
+                              pause_requested=False)
             changed = True
         applied.append(control['id'])
         loop.persist('paused' if control['kind'] == 'pause' else 'user_input_applied', {'id': control['id']})

@@ -143,10 +143,10 @@ class LocalHistory:
                     item = self._reference(self.root/payload['record'])
                     self.connection.execute('INSERT OR REPLACE INTO read_cache VALUES(?,?,?)',
                         (payload['cache_key'],item['path'],item['sha256']))
-            if event in {'model_request_started','model_response_received'}:
+            if event in {'model_request_started','model_response_received','model_request_interrupted'}:
                 call = payload['call']
                 folder = self.root/'requests'/('call-%04d' % call)
-                for name in ('request.json','response.json'):
+                for name in ('request.json','response.json','interruption.json'):
                     if (folder/name).is_file():
                         self._register(self._reference(folder/name), 'model_record')
             if event == 'plan_accepted':

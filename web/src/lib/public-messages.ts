@@ -35,5 +35,9 @@ export function mergePublicMessages(
       changed = true;
     }
   }
-  return changed ? result : base;
+  // Recovery and stream fragments can replace the same ID twice in one update.
+  // A final value equal to the archive must not trigger another React render.
+  return changed && JSON.stringify(result) !== JSON.stringify(base)
+    ? result
+    : base;
 }

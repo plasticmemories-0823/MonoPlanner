@@ -23,6 +23,7 @@ from agent.execution.assistant_files import authorized_roots
 from agent.storage.permissions import Permissions
 from agent.storage.records import save
 from agent.storage.usage import summarize
+from agent.server import interrupts
 
 ACTIVE = {'needs_plan', 'executing'}
 FINISHED = {'chat_complete', 'verified_success', 'task_blocked', 'settings_required'}
@@ -139,7 +140,8 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
                         state_dir=task_dir, interactive=True,
                         event_sink=writer, runtime_settings=session['runtime_settings'],
                         control_source=lambda: store.pending(thread))
-        result = runner.run(messages_from_dict(session['history']), session['request'], StepBudget(max_steps=1000))
+        with interrupts.active(state_root(), thread):
+            result = runner.run(messages_from_dict(session['history']), session['request'], StepBudget(max_steps=1000))
     except GraphBubbleUp:
         raise  # LangGraph interrupts must keep their own pause/checkpoint semantics.
     except Exception as exc:
@@ -164,13 +166,13 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
     if finished({**session, 'status': status}, store) and any(r['kind'] == 'message' for r in queued):
         updates.extend(HumanMessage(content=r['text'], id=r['id']) for r in queued if r['kind'] == 'message')
         status = 'new_input'
-    elif status in {'paused', 'awaiting_user'} and queued:
+    elif status in {'paused', 'awaiting_user'} and queued and not result.get('pause_requested'):
         status = 'needs_plan'
     if status not in ACTIVE and status != 'chat_complete' and result.get('turn_status') != 'chat_complete':
         text = ('实际验收通过。' if status == 'verified_success' else
                 '任务未能启动，已保存错误记录。请检查运行环境后重新提交。' if session.get('initialization_failed') else
                 '请先在设置中配置可用的 DeepSeek API Key，然后重新发送消息。' if status == 'settings_required' else
-                '已在安全位置暂停，可以补充要求或继续。' if status in {'paused', 'awaiting_user'} else
+                '已暂停，可以补充要求或继续。' if status in {'paused', 'awaiting_user'} else
                 '任务尚未完成，已保留运行记录，供后续检查。')
         updates.append(AIMessage(content=text, id=session['task_id']+'-'+status))
     # Presentation recovery never restores execution cursors. Those remain

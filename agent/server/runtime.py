@@ -180,6 +180,19 @@ class ConversationRunner(TaskRunner):
         self.state.setdefault('public_events', []).append({'id': turn['id'], 'type': 'human', 'content': turn['text']})
         return turn
 
+    def on_model_interrupted(self, kind):
+        turn = self.state.get('conversation_turn')
+        if turn:
+            turn = self.complete_turn()
+            self.state['history'].extend(turn['messages'][turn['prefix']:])
+            self.state.update(response_pending=turn.get('work_response'), conversation_turn=None)
+        super().on_model_interrupted(kind)
+        if kind == 'message' and not self.state.get('baseline') and not self.state.get('pending'):
+            # The first reply was cancelled before work started. Answer the
+            # saved new message without silently restarting the old request.
+            self.state['status'] = 'awaiting_user'
+            self.persist('interrupted_conversation_waiting_for_input')
+
     def bootstrap_work(self):
         if self.state.get('baseline'):
             return
@@ -224,7 +237,10 @@ class ConversationRunner(TaskRunner):
                 turn = self.complete_turn()
                 dialogue.publish(self, raw)
                 self.state['response_pending'] = turn.get('work_response')
-                self.state.update(status=turn['return_status'], conversation_turn=None, turn_status='chat_complete')
+                status = turn['return_status']
+                if status == 'awaiting_user' and not self.state.get('baseline'):
+                    status = 'chat_complete'
+                self.state.update(status=status, conversation_turn=None, turn_status='chat_complete')
                 self.persist('conversation_reply_saved')
             else:
                 dialogue.accept_text(self, raw)

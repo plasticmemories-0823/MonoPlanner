@@ -19,6 +19,14 @@ class ModelResponseNotSaved(RuntimeError):
         self.reason = reason
 
 
+class ModelInterrupted(RuntimeError):
+    """User cancelled a request; partial output is never executable or history input."""
+
+    def __init__(self, kind, sent=True):
+        super().__init__('Model request interrupted by user')
+        self.kind, self.sent = kind, sent
+
+
 class ModelCallError(RuntimeError):
     """Redacted transport failure that retains its retry classification."""
 

@@ -105,10 +105,8 @@ export function Thread() {
 
   const stream = useStreamContext();
   const { repo, setRepo } = useWorkspace(stream.apiUrl, stream.values.repo);
-  const { pendingMessages, queueMessage, pause, resume } = useRunControls(
-    stream,
-    threadId,
-  );
+  const { pendingMessages, queueMessage, pause, resume, pauseRequested } =
+    useRunControls(stream, threadId);
   const messages = mergePublicMessages(stream.messages, pendingMessages);
   const isLoading = stream.isLoading;
   const activity = useActivity(stream.apiUrl, threadId, isLoading);
@@ -495,10 +493,13 @@ export function Thread() {
                               size="sm"
                               className="rounded-full"
                               onClick={pause}
-                              aria-label="安全暂停"
+                              disabled={pauseRequested}
+                              aria-label={pauseRequested ? "正在暂停" : "暂停"}
                             >
                               <LoaderCircle className="size-4 animate-spin" />
-                              <span className="hidden sm:inline">暂停</span>
+                              <span className="hidden sm:inline">
+                                {pauseRequested ? "正在暂停" : "暂停"}
+                              </span>
                             </Button>
                           )}
                           <Button

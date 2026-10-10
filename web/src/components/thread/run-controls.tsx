@@ -40,10 +40,15 @@ export function useRunControls(
   threadId: string | null,
 ) {
   const [queued, setQueued] = useState<Message[]>([]);
+  const [pauseRequested, setPauseRequested] = useState(false);
   const attempted = useRef("");
   const pendingMessages = queued.filter(
     (m) => !(stream.values.messages || []).some((v) => v.id === m.id),
   );
+
+  useEffect(() => {
+    if (!stream.isLoading) setPauseRequested(false);
+  }, [stream.isLoading]);
 
   useEffect(() => {
     setQueued([]);
@@ -70,7 +75,9 @@ export function useRunControls(
   useEffect(() => {
     if (stream.isLoading || stream.error || !pendingMessages.length) return;
     if (
-      ["runtime_error", "state_conflict"].includes(stream.values.status || "")
+      ["runtime_error", "state_conflict", "paused"].includes(
+        stream.values.status || "",
+      )
     )
       return;
     const first = pendingMessages[0];
@@ -107,14 +114,17 @@ export function useRunControls(
       return false;
     stream.retainMessage(message);
     setQueued((old) => [...old, message]);
-    toast.success("已收到，将在当前请求或操作结束后接入");
+    toast.success("已收到，正在中断当前回复并调整后续工作");
     return true;
   }
   async function pause() {
-    if (await control("pause")) toast.success("暂停已收到，将在安全位置停止");
+    if (await control("pause")) {
+      setPauseRequested(true);
+      toast.success("正在暂停；当前模型回复将被中断");
+    }
   }
   async function resume() {
     if (await control("resume")) stream.submit({ messages: [] }, options);
   }
-  return { pendingMessages, queueMessage, pause, resume };
+  return { pendingMessages, queueMessage, pause, resume, pauseRequested };
 }

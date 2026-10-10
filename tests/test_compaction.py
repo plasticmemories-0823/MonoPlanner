@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messag
 from agent.model import compaction
 from agent.model.client import ConfiguredModel
 from agent.model.context import admit
-from agent.model.errors import ModelRequestNotSent, ModelCallError, is_context_overflow
+from agent.model.errors import ModelInterrupted, ModelRequestNotSent, ModelCallError, is_context_overflow
 from agent.model.payload import wire_input
 from agent.model.tools import WORK_TOOLS
 from agent.source.paging import visible_reads
@@ -350,6 +350,31 @@ class DurableCompactionTests(unittest.TestCase):
         result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.assertEqual(result['status'], 'model_request_unknown')
         self.assertEqual(len(self.sdk.calls), calls)
+
+    def test_user_interrupted_summary_keeps_original_view_and_clears_pending(self):
+        from agent.storage.history import LocalHistory
+        before = LocalHistory(self.root/'state')
+        with before.lease():
+            previous = before.load()
+        before.close()
+        original = self.sdk.invoke
+        def interrupt_summary(messages, **options):
+            if options.get('tool_choice') == 'none':
+                raise ModelInterrupted('pause')
+            return original(messages, **options)
+        with patch.dict(compaction.CONFIG, self.policy), patch.object(self.sdk, 'invoke', interrupt_summary):
+            result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
+        self.assertEqual(result['status'], 'paused')
+        after = LocalHistory(self.root/'state')
+        with after.lease():
+            state = after.load()
+        after.close()
+        self.assertIsNone(state['compaction_pending'])
+        self.assertIsNone(state['request_pending'])
+        self.assertEqual(state.get('context_view'), previous.get('context_view'))
+        self.assertEqual(state['history'][:len(previous['history'])], previous['history'])
+        self.assertEqual(state['interrupted_requests'][0]['purpose'], 'compaction')
+        self.assertFalse(list((self.root/'state'/'compaction').glob('**/*.json')))
 
     def test_unknown_commit_is_not_repeated(self):
         original = TaskRunner.persist

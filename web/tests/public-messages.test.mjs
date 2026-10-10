@@ -55,6 +55,20 @@ test("new replies append once and growing text keeps its original position", () 
   assert.equal(first[0].content, "正在检查");
 });
 
+test("recovery then live fragments converge without another archive update", () => {
+  const latest = {
+    ...message("p1", "已取得材料"),
+    response_metadata: { snapshot: "live" },
+  };
+  const archive = [latest];
+  const fragments = [
+    { ...latest, response_metadata: { snapshot: "recovery" } },
+    structuredClone(latest),
+  ];
+  for (let i = 0; i < 100; i++)
+    assert.strictEqual(mergePublicMessages(archive, fragments), archive);
+});
+
 test("optimistic and queued user inputs survive partial views without duplicates", () => {
   const users = [
     message("u1", "开始检查", "human"),

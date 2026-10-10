@@ -287,9 +287,15 @@ const StreamSession = ({
     mergePublicMessages(recovered?.messages || [], liveMessages),
   );
   useEffect(() => {
-    setArchive((old) =>
-      old.key === key && old.messages === messages ? old : { key, messages },
-    );
+    setArchive((old) => {
+      const merged = mergePublicMessages(
+        old.key === key ? old.messages : [],
+        messages,
+      );
+      return old.key === key && merged === old.messages
+        ? old
+        : { key, messages: merged };
+    });
   }, [key, messages]);
 
   useEffect(() => {

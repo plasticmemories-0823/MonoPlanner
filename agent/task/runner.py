@@ -9,7 +9,7 @@ from langchain_core.messages import message_to_dict, messages_from_dict, message
 from agent.task.instructions import ARTIFACT_RULES
 from agent.acceptance.artifact_checks import required_consumer, requested_calls
 from agent.model.client import configure_call
-from agent.model.errors import ModelRequestNotSent, ModelResponseNotSaved, is_context_overflow
+from agent.model.errors import ModelInterrupted, ModelRequestNotSent, ModelResponseNotSaved, is_context_overflow
 from agent.model.payload import request_reservation, estimate_input_tokens
 from agent.source.snapshots import SourceSnapshot
 from agent.source.versions import SourceVersions
@@ -122,6 +122,7 @@ class TaskRunner:
         model_started = time.monotonic()
         live = None
         received = False
+        ending = 'unknown'
         if self.event_sink and callable(getattr(type(selected), 'invoke_with_progress', None)):
             from agent.storage.live_reasoning import LiveReasoning
             public = self.state.get('public_events', [])
@@ -132,6 +133,32 @@ class TaskRunner:
             response = (selected.invoke_with_progress(messages, live.append) if live
                         else selected.invoke(messages))
             received = True
+        except ModelInterrupted as exc:
+            if self.preparation and self.preparation.active:
+                self.preparation.active['cancel'].set()
+            if exc.sent:
+                self.budget.settle_request(ticket, None)
+                self.state.setdefault('model_usage', []).append({'call': ticket.call_id, 'purpose': purpose,
+                    'seconds': time.monotonic() - model_started, 'usage': None, 'interrupted': True})
+            else:
+                self.budget.cancel_request(ticket)
+            self.state['request_pending'] = None
+            if purpose == 'compaction':
+                # No summary was committed. Keep the original request view;
+                # an explicit later continuation may start a new summary.
+                self.state['compaction_pending'] = None
+            ending = 'interrupted'
+            record = {'call': ticket.call_id, 'purpose': purpose, 'kind': exc.kind,
+                      'request_sent': exc.sent, 'usage': 'unknown' if exc.sent else 'not_sent',
+                      'partial_output_executable': False}
+            if live:
+                live.finish(ending)
+                record['reasoning_content'] = live.row['detail']
+                live = None
+            save(folder/'interruption.json', record)
+            self.state.setdefault('interrupted_requests', []).append(record)
+            self.persist('model_request_interrupted', record)
+            raise
         except ModelRequestNotSent:
             self.budget.cancel_request(ticket)
             self.state["request_pending"] = None
@@ -149,7 +176,7 @@ class TaskRunner:
             raise
         finally:
             if live and not received:
-                live.finish('unknown')
+                live.finish(ending)
             if self.preparation is not None:
                 self.preparation.note_request(model_started, time.monotonic())
         self.budget.settle_request(ticket, response)
@@ -335,11 +362,24 @@ class TaskRunner:
                 self.advance()
                 if self.yield_boundary:
                     break
+        except ModelInterrupted as exc:
+            self.on_model_interrupted(exc.kind)
         except ModelRequestNotSent as exc:
             self.state.update(status=exc.status, reason=exc.reason)
         except Exception as exc:
             self.state.update(status="runtime_error", reason=f"{type(exc).__name__}: {exc}")
         return self.result()
+
+    def on_model_interrupted(self, kind):
+        self.state['history'].append(message_to_dict(HumanMessage(content=
+            'The user interrupted the previous model request. Its partial reply was not submitted or executed. '
+            'Use completed records and the latest user requirements; do not replay completed operations.')))
+        self.state.pop('dispatch', None)
+        self.state.pop('turn_status', None)
+        self.state.update(status='needs_plan' if kind == 'message' else 'paused',
+                          reason='User interrupted model reply', pause_requested=kind == 'pause')
+        dialogue.apply_controls(self)
+        self.persist('model_wait_interrupted', {'kind': kind})
 
     def advance(self):
         self.budget.check_request(0)
@@ -401,6 +441,7 @@ class TaskRunner:
         report = f"{self.state['status']}: {self.state.get('reason', '')}"
         from agent.storage.usage import summarize
         outcome = {"status": self.state["status"], "stop_reason": self.state.get("reason", ""),
+            'pause_requested': self.state.get('pause_requested', False),
             'usage': summarize(self.state), 'existing_runs': self.state.get('existing_runs', []),
             "messages": [HumanMessage(content=self.state["request"]), AIMessage(content=report)],
             "task_kind": "coding", "workflow": "task", "artifact_dir": str(self.root), "history_dir": str(self.root / "requests"),

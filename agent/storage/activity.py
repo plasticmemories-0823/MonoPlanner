@@ -37,6 +37,13 @@ def projection(root, task, seq, record, db):
             response = checked(root, path, ref[0])
             thought = response['data'].get('additional_kwargs', {}).get('reasoning_content', '')
             row.update(label='思考', status='completed', detail=thought if isinstance(thought, str) else '')
+        elif event == 'model_request_interrupted':
+            path = 'requests/call-%04d/interruption.json' % call
+            ref = db.execute('SELECT sha256 FROM artifacts WHERE path=?', (path,)).fetchone()
+            if not ref:
+                raise ValueError('Interrupted request has no committed original')
+            interrupted = checked(root, path, ref[0])
+            row.update(label='回复已中断', status='interrupted', detail=interrupted.get('reasoning_content', ''))
         elif event != 'model_request_started':
             row.update(label='模型请求未完成', status='unknown')
         return row

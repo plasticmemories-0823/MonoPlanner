@@ -20,6 +20,7 @@ def environment_key(environment):
 
 def code_key(root=None):
     names = (
+        'agent/server/interrupts.py', 'agent/model/streaming.py',
         'agent/task/runner.py', 'agent/task/dialogue.py', 'resources/prompts/conversation.txt', 'agent/task/operations.py',
         'agent/server/graph.py', 'agent/server/app.py', 'langgraph.json',
         'agent/server/runtime.py', 'agent/storage/preferences.py', 'agent/settings.py',

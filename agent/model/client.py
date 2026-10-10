@@ -68,12 +68,43 @@ class ConfiguredModel:
         from langchain_core.messages import message_chunk_to_message
         from agent.model.payload import RAW_TOOL_CALLS
         bound = self.client.bind_tools(list(self.tools), strict=True) if self.tools else self.client
-        complete = None
-        for chunk in bound.stream(messages, stream_usage=True, **self.request_options):
-            thought = chunk.additional_kwargs.get('reasoning_content')
-            if isinstance(thought, str) and thought:
-                on_reasoning(thought)
-            complete = chunk if complete is None else complete + chunk
+        from agent.server.interrupts import current
+        signal = current()
+        if signal:
+            from agent.model.errors import ModelInterrupted
+            from agent.model.streaming import run
+            if signal.kind:
+                raise ModelInterrupted(signal.kind, sent=False)
+
+            async def streamed():
+                import asyncio
+                complete = None
+                stream = bound.astream(messages, stream_usage=True, **self.request_options)
+                try:
+                    async for chunk in stream:
+                        thought = chunk.additional_kwargs.get('reasoning_content')
+                        if isinstance(thought, str) and thought:
+                            # Local display writes run outside the network loop.
+                            # Finish an in-flight write before acknowledging cancel.
+                            update = asyncio.create_task(asyncio.to_thread(on_reasoning, thought))
+                            try:
+                                await asyncio.shield(update)
+                            except asyncio.CancelledError:
+                                await update
+                                raise
+                        complete = chunk if complete is None else complete + chunk
+                finally:
+                    await stream.aclose()
+                return complete
+
+            complete = run(streamed(), signal)
+        else:
+            complete = None
+            for chunk in bound.stream(messages, stream_usage=True, **self.request_options):
+                thought = chunk.additional_kwargs.get('reasoning_content')
+                if isinstance(thought, str) and thought:
+                    on_reasoning(thought)
+                complete = chunk if complete is None else complete + chunk
         if complete is None or not complete.response_metadata.get('finish_reason'):
             raise RuntimeError('Model stream ended without a complete response')
         response = message_chunk_to_message(complete)
