@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import { Brain, Globe, Settings } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../ui/button";
@@ -39,9 +39,13 @@ const defaults = {
 export function ModelSettings({
   apiUrl,
   current,
+  trailingControls,
+  desktopSettings,
 }: {
   apiUrl: string;
   current?: RuntimeSettings;
+  trailingControls?: ReactNode;
+  desktopSettings?: ReactNode;
 }) {
   const [value, setValue] = useState<Preferences>(defaults);
   const [ready, setReady] = useState(false);
@@ -123,7 +127,7 @@ export function ModelSettings({
   return (
     <>
       <div
-        className="flex flex-wrap items-center gap-1 text-xs"
+        className="flex shrink-0 items-center gap-0.5 text-xs whitespace-nowrap"
         data-testid="model-toolbar"
       >
         <label
@@ -179,6 +183,7 @@ export function ModelSettings({
           <Globe className="size-3.5" />
           联网
         </Button>
+        {trailingControls}
         <Button
           type="button"
           variant="ghost"
@@ -248,6 +253,7 @@ export function ModelSettings({
             联网使用同一个 Key。网页搜索会增加 DeepSeek API 调用和 Token
             费用；读取网页不额外调用模型。
           </p>
+          {desktopSettings}
           <div className="flex justify-between gap-3">
             <Button
               type="button"

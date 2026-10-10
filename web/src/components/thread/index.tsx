@@ -37,6 +37,11 @@ import { ActivityRows, useActivity } from "./activity";
 import { ReadSources } from "./read-sources";
 import { ModelSettings } from "./model-settings";
 import {
+  DesktopControls,
+  DesktopCards,
+  DesktopApplicationSettings,
+} from "./desktop-controls";
+import {
   useArtifactOpen,
   ArtifactContent,
   ArtifactTitle,
@@ -342,6 +347,11 @@ export function Thread() {
                       .filter(([anchor]) => !messageIds.has(anchor))
                       .flatMap(([, items]) => items)}
                   />
+                  <DesktopCards
+                    apiUrl={stream.apiUrl}
+                    threadId={threadId}
+                    running={isLoading}
+                  />
                   {activity.error && (
                     <p className="text-muted-foreground text-sm">
                       活动记录暂未显示：{activity.error}
@@ -421,7 +431,7 @@ export function Thread() {
                         className="flex items-end justify-between gap-2 px-3 pb-3"
                         data-testid="composer-toolbar"
                       >
-                        <div className="flex min-w-0 flex-wrap items-center gap-1">
+                        <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto whitespace-nowrap">
                           <Workspace
                             apiUrl={stream.apiUrl}
                             repo={repo}
@@ -438,15 +448,28 @@ export function Thread() {
                               )
                             }
                           />
-                          <ModelSettings
-                            apiUrl={stream.apiUrl}
-                            current={stream.values.runtime_settings}
-                          />
                           <ReadSources
                             apiUrl={stream.apiUrl}
                             roots={readRoots}
                             onChange={setReadRoots}
                             disabled={isLoading}
+                          />
+                          <ModelSettings
+                            apiUrl={stream.apiUrl}
+                            current={stream.values.runtime_settings}
+                            trailingControls={
+                              <DesktopControls
+                                apiUrl={stream.apiUrl}
+                                threadId={threadId}
+                                running={isLoading}
+                              />
+                            }
+                            desktopSettings={
+                              <DesktopApplicationSettings
+                                apiUrl={stream.apiUrl}
+                                threadId={threadId}
+                              />
+                            }
                           />
                         </div>
                         <div className="flex shrink-0 items-center gap-2">

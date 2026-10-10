@@ -126,17 +126,19 @@ export function Workspace({
         type="button"
         variant="ghost"
         size="sm"
-        className="text-muted-foreground h-8 max-w-40 gap-1.5 rounded-full px-2.5 text-xs"
+        className="text-muted-foreground h-8 max-w-32 shrink-0 gap-1 rounded-full px-2 text-xs"
         disabled={disabled}
-        title={repo || (readOnly ? "添加只读资料目录" : "选择工作目录")}
-        aria-label={readOnly ? "添加只读资料目录" : "选择工作目录"}
+        title={repo || (readOnly ? "添加额外可读目录" : "选择工作目录")}
+        aria-label={readOnly ? "添加额外可读目录" : "选择工作目录"}
         onClick={() => {
           setOpen(true);
           void browse(repo);
         }}
       >
         <FolderOpen className="size-4 shrink-0" />
-        <span className="truncate">{name || (readOnly ? "只读资料" : "工作目录")}</span>
+        <span className="truncate">
+          {name || (readOnly ? "额外可读目录" : "工作目录")}
+        </span>
         <ChevronRight className="size-3 shrink-0" />
       </Button>
       <Dialog
@@ -152,10 +154,12 @@ export function Workspace({
         >
           <DialogHeader>
             <DialogTitle className="text-lg font-semibold">
-              {readOnly ? "添加只读资料目录" : "选择工作目录"}
+              {readOnly ? "添加额外可读目录" : "选择工作目录"}
             </DialogTitle>
             <DialogDescription className="text-muted-foreground text-sm">
-              {readOnly ? "仅授权查询资料，不授权运行或修改。发送下一条消息时登记至本对话。" : "打开文件夹后，选择当前目录。普通聊天无需选择。"}
+              {readOnly
+                ? "仅授权查询资料，不授权运行或修改。发送下一条消息时登记至本对话。"
+                : "打开文件夹后，选择当前目录。普通聊天无需选择。"}
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-2">
