@@ -24,6 +24,7 @@ interface ThreadContextType {
   threadsLoading: boolean;
   setThreadsLoading: Dispatch<SetStateAction<boolean>>;
   setVisibility: (thread: string, visibility: Visibility) => Promise<void>;
+  deletePermanently: (thread: string) => Promise<void>;
 }
 
 const ThreadContext = createContext<ThreadContextType | undefined>(undefined);
@@ -75,11 +76,29 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       cache: "no-store",
     });
     if (!response.ok) throw new Error("无法读取对话管理信息");
-    const { visibility } = await response.json();
-    return threads.map((thread) => ({
-      ...thread,
-      visibility: visibility[thread.thread_id] || "active",
-    }));
+    const { visibility, pending_deletions = [] } = await response.json();
+    const savedIds = new Set(threads.map((thread) => thread.thread_id));
+    // A partial cleanup may have removed the SDK thread already. Keep a
+    // minimal trash entry so the user can explicitly retry the cleanup.
+    const pending: Thread[] = pending_deletions
+      .filter((item: { thread_id: string }) => !savedIds.has(item.thread_id))
+      .map((item: { thread_id: string; title: string }) => ({
+        thread_id: item.thread_id,
+        created_at: "",
+        updated_at: "",
+        metadata: {},
+        status: "idle",
+        values: { messages: [{ content: item.title }] },
+      }));
+    return [...threads, ...pending]
+      .filter((thread) => visibility[thread.thread_id] !== "purged")
+      .map((thread) => ({
+        ...thread,
+        visibility:
+          visibility[thread.thread_id] === "purging"
+            ? "deleted"
+            : visibility[thread.thread_id] || "active",
+      }));
   }, [apiUrl, envApiUrl, assistantId, authScheme, envAssistantId]);
 
   const setVisibility = async (thread: string, visibility: Visibility) => {
@@ -100,6 +119,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     );
   };
 
+  const deletePermanently = async (thread: string) => {
+    const response = await fetch(
+      `${resolveApiUrl(apiUrl, envApiUrl)}/threads/${thread}/purge`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm_thread_id: thread }),
+      },
+    );
+    const value = await response.json();
+    if (!response.ok) throw new Error(value.error || "彻底删除未完成");
+    setThreads((old) => old.filter((item) => item.thread_id !== thread));
+  };
+
   const value = {
     getThreads,
     threads,
@@ -107,6 +140,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     threadsLoading,
     setThreadsLoading,
     setVisibility,
+    deletePermanently,
   };
 
   return (

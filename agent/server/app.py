@@ -16,6 +16,9 @@ import asyncio
 import json
 import os
 import sqlite3
+import httpx
+from langgraph_sdk import get_client
+from agent.storage.purge import begin_purge, finish_purge
 from urllib.parse import urlsplit
 
 
@@ -104,8 +107,10 @@ async def activity(request: Request):
 
 
 async def conversations(request: Request):
-    result = await asyncio.to_thread(lambda: ConversationStore(state_root()).visibility())
-    return JSONResponse({'visibility': result},
+    def read():
+        store = ConversationStore(state_root())
+        return {'visibility': store.visibility(), 'pending_deletions': store.pending_deletions()}
+    return JSONResponse(await asyncio.to_thread(read),
                         headers={'Cache-Control': 'no-store'})
 
 
@@ -125,6 +130,47 @@ async def visibility(request: Request):
             request.path_params['thread'], value['visibility'])))
     except (ValueError, TypeError, KeyError) as exc:
         return JSONResponse({'error': str(exc)}, status_code=400)
+
+
+async def purge(request: Request):
+    try:
+        origin = request.headers.get('origin')
+        parsed = urlsplit(origin) if origin else None
+        if parsed and (parsed.scheme != 'http' or parsed.hostname not in {'127.0.0.1', 'localhost', 'monoplanner.localhost'}
+                       or parsed.port != int(os.getenv('MONOPLANER_UI_PORT', '3000'))):
+            return JSONResponse({'error': '仅允许本机前端管理对话'}, status_code=403)
+        if not request.headers.get('content-type', '').startswith('application/json'):
+            return JSONResponse({'error': '请求必须使用 JSON'}, status_code=415)
+        value = await request.json()
+        thread = ConversationStore.thread(request.path_params['thread'])
+        if value != {'confirm_thread_id': thread}:
+            raise ValueError('彻底删除须明确确认当前对话编号。')
+        client = get_client(url=None, api_key=None)
+        try:
+            try:
+                record = await client.threads.get(thread)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                record = None
+            if record and record['status'] == 'busy':
+                raise ValueError('请先暂停任务，并等待当前请求或操作结束。')
+            store = await asyncio.to_thread(lambda: ConversationStore(state_root()))
+            identities = await asyncio.to_thread(begin_purge, store, thread)
+            if record:
+                try:
+                    await client.threads.delete(thread)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 404:
+                        raise
+            result = await asyncio.to_thread(finish_purge, store, thread, identities)
+        finally:
+            await client.aclose()
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except (ValueError, TypeError, KeyError) as exc:
+        return JSONResponse({'error': str(exc)}, status_code=400)
+    except (httpx.HTTPError, OSError, sqlite3.Error):
+        return JSONResponse({'error': '彻底删除尚未完成，请检查服务后重试；不会自动重复操作。'}, status_code=503)
 
 
 async def settings(request: Request):
@@ -158,5 +204,6 @@ app = Starlette(routes=[Route('/service', service, methods=['GET']),
                        Route('/settings/api-key', settings, methods=['DELETE']),
                        Route('/conversations', conversations, methods=['GET']),
                        Route('/threads/{thread}/visibility', visibility, methods=['POST']),
+                       Route('/threads/{thread}/purge', purge, methods=['POST']),
                        Route('/threads/{thread}/control', controls, methods=['GET', 'POST']),
                        Route('/threads/{thread}/activity', activity, methods=['GET'])])

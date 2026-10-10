@@ -13,9 +13,19 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { MoreHorizontal, PanelLeftClose } from "lucide-react";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { toast } from "sonner";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 
 function HistoryList({ close }: { close?: () => void }) {
-  const { threads, threadsLoading, setVisibility } = useThreads();
+  const { threads, threadsLoading, setVisibility, deletePermanently } =
+    useThreads();
+  const [confirmDelete, setConfirmDelete] = useState<ManagedThread>();
+  const [deleting, setDeleting] = useState(false);
   const [threadId, setThreadId] = useQueryState("threadId");
   const [view, setView] = useState<Visibility>("active");
   const [menu, setMenu] = useState<{
@@ -64,6 +74,20 @@ function HistoryList({ close }: { close?: () => void }) {
       x: Math.max(8, Math.min(x, window.innerWidth - 192)),
       y: Math.max(8, Math.min(y, window.innerHeight - 110)),
     });
+  const remove = async () => {
+    if (!confirmDelete || deleting) return;
+    setDeleting(true);
+    try {
+      await deletePermanently(confirmDelete.thread_id);
+      if (threadId === confirmDelete.thread_id) setThreadId(null);
+      setConfirmDelete(undefined);
+      toast.success("对话已彻底删除，无法恢复");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "彻底删除未完成");
+    } finally {
+      setDeleting(false);
+    }
+  };
   const visible = threads.filter((thread) => thread.visibility === view);
   return (
     <>
@@ -217,8 +241,52 @@ function HistoryList({ close }: { close?: () => void }) {
               删除（可恢复）
             </Button>
           )}
+          {menu.thread.visibility === "deleted" && (
+            <Button
+              role="menuitem"
+              variant="ghost"
+              className="text-destructive w-full justify-start"
+              onClick={() => {
+                setConfirmDelete(menu.thread);
+                setMenu(undefined);
+              }}
+            >
+              彻底删除
+            </Button>
+          )}
         </div>
       )}
+      <Dialog
+        open={!!confirmDelete}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setConfirmDelete(undefined);
+        }}
+      >
+        <DialogContent closeLabel="关闭删除确认">
+          <DialogHeader>
+            <DialogTitle>彻底删除这条对话？</DialogTitle>
+            <DialogDescription>
+              对话消息、思考内容和关联任务记录将被删除，无法恢复。工作仓库中的文件和独立评测记录会保留。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              disabled={deleting}
+              onClick={() => setConfirmDelete(undefined)}
+            >
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleting}
+              onClick={remove}
+            >
+              {deleting ? "正在删除…" : "彻底删除"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

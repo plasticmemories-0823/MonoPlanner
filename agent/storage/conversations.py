@@ -61,6 +61,8 @@ class ConversationStore:
 
     def save_session(self, thread, value):
         with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.require_available(db, self.thread(thread))
             db.execute('INSERT INTO sessions VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET data=excluded.data',
                        (self.thread(thread), json.dumps(value, ensure_ascii=False)))
 
@@ -71,6 +73,8 @@ class ConversationStore:
         if not isinstance(text, str) or (kind == 'message' and not text.strip()):
             raise ValueError('A message requires non-empty text')
         with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.require_available(db, thread)
             old = db.execute('SELECT * FROM inputs WHERE thread=? AND id=?', (thread, identity)).fetchone()
             if old and (old['kind'], old['text']) != (kind, text):
                 raise ValueError('Message ID was already used for different content')
@@ -92,11 +96,31 @@ class ConversationStore:
         with self.connection() as db:
             return {r['thread']: r['visibility'] for r in db.execute('SELECT * FROM presentation')}
 
+    def pending_deletions(self):
+        with self.connection() as db:
+            rows = db.execute('SELECT thread,data FROM sessions JOIN presentation USING(thread) '
+                              'WHERE visibility=?', ('purging',))
+            result = []
+            for row in rows:
+                session = json.loads(row['data'])
+                messages = session.get('public_messages', [])
+                title = messages[0]['data']['content'] if messages else session.get('request', '删除未完成的对话')
+                result.append({'thread_id': row['thread'], 'title': title[:200] if isinstance(title, str) else '删除未完成的对话'})
+            return result
+
+    @staticmethod
+    def require_available(db, thread):
+        row = db.execute('SELECT visibility FROM presentation WHERE thread=?', (thread,)).fetchone()
+        if row and row['visibility'] in {'purging', 'purged'}:
+            raise ValueError('这条对话正在彻底删除或已删除，请新建对话。')
+
     def set_visibility(self, thread, visibility):
         thread = self.thread(thread)
         if visibility not in {'active', 'archived', 'deleted'}:
             raise ValueError('visibility must be active, archived or deleted')
         with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.require_available(db, thread)
             row = db.execute('SELECT data FROM sessions WHERE thread=?', (thread,)).fetchone()
             session = json.loads(row['data']) if row else {}
             pending = db.execute('SELECT 1 FROM inputs WHERE thread=? AND applied=0 LIMIT 1', (thread,)).fetchone()
