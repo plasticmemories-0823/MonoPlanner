@@ -21,6 +21,7 @@ from agent.server.runtime import ConversationRunner
 from agent.storage.preferences import Preferences, state_root
 from agent.execution.assistant_files import authorized_roots
 from agent.storage.permissions import Permissions
+from agent.storage.read_sources import ReadSources
 from agent.storage.records import save
 from agent.storage.usage import summarize
 from agent.server import interrupts
@@ -47,6 +48,7 @@ class ConversationState(TypedDict, total=False):
     turn_status: str
     workspace_bound: bool
     read_roots: list[str]
+    read_sources: list[dict]
 
 
 def model_factory(settings=None):
@@ -96,9 +98,11 @@ def intake(state: ConversationState, config: RunnableConfig):
     selected = state.get('repo') or (session or {}).get('repo', '')
     repo = str(Path(selected).expanduser().resolve()) if selected else ''
     roots = authorized_roots(state.get('read_roots', (session or {}).get('read_roots', [])))
+    sources = ReadSources(state_root()).get(thread, roots)
+    roots = [s['path'] for s in sources if s['kind'] == 'directory']
     # A fresh graph may contain only the new input. Appending the recovered
     # list would leave that input before the older messages in the reducer.
-    presentation = {'messages': Overwrite(public), 'repo': repo, 'read_roots': roots}
+    presentation = {'messages': Overwrite(public), 'repo': repo, 'read_roots': roots, 'read_sources': sources}
     record = store.enqueue(thread, latest.id, 'message', latest.text)
     if session and record['applied']:
         can_resume = session['status'] in {'paused', 'awaiting_user'} and bool(store.pending(thread))
@@ -106,7 +110,7 @@ def intake(state: ConversationState, config: RunnableConfig):
     if session and not finished(session, store):
         if session['repo'] != repo:
             raise ValueError('Open a new conversation to change the active workspace')
-        session.update(last_input=latest.id, read_roots=roots)
+        session.update(last_input=latest.id, read_roots=roots, read_sources=sources)
     else:
         store.acknowledge(thread, [record['id']])
         previous = (session or {}).get('activity_tasks', [])
@@ -117,6 +121,7 @@ def intake(state: ConversationState, config: RunnableConfig):
                    'last_input': latest.id, 'public_messages': messages_to_dict(public)}
         session['runtime_settings'] = Preferences().defaults()
         session['read_roots'] = roots
+        session['read_sources'] = sources
         session['activity_tasks'] = previous + [{'id': session['task_id'], 'input_id': latest.id}]
     store.save_session(thread, session)
     return {**presentation, 'task_id': session['task_id'], 'status': 'needs_plan',
@@ -133,8 +138,11 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
     runner = None
     try:
         permission = Permissions(state_root()).boundary(thread)
+        session['read_sources'] = ReadSources(state_root()).get(thread, session.get('read_roots', []))
+        session['read_roots'] = [s['path'] for s in session['read_sources'] if s['kind'] == 'directory']
         runner = ConversationRunner(LazyModel(session['runtime_settings']), session['repo'], phase=phase,
                         read_roots=session.get('read_roots', []),
+                        read_sources=session['read_sources'],
                         access_mode=permission['effective'],
                         conversation_id=thread,
                         state_dir=task_dir, interactive=True,
@@ -170,6 +178,8 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
         status = 'needs_plan'
     if status not in ACTIVE and status != 'chat_complete' and result.get('turn_status') != 'chat_complete':
         text = ('实际验收通过。' if status == 'verified_success' else
+                '操作等待你的批准，可以在操作卡中批准或拒绝。' if status == 'awaiting_user'
+                    and 'awaiting_approval' in runner_state.get('desktop_approvals', {}).values() else
                 '任务未能启动，已保存错误记录。请检查运行环境后重新提交。' if session.get('initialization_failed') else
                 '请先在设置中配置可用的 DeepSeek API Key，然后重新发送消息。' if status == 'settings_required' else
                 '已暂停，可以补充要求或继续。' if status in {'paused', 'awaiting_user'} else
@@ -184,7 +194,7 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
     return {'messages': updates, 'status': status, 'result': public_result(result),
             'dispatch': result.get('dispatch'), 'turn_status': result.get('turn_status'),
             'runtime_settings': session['runtime_settings'], 'workspace_bound': session['workspace_bound'],
-            'read_roots': session.get('read_roots', [])}
+            'read_roots': session.get('read_roots', []), 'read_sources': session.get('read_sources', [])}
 
 
 def route(state):

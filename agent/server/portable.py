@@ -1,7 +1,6 @@
 """Start the bundled server with all mutable storage outside the application."""
 import json
 import os
-from pathlib import Path
 import sys
 
 from agent.settings import PROJECT_ROOT

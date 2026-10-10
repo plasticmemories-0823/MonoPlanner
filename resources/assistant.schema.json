@@ -133,5 +133,36 @@
     "required": [
       "application_id"
     ]
+  },
+  "request_file_operation": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "operation": {
+        "type": "string",
+        "enum": [
+          "create",
+          "replace",
+          "copy",
+          "move",
+          "delete"
+        ]
+      },
+      "path": {
+        "type": "string"
+      },
+      "destination": {
+        "type": "string"
+      },
+      "content": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "operation",
+      "path",
+      "destination",
+      "content"
+    ]
   }
 }

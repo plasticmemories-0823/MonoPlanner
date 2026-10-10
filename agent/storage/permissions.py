@@ -16,8 +16,8 @@ class Permissions:
         return dict(row) if row else {'requested': 'sandbox', 'effective': 'sandbox'}
 
     def request(self, thread, mode):
-        if mode not in {'sandbox', 'full'}:
-            raise ValueError('请选择 sandbox 或 full')
+        if mode not in {'sandbox', 'ask', 'full'}:
+            raise ValueError('请选择 sandbox、ask 或 full')
         thread = self.store.thread(thread)
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')

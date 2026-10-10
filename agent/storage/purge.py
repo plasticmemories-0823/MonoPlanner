@@ -71,6 +71,9 @@ def begin_purge(store, thread):
         row = db.execute('SELECT data FROM sessions WHERE thread=?', (thread,)).fetchone()
         session = json.loads(row['data']) if row else {}
         pending = db.execute('SELECT 1 FROM inputs WHERE thread=? AND applied=0 LIMIT 1', (thread,)).fetchone()
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='desktop_requests'").fetchone():
+            if db.execute("SELECT 1 FROM desktop_requests WHERE thread=? AND status IN ('executing','launching','unknown')", (thread,)).fetchone():
+                raise ValueError('外部操作仍在执行或结果不明，请先核对记录。')
         if session.get('status') in {'needs_plan', 'executing'} or pending:
             raise ValueError('请先暂停任务，并等待当前请求或操作结束。')
         identities = task_ids(session)
@@ -103,7 +106,18 @@ def finish_purge(store, thread, identities):
                     if path.parent != preview_root or _link(path) or _link(preview_root):
                         raise ValueError('预览路径超出保存范围，未进行删除。')
                     path.unlink(missing_ok=True)
-        for table in ('desktop_requests', 'desktop_files', 'permissions'):
+            backup_root = store.path.parent/'file-operation-backups'
+            folder = backup_root/thread
+            if folder.exists():
+                if _link(backup_root) or _link(folder) or folder.resolve().parent != backup_root.resolve():
+                    raise ValueError('恢复副本路径超出保存范围，未进行删除。')
+                files = list(folder.iterdir())
+                if any(_link(path) or not path.is_file() for path in files):
+                    raise ValueError('恢复副本含异常路径，未进行删除。')
+                for path in files:
+                    path.unlink()
+                folder.rmdir()
+        for table in ('desktop_requests', 'desktop_files', 'permissions', 'read_sources'):
             if table in tables:
                 db.execute('DELETE FROM '+table+' WHERE thread=?', (thread,))
         for path in paths:

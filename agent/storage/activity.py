@@ -125,7 +125,7 @@ def projection(root, task, seq, record, db):
 
 def read_activity(root, tasks, cursors, page_size=100):
     """No task lease, checkpoint writes, model calls or execution are performed."""
-    rows, positions, more, usage, live = [], dict(cursors), False, {}, []
+    rows, positions, more, usage, live, warnings = [], dict(cursors), False, {}, [], []
     for task in tasks:
         identity = task['id']
         if not re.fullmatch(r'[a-f0-9]{32}', identity):
@@ -150,18 +150,19 @@ def read_activity(root, tasks, cursors, page_size=100):
                 if row:
                     rows.append(row)
                 positions[identity] = seq
-        display = folder/'display/model.json'
-        if display.exists():
-            row = json.loads(_safe_file(folder, Path('display/model.json')).read_text(encoding='utf-8'))
-            if row['task_id'] != identity or row['kind'] != 'thinking':
-                raise ValueError('Invalid live activity identity')
+        from agent.storage.live_reasoning import read_live
+        live_key, version_key = identity + '-live', identity + '-live-version'
+        previous, version = cursors.get(live_key, 0), cursors.get(version_key, 0)
+        if any(type(v) is not int or v < 0 for v in (previous, version)):
+            raise ValueError('Invalid live activity cursor')
+        fragments, position, version, pending, display_error = read_live(folder, previous, version)
+        for row in fragments:
             if not row['after_id']:
                 row['after_id'] = task['input_id']
-            live_key = identity + '-live'
-            previous = cursors.get(live_key, 0)
-            if type(previous) is not int or previous < 0:
-                raise ValueError('Invalid live activity cursor')
-            if row['version'] > previous:
-                live.append(row)
-                positions[live_key] = row['version']
-    return {'items': rows, 'live': live, 'cursors': positions, 'more': more, 'usage': usage}
+        live.extend(fragments)
+        positions.update({live_key: position, version_key: version})
+        more |= pending
+        if display_error:
+            warnings.append(display_error)
+    return {'items': rows, 'live': live, 'cursors': positions, 'more': more, 'usage': usage,
+            'display_warning': '; '.join(dict.fromkeys(warnings))}

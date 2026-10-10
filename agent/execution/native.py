@@ -3,13 +3,11 @@
 The host owns records, approval and publication. No model program receives host
 credentials or write access to the real checkout. Full access is an explicit mode.
 """
-import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import time
 import uuid
 
@@ -95,16 +93,18 @@ def copy_dependencies(source, destination):
 
 class NativeEnvironment(LocalEnvironment):
     def __init__(self, repo_root, timeout=120, artifact_root=None, *, access_mode='sandbox',
-                 read_roots=(), read_only=False):
+                 read_roots=(), read_sources=(), read_only=False):
         super().__init__(repo_root, timeout, artifact_root)
-        if access_mode not in {'sandbox', 'full'}:
-            raise ValueError('权限必须为 sandbox 或 full')
+        if access_mode not in {'sandbox', 'ask', 'full'}:
+            raise ValueError('权限必须为 sandbox、ask 或 full')
         if self.artifact_root.resolve().is_relative_to(self.repo_root):
             raise ValueError('隔离运行记录必须位于工作目录之外')
         self.access_mode, self.read_roots, self.read_only = access_mode, list(read_roots), read_only
+        from agent.execution.assistant_files import authorized_sources
+        self.read_sources = authorized_sources(list(read_sources))
         from agent.storage.preferences import state_root
-        for root in self.read_roots:
-            directory = Path(root).resolve()
+        for item in [*self.read_sources, *({'path': p, 'kind': 'directory'} for p in self.read_roots)]:
+            directory = Path(item['path']).resolve()
             if any(protected.resolve().is_relative_to(directory) for protected in (state_root(), PROJECT_ROOT)):
                 raise ValueError('只读授权包含助手私有目录，请选择更具体的资料目录')
         self.helper = PROJECT_ROOT/'launcher/runtime/MonoPlanner.Sandbox.exe'
@@ -150,9 +150,12 @@ class NativeEnvironment(LocalEnvironment):
                 continue
             if candidate.is_relative_to(self.repo_root):
                 replacement = source/candidate.relative_to(self.repo_root)
-            elif any(candidate.is_relative_to(Path(root)) for root in self.read_roots):
-                root = next(Path(root) for root in self.read_roots if candidate.is_relative_to(Path(root)))
-                replacement = self.material_paths[str(root)] / candidate.relative_to(root)
+            elif any(candidate == Path(root) or (Path(root).is_dir() and candidate.is_relative_to(Path(root)))
+                     for root in self.material_paths):
+                root = next(Path(root) for root in self.material_paths if candidate == Path(root)
+                            or (Path(root).is_dir() and candidate.is_relative_to(Path(root))))
+                replacement = (self.material_paths[str(root)] / candidate.relative_to(root)
+                               if root.is_dir() else self.material_paths[str(root)])
             elif candidate.is_relative_to(Path(box).parent) or candidate.is_relative_to(self.artifact_root) or candidate.is_relative_to(outputs.parent.parent):
                 replacement = outputs/('%02d-' % index + candidate.name)
                 if candidate.is_file():
@@ -248,6 +251,17 @@ class NativeEnvironment(LocalEnvironment):
         for index, root in enumerate(self.read_roots):
             copy = SourceSnapshot.capture(root, box/'materials'/str(index))
             self.material_paths[str(Path(root))] = copy.root
+        for index, item in enumerate(self.read_sources, len(self.read_roots)):
+            source_path = Path(item['path'])
+            if item['kind'] == 'directory':
+                copied = SourceSnapshot.capture(source_path, box/'materials'/str(index)).root
+            else:
+                from agent.execution.assistant_files import authorized_sources
+                authorized_sources([item])
+                copied = box/'materials'/str(index)/source_path.name
+                copied.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, copied)
+            self.material_paths[str(source_path)] = copied
         readable = [str(self.runtime), str(inputs), *map(str, self.material_paths.values())]
         modules = self.repo_root/'node_modules'
         if modules.is_dir():

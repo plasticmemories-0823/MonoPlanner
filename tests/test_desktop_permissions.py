@@ -60,18 +60,11 @@ class DesktopPermissionsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.preview(self.thread, str(other), '', [])
 
-    def test_cancelled_application_picker_does_not_register_or_start_application(self):
-        from types import SimpleNamespace
-        before = self.store.applications()
-        with patch('agent.server.desktop.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='')):
-            with patch('agent.execution.desktop.subprocess.Popen') as start:
-                with TestClient(Starlette(routes=routes)) as client:
-                    result = client.post(f'/threads/{self.thread}/choose-application', json={},
-                                        headers={'Origin': 'http://127.0.0.1:3000'})
-                start.assert_not_called()
-        self.assertEqual(result.json(), {'path': ''})
-        self.assertEqual(self.store.applications(), before)
-        self.assertIsNone(self.store.store.session(self.thread))
+    def test_removed_registration_endpoint_does_not_start_application(self):
+        with TestClient(Starlette(routes=routes)) as client, patch('agent.execution.desktop.subprocess.Popen') as start:
+            self.assertEqual(client.post(f'/threads/{self.thread}/choose-application', json={},
+                headers={'Origin': 'http://127.0.0.1:3000'}).status_code, 404)
+            start.assert_not_called()
 
     def test_preview_is_saved_original_and_contains_no_implicit_model_input(self):
         result = self.store.preview(self.thread, str(self.file), str(self.repo), [])
@@ -97,22 +90,27 @@ class DesktopPermissionsTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'nt', 'Registered Windows applications')
     def test_single_open_is_consumed_and_does_not_change_permissions(self):
+        permission = Permissions(self.root/'state')
+        permission.request(self.thread, 'ask'); permission.boundary(self.thread)
         app = next(a for a in applications() if a['name'] == '记事本')
         record = self.store.request_open(self.thread, app['id'], self.file)
-        with patch('agent.execution.desktop.subprocess.Popen') as start:
-            start.return_value.pid = 123
+        with patch('agent.execution.applications.start') as start:
+            start.return_value = 123
             self.store.approve(self.thread, record['id'], record['target'])
             DesktopStore(self.root/'state').approve(self.thread, record['id'], record['target'])
             self.assertEqual(start.call_count, 1)
-            self.assertEqual(start.call_args.args[0], [app['path'], str(self.file)])
-        self.assertEqual(Permissions(self.root/'state').get(self.thread)['effective'], 'sandbox')
+            self.assertEqual(start.call_args.args[0]['id'], app['id'])
+            self.assertEqual(start.call_args.args[1], str(self.file))
+        self.assertEqual(Permissions(self.root/'state').get(self.thread)['effective'], 'ask')
 
     @unittest.skipUnless(os.name == 'nt', 'Registered Windows applications')
     def test_changed_target_and_scripts_cannot_be_opened(self):
+        permission = Permissions(self.root/'state')
+        permission.request(self.thread, 'ask'); permission.boundary(self.thread)
         app = next(a for a in applications() if a['name'] == '记事本')
         record = self.store.request_open(self.thread, app['id'], self.file)
         self.file.write_text('changed')
-        with patch('agent.execution.desktop.subprocess.Popen') as start:
+        with patch('agent.execution.applications.start') as start:
             with self.assertRaisesRegex(ValueError, '文件已变化'):
                 self.store.approve(self.thread, record['id'], record['target'])
             start.assert_not_called()
@@ -135,6 +133,8 @@ class DesktopPermissionsTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'nt', 'Registered Windows applications')
     def test_unfinished_launch_is_not_replayed(self):
+        permission = Permissions(self.root/'state')
+        permission.request(self.thread, 'ask'); permission.boundary(self.thread)
         app = next(a for a in applications() if a['name'] == '记事本')
         record = self.store.request_open(self.thread, app['id'])
         with self.store.store.connection() as db:
@@ -143,11 +143,10 @@ class DesktopPermissionsTests(unittest.TestCase):
             self.assertEqual(self.store.approve(self.thread, record['id'], record['target'])['status'], 'launching')
             start.assert_not_called()
 
-    def test_selected_application_is_registered_without_launching(self):
-        app = next(a for a in applications() if a['name'] == '记事本')
+    def test_installed_applications_are_discovered_without_launching(self):
         with patch('agent.execution.desktop.subprocess.Popen') as start:
-            saved = self.store.register_application(app['path'])
-            self.assertIn(saved, DesktopStore(self.root/'state').applications())
+            found = self.store.applications()
+            self.assertTrue(any(a['name'] == '记事本' for a in found))
             start.assert_not_called()
 
     def test_purge_removes_permissions_and_preview_but_not_original_file(self):

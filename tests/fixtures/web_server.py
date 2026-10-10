@@ -1,5 +1,6 @@
 """Offline browser fixture, loaded only by a separate test server config."""
 import json
+import os
 import time
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from agent.task.contracts import WorkRequest
@@ -14,7 +15,7 @@ class OfflineModel:
     def invoke_with_progress(self, messages, on_reasoning):
         for text in ('正在确认本轮要求。', '继续核对可用材料。', '随后给出公开回复。'):
             on_reasoning(text)
-            time.sleep(1 if '流式' in messages[-1].text else .3)
+            time.sleep(3 if '流式' in messages[-1].text else .3)
         response = self.invoke(messages)
         response.additional_kwargs['reasoning_content'] = '正在确认本轮要求。继续核对可用材料。随后给出公开回复。'
         return response
@@ -42,6 +43,9 @@ class OfflineModel:
             pass
         if '慢速' in request:
             time.sleep(25)
+        if '操作批准样本' in request:
+            return self.web('request_file_operation', operation='create',
+                            path=os.environ['MONOPLANER_BROWSER_FILE'], destination='', content='离线批准样本')
         if '联网' in request:
             return self.web('web_search', query='离线界面验证')
         if '运行样本' in request:

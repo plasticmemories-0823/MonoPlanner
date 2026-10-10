@@ -36,7 +36,7 @@ import { useRunControls, statusLabel } from "./run-controls";
 import { ActivityRows, useActivity } from "./activity";
 import { ReadSources } from "./read-sources";
 import { ModelSettings } from "./model-settings";
-import { DesktopCards, DesktopActions } from "./desktop-controls";
+import { DesktopCards } from "./desktop-controls";
 import { ExecutionPermissions } from "./execution-permissions";
 import {
   useArtifactOpen,
@@ -110,26 +110,6 @@ export function Thread() {
   const messages = mergePublicMessages(stream.messages, pendingMessages);
   const isLoading = stream.isLoading;
   const activity = useActivity(stream.apiUrl, threadId, isLoading);
-  const [readRoots, setReadRoots] = useState<string[]>([]);
-  const savedReadRoots = JSON.stringify(stream.values.read_roots || []);
-  const readRootsView = useRef({ threadId, saved: "" });
-  useEffect(() => {
-    // Creating an empty conversation for settings keeps unsent directory choices.
-    const previous = readRootsView.current;
-    const changed =
-      previous.threadId !== threadId || previous.saved !== savedReadRoots;
-    if (
-      changed &&
-      !(
-        previous.threadId === null &&
-        threadId &&
-        stream.preparingThread &&
-        savedReadRoots === "[]"
-      )
-    )
-      setReadRoots(JSON.parse(savedReadRoots));
-    readRootsView.current = { threadId, saved: savedReadRoots };
-  }, [threadId, savedReadRoots, stream.preparingThread]);
   const messageIds = new Set(messages.map((message) => message.id));
   const anchors = activityAnchors(messages);
   const groupedActivity = new Map<string, typeof activity.items>();
@@ -221,7 +201,6 @@ export function Thread() {
         messages: [...toolMessages, newHumanMessage],
         context,
         repo: repo.trim(),
-        read_roots: readRoots,
       },
       {
         streamMode: ["values", "custom"],
@@ -364,7 +343,8 @@ export function Thread() {
                   />
                   {activity.error && (
                     <p className="text-muted-foreground text-sm">
-                      活动记录暂未显示：{activity.error}
+                      {activity.error}
+                      <button type="button" className="ml-2 underline" onClick={activity.reconnect}>重新连接</button>
                     </p>
                   )}
                   {/* Special rendering case where there are no AI/tool messages, but there is an interrupt.
@@ -473,14 +453,11 @@ export function Thread() {
                               <>
                                 <ReadSources
                                   apiUrl={stream.apiUrl}
-                                  roots={readRoots}
-                                  onChange={setReadRoots}
+                                  threadId={threadId}
+                                  ensureThread={stream.ensureThread}
                                   disabled={isLoading}
                                 />
-                                <DesktopActions
-                                  apiUrl={stream.apiUrl}
-                                  ensureThread={stream.ensureThread}
-                                />
+
                               </>
                             }
                           />

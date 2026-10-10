@@ -12,10 +12,10 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 
-type Mode = "sandbox" | "full";
+type Mode = "sandbox" | "ask" | "full";
 type Permission = { requested: Mode; effective: Mode };
 const sandbox: Permission = { requested: "sandbox", effective: "sandbox" };
-const name = (mode: Mode) => (mode === "full" ? "完全访问" : "沙盒");
+const name = (mode: Mode) => ({ sandbox: "沙盒权限", ask: "风险询问", full: "完全权限" })[mode];
 
 export function ExecutionPermissions({
   apiUrl,
@@ -173,7 +173,7 @@ export function ExecutionPermissions({
             )}
           </div>
           <div className="grid gap-2">
-            {(["sandbox", "full"] as const).map((mode) => (
+            {(["sandbox", "ask", "full"] as const).map((mode) => (
               <Button
                 key={mode}
                 type="button"
@@ -193,8 +193,8 @@ export function ExecutionPermissions({
                   <span className="block font-medium">{name(mode)}</span>
                   <span className="text-muted-foreground mt-1 block text-xs leading-5 font-normal">
                     {mode === "sandbox"
-                      ? "使用隔离工作副本，限制目录外写入和执行程序联网。"
-                      : "使用当前 Windows 用户权限，可读写目录外文件及访问网络。"}
+                      ? "执行留在沙盒，允许受控预览；不启动外部软件，不写入目录外文件。"
+                      : mode === "ask" ? "执行仍留在沙盒；外部打开及明确的目录外文件操作须逐次批准。" : "使用当前 Windows 用户权限，不逐次确认；不会申请管理员权限。"}
                   </span>
                 </span>
                 {permission.requested === mode && (
@@ -206,7 +206,7 @@ export function ExecutionPermissions({
           {confirmFull && (
             <div className="space-y-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
               <p>
-                完全访问不提供目录隔离，也不会申请管理员权限。确认后，此对话持续使用该选择，直到你手动切回沙盒。
+                完全权限不提供目录隔离，也不会申请管理员权限。确认后，此对话持续使用该选择，直到你手动切回沙盒。
               </p>
               <div className="flex justify-end gap-2">
                 <Button
@@ -222,7 +222,7 @@ export function ExecutionPermissions({
                   disabled={busy}
                   onClick={() => void change("full")}
                 >
-                  确认开启完全访问
+                  确认开启完全权限
                 </Button>
               </div>
             </div>

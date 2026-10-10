@@ -47,7 +47,7 @@ def copy_tree(source, destination):
 def copy_launcher_inputs(destination):
     """Recovery reads these sources even when execution uses the compiled helper."""
     (destination/'launcher').mkdir(parents=True, exist_ok=True)
-    for name in ('Sandbox.cs', 'Sandbox.exe.config'):
+    for name in ('Sandbox.cs', 'Sandbox.exe.config', 'Applications.cs', 'FilePicker.cs'):
         shutil.copy2(ROOT/'launcher'/name, destination/'launcher'/name)
 
 
@@ -68,7 +68,7 @@ def build(destination, make_zip=True):
     runtime = ROOT/'launcher/runtime'
     shutil.copy2(ROOT/'resources/drivers/sitecustomize.py', runtime/'python/Lib/site-packages/sitecustomize.py')
     required = ('python/python.exe', 'node/node.exe', 'git/cmd/git.exe', 'MonoPlanner.Sandbox.exe',
-                'MonoPlanner.FilePicker.exe', 'WebView2Loader.dll')
+                'MonoPlanner.FilePicker.exe', 'MonoPlanner.Applications.exe', 'WebView2Loader.dll')
     if any(not (runtime/name).is_file() for name in required):
         raise ValueError('Prepare all fixed runtimes before packaging; no first-run installation')
     copy_tree(runtime, destination/'launcher/runtime')
@@ -114,7 +114,7 @@ def build(destination, make_zip=True):
     def shipped(path):
         name = path.relative_to(destination).as_posix()
         runtime_entries = {'python', 'node', 'git', 'webview', 'MonoPlanner.Sandbox.exe',
-                           'MonoPlanner.Sandbox.exe.config', 'MonoPlanner.FilePicker.exe', 'WebView2Loader.dll',
+                           'MonoPlanner.Sandbox.exe.config', 'MonoPlanner.FilePicker.exe', 'MonoPlanner.Applications.exe', 'WebView2Loader.dll',
                            'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll', 'LICENSE.txt', 'version.txt'}
         if name.startswith('launcher/runtime/') and path.relative_to(destination).parts[2] not in runtime_entries:
             return False

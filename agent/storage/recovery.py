@@ -30,6 +30,8 @@ def code_key(root=None):
         'agent/execution/process.py', 'resources/assistant.schema.json', 'agent/storage/usage.py',
         'agent/execution/native.py', 'launcher/Sandbox.cs', 'agent/storage/permissions.py',
         'agent/execution/desktop.py', 'agent/server/desktop.py',
+        'agent/execution/applications.py', 'launcher/Applications.cs', 'launcher/FilePicker.cs',
+        'agent/execution/file_actions.py', 'agent/storage/read_sources.py',
         'agent/server/portable.py', 'launcher/Sandbox.exe.config',
         'resources/drivers/sitecustomize.py',
         'agent/source/syntax.py', 'agent/source/excerpts.py', 'agent/acceptance/results.py', 'agent/execution/executor.py',

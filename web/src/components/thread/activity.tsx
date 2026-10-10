@@ -2,6 +2,7 @@
 
 import { memo, useEffect, useRef, useState } from "react";
 import { combineUsage, type ActivityUsage } from "@/lib/activity-usage";
+import { mergeActivity } from "@/lib/activity-fragments";
 import {
   Brain,
   Check,
@@ -24,6 +25,8 @@ export type Activity = {
   seconds?: number;
   exit_code?: number;
   child_usage?: { status: string; total_tokens?: number; source?: string };
+  append?: boolean;
+  version?: number;
 };
 
 type Usage = ReturnType<typeof combineUsage>;
@@ -37,6 +40,7 @@ export function useActivity(
   const [items, setItems] = useState<Activity[]>([]);
   const [error, setError] = useState("");
   const [usage, setUsage] = useState<Usage | null>(null);
+  const [retry, setRetry] = useState(0);
   const archive = useRef({
     thread: threadId,
     api: apiUrl,
@@ -81,10 +85,9 @@ export function useActivity(
           ...(result.live || []),
         ] as Activity[]) {
           const previous = archive.current.rows.get(row.id);
-          if (previous?.status === "completed" && row.status === "running")
-            continue;
-          if (JSON.stringify(previous) !== JSON.stringify(row)) {
-            archive.current.rows.set(row.id, row);
+          const merged = mergeActivity(previous, row);
+          if (merged !== previous) {
+            archive.current.rows.set(row.id, merged);
             changed = true;
           }
         }
@@ -96,7 +99,7 @@ export function useActivity(
             : totals,
         );
         if (changed) setItems([...archive.current.rows.values()]);
-        setError("");
+        setError(result.display_warning || "");
         if (result.more || running)
           timer = setTimeout(poll, result.more ? 20 : 400);
       } catch (e) {
@@ -110,8 +113,8 @@ export function useActivity(
       controller.abort();
       clearTimeout(timer);
     };
-  }, [apiUrl, threadId, running]);
-  return { items, error, usage };
+  }, [apiUrl, threadId, running, retry]);
+  return { items, error, usage, reconnect: () => { archive.current.cursors = {}; setRetry(v => v + 1); } };
 }
 
 const ActivityRow = memo(function ActivityRow({ row }: { row: Activity }) {

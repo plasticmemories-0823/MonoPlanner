@@ -11,7 +11,7 @@ from agent.model.tools import ASSISTANT_SCHEMA
 from agent.storage.records import save
 
 READ_NAMES = {'list_files', 'read_file', 'search_files', 'list_applications'}
-OPEN_NAMES = {'open_file', 'launch_application'}
+OPEN_NAMES = {'open_file', 'launch_application', 'request_file_operation'}
 ASSISTANT_NAMES = {*READ_NAMES, *OPEN_NAMES, 'run_existing'}
 
 
@@ -31,6 +31,8 @@ def validate(name, args):
             continue
         if type(value) is not types[field['type']] or (field['type'] == 'array' and any(type(v) is not str for v in value)):
             errors.append(f'{key}: 实际值 {str(value)[:100]!r}；要求 {field["type"]}')
+        if field.get('enum') and value not in field['enum']:
+            errors.append(f'{key}: 实际值 {value!r}；要求 {field["enum"]}')
     for key, minimum, maximum in (('offset', 0, None), ('limit', 1, 200 if name == 'list_files' else 50 if name == 'search_files' else 1000), ('timeout', 1, None)):
         if type(args.get(key)) is int and (args[key] < minimum or (maximum and args[key] > maximum)):
             errors.append(f'{key}: 实际值 {args[key]}；要求 {minimum}..{maximum or "任务剩余时间"}')
@@ -52,7 +54,7 @@ def invoke(loop, call, folder, history):
     if name in OPEN_NAMES or name == 'list_applications':
         from agent.execution.desktop import invoke as desktop_invoke
         return desktop_invoke(loop, name, args)
-    files = AssistantFiles(loop.repo, loop.state.get('read_roots', []))
+    files = AssistantFiles(loop.repo, read_sources=loop.state.get('read_sources', []))
     if name == 'list_files':
         return files.list(args['path'], args['offset'], args['limit'])
     if name == 'search_files':
@@ -89,7 +91,15 @@ def execute_calls(loop, response, history=None):
                 from agent.model.compaction import history as request_view
                 target = request_view(loop.state, loop.root)
             result = invoke(loop, call, folder, [*target, *pending['results']])
-            status = 'failed' if call['name'] == 'run_existing' and (result['exit_code'] != 0 or result['timed_out']) else 'succeeded'
+            if result.get('status') in {'unknown', 'launching', 'executing'}:
+                loop.state.update(status='execution_unknown', reason='外部操作结果不明，不自动重试')
+                loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
+                return
+            if result.get('status') == 'awaiting_approval':
+                pending.setdefault('approval_ids', []).append(result['id'])
+                loop.state.setdefault('desktop_approvals', {})[result['id']] = 'awaiting_approval'
+            status = 'failed' if result.get('error') or (call['name'] == 'run_existing'
+                and (result['exit_code'] != 0 or result['timed_out'])) else 'succeeded'
         except WebUnknown:
             loop.state.update(status='execution_unknown', reason='已发出的网络请求结果不明，不自动重试')
             loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
@@ -122,5 +132,6 @@ def execute_calls(loop, response, history=None):
             return
     target = loop.state['history'] if history is None else history
     target.extend([response, *pending['results']])
-    loop.state.update(assistant_pending=None, response_pending=None, status='needs_plan')
+    approval = bool(pending.get('approval_ids'))
+    loop.state.update(assistant_pending=None, response_pending=None, status='awaiting_user' if approval else 'needs_plan')
     loop.persist('assistant_completed')

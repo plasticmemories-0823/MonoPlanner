@@ -22,10 +22,46 @@ def authorized_roots(values):
     return result
 
 
+def authorized_sources(values):
+    if not isinstance(values, list):
+        raise ValueError('可读资料必须是文件或目录列表')
+    result = []
+    for item in values:
+        if (not isinstance(item, dict) or set(item) != {'path', 'kind'}
+                or item['kind'] not in {'file', 'directory'} or not isinstance(item['path'], str)):
+            raise ValueError('资料须包含 path 和 kind（file 或 directory）')
+        path = Path(item['path']).expanduser()
+        from agent.storage.preferences import state_root
+        if path.resolve().is_relative_to(state_root().resolve()):
+            raise ValueError('不能授权助手私有记录目录')
+        if not path.is_absolute() or '..' in path.parts or ':' in str(path)[2:]:
+            raise ValueError('资料必须使用明确的已有绝对路径')
+        if any(_link(p) for p in (path, *path.parents)):
+            raise ValueError('资料不能经过链接或 Windows 重解析点')
+        if item['kind'] == 'directory':
+            if not path.is_dir():
+                raise ValueError('资料目录不存在')
+        else:
+            if not path.is_file() or path.stat().st_nlink != 1:
+                raise ValueError('资料必须是独立普通文件')
+            if path.suffix.lower() == '.dpapi' or _reason(Path(path.name)) in {'environment_credentials', 'possible_private_key'}:
+                raise ValueError('不能授权密钥或环境凭据')
+            from agent.source.snapshots import _inspect_file
+            if _inspect_file(path)[1]:
+                raise ValueError('不能授权含私钥的文件')
+        entry = {'path': str(path.resolve()), 'kind': item['kind']}
+        if entry not in result:
+            result.append(entry)
+    return result
+
+
 class AssistantFiles:
-    def __init__(self, workspace, read_roots=()):
+    def __init__(self, workspace, read_roots=(), *, read_sources=()):
         self.workspace = Path(workspace).resolve() if workspace else None
         self.roots = [Path(v) for v in authorized_roots(([workspace] if workspace else []) + list(read_roots))]
+        self.files = []
+        for item in authorized_sources(list(read_sources)):
+            (self.roots if item['kind'] == 'directory' else self.files).append(Path(item['path']))
 
     def path(self, value, *, directory=False):
         path = Path(value)
@@ -35,6 +71,14 @@ class AssistantFiles:
             path = self.workspace / path
         if '..' in path.parts:
             raise ValueError('路径不能包含 ..')
+        from agent.storage.preferences import state_root
+        if path.resolve().is_relative_to(state_root().resolve()):
+            raise ValueError('不读取助手私有记录')
+        if ':' in str(path)[2:]:
+            raise ValueError('不读取备用数据流或特殊设备路径')
+        if not directory and path in self.files:
+            authorized_sources([{'path': str(path), 'kind': 'file'}])
+            return path
         for root in sorted(self.roots, key=lambda p: len(p.parts), reverse=True):
             if path.is_relative_to(root):
                 relative = path.relative_to(root)
@@ -48,7 +92,10 @@ class AssistantFiles:
                         raise ValueError('不是已有目录')
                     return path
                 try:
-                    return _safe_file(root, relative)
+                    target = _safe_file(root, relative)
+                    if target.stat().st_nlink != 1:
+                        raise ValueError('不读取多重硬链接')
+                    return target
                 except SnapshotError as exc:
                     raise ValueError(str(exc)) from exc
         raise ValueError('路径不在工作目录或用户授权资料目录内')

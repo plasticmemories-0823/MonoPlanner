@@ -8,8 +8,13 @@ internal static class FilePicker
     {
         Console.OutputEncoding=new UTF8Encoding(false);
         Application.EnableVisualStyles();
+        if(arguments.Length==1 && arguments[0]=="directory") {
+            using(var folder=new FolderBrowserDialog {Description="选择本对话可读取的资料文件夹"}) {
+                if(folder.ShowDialog()==DialogResult.OK) Console.WriteLine(folder.SelectedPath);
+            }
+            return 0;
+        }
         using(var dialog=new OpenFileDialog { Title="选择本对话可读取的文件", CheckFileExists=true, Multiselect=false }) {
-            if(arguments.Length==1 && arguments[0]=="application") {dialog.Title="选择要登记的应用程序";dialog.Filter="Windows 应用程序|*.exe";}
             if(dialog.ShowDialog()==DialogResult.OK) Console.WriteLine(dialog.FileName);
         }
         return 0;

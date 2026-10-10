@@ -35,7 +35,7 @@ class GeneralAssistantTests(unittest.TestCase):
                      usage_file=args.get('usage_file', ''))
 
     def test_fixed_tools_and_aggregate_parameter_feedback(self):
-        self.assertEqual(len(CHAT_TOOLS), 13)
+        self.assertEqual(len(CHAT_TOOLS), 14)
         for schema in ASSISTANT_SCHEMA.values():
             self.assertFalse(schema['additionalProperties'])
             self.assertEqual(set(schema['required']), set(schema['properties']))

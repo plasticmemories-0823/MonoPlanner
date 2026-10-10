@@ -8,7 +8,7 @@ import shutil
 import sys
 
 from agent.execution.assistant_files import AssistantFiles
-from agent.execution.process import run_process, log_excerpt
+from agent.execution.process import log_excerpt
 
 
 def command_for(workspace, entry, args):
@@ -80,7 +80,7 @@ def execute(loop, args, folder):
     from agent.execution.native import NativeEnvironment
     backend = NativeEnvironment(loop.repo, artifact_root=loop.root.parent.parent/'execution'/loop.root.name,
                                 access_mode=getattr(loop, 'access_mode', 'sandbox'),
-                                read_roots=loop.state.get('read_roots', []))
+                                read_sources=loop.state.get('read_sources', []))
     result = backend.run_process(command, stdout_path=folder/'stdout.log', stderr_path=folder/'stderr.log',
                          timeout=timeout, env=env, on_started=started)
     result.update(entry=args['entry'], entry_sha256=sha, command=command,

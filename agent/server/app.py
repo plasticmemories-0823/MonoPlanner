@@ -70,6 +70,7 @@ def control_value(thread, value=None):
                              'runtime_settings': session.get('runtime_settings'),
                              'workspace_bound': session.get('workspace_bound', False),
                              'read_roots': session.get('read_roots', []),
+                             'read_sources': session.get('read_sources', []),
                              'repo': session['repo'], 'messages': [
                                  {'id': m['data'].get('id'), 'type': m['type'], 'content': m['data']['content']}
                                  for m in session.get('public_messages', [])],

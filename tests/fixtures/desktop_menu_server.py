@@ -8,6 +8,8 @@ from tests.fixtures.web_server import graph
 from agent.server.app import app as application
 from agent.storage.conversations import ConversationStore
 from agent.storage.preferences import state_root
+from agent.storage.read_sources import ReadSources
+from agent.server.desktop import permission as real_permission
 
 permissions, calls = {}, []
 options = {'permission_error': False, 'read_delay': 0}
@@ -28,14 +30,16 @@ async def permission(request):
         session = await asyncio.to_thread(lambda: ConversationStore(state_root()).session(thread))
         if session and session['status'] == 'chat_complete':
             value['effective'] = value['requested']
-    return JSONResponse(value, headers={'Cache-Control': 'no-store'})
+    return await real_permission(request)
 
 
 async def choose(request):
-    application = request.url.path.endswith('choose-application')
-    calls.append({'kind': 'application' if application else 'file', 'thread': request.path_params['thread']})
-    return JSONResponse({'application': {'id': 'fixture-app', 'name': '离线样本应用'}}
-                        if application else {'path': fixture_file})
+    value = await request.json()
+    kind = value.get('kind', 'file')
+    calls.append({'kind': kind, 'thread': request.path_params['thread']})
+    path = str(Path(fixture_file).parent) if kind == 'directory' else fixture_file
+    sources = await asyncio.to_thread(lambda: ReadSources(state_root()).add(request.path_params['thread'], path, kind))
+    return JSONResponse({'path': path, 'sources': sources})
 
 
 async def checks(request):
@@ -48,7 +52,6 @@ async def checks(request):
 app = Starlette(routes=[
     Route('/threads/{thread}/permission', permission, methods=['GET', 'POST']),
     Route('/threads/{thread}/choose-file', choose, methods=['POST']),
-    Route('/threads/{thread}/choose-application', choose, methods=['POST']),
     Route('/test/desktop-checks', checks, methods=['GET', 'POST']),
     *application.routes,
 ])

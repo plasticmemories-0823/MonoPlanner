@@ -94,14 +94,15 @@ def run_existing(**kwargs) -> dict:
 
 @tool(args_schema=ASSISTANT_SCHEMA['list_applications'])
 def list_applications(**kwargs) -> dict:
-    """List registered applications and their IDs; query='' lists all."""
+    """Discover installed applications and their IDs; query='' lists all. Ask if multiple candidates match."""
     return kwargs
 
 
 @tool(args_schema=ASSISTANT_SCHEMA['open_file'])
 def open_file(**kwargs) -> dict:
     """Preview an authorized file locally; application_id='' uses isolated in-app preview.
-    A registered application ID requests external opening with one target-bound user approval.
+    An installed application ID requests external opening. Sandbox denies it; ask mode
+    requires one approval for this application and file together; full mode opens directly.
     File contents are not automatically sent to the model. Never execute scripts as documents.
     """
     return kwargs
@@ -109,11 +110,21 @@ def open_file(**kwargs) -> dict:
 
 @tool(args_schema=ASSISTANT_SCHEMA['launch_application'])
 def launch_application(**kwargs) -> dict:
-    """Request a registered application's launch by ID, without shell or extra arguments.
-    In sandbox mode the human must click the chat button; this never upgrades task permissions.
+    """Request an installed application's launch by ID, without shell or extra arguments.
+    Sandbox denies external launch; ask mode requires approval; full mode launches directly.
+    """
+    return kwargs
+
+
+@tool(args_schema=ASSISTANT_SCHEMA['request_file_operation'])
+def request_file_operation(**kwargs) -> dict:
+    """Request one explicit OUTSIDE-workspace file create/replace/copy/move/delete.
+    path is the file, destination only for copy/move, content only for create/replace.
+    No directories, shell, temporary permission upgrade or implicit overwrites.
+    Sandbox denies this; ask mode waits for exact-target approval. Coding edits use work tools.
     """
     return kwargs
 
 
 CHAT_TOOLS = (*WORK_TOOLS, web_search, web_fetch, list_files, read_file, search_files,
-              run_existing, list_applications, open_file, launch_application)
+              run_existing, list_applications, open_file, launch_application, request_file_operation)
