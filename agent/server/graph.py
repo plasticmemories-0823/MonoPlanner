@@ -149,7 +149,7 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
                         read_sources=session['read_sources'],
                         access_mode=permission['effective'],
                         conversation_id=thread,
-                        state_dir=task_dir, interactive=True,
+                        state_dir=task_dir, interactive=True, yield_boundary=phase != 'work',
                         event_sink=writer, runtime_settings=session['runtime_settings'],
                         control_source=lambda: store.pending(thread))
         with interrupts.active(state_root(), thread):

@@ -69,6 +69,14 @@ def _execute_pending(self):
             return self.finish_plan("execution_failed")
         if self.yield_boundary:
             return
+        # Only the owner checks queued inputs, between completed operations.
+        # Conversation messages need chat classification before changing work.
+        if getattr(self, 'mailbox', None):
+            applied = set(self.state.get('applied_inputs', []))
+            if any(r['id'] not in applied for r in self.mailbox()):
+                return
+        elif self.control_source and any(r['id'] not in self.state.get('applied_inputs', []) for r in self.control_source()):
+            return
         if self.pause_after_steps and self.steps_this_invocation >= self.pause_after_steps:
             self.state.update(status="paused", reason="Requested pause at a completed step boundary")
             self.persist("paused")
