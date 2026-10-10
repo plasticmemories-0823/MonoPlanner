@@ -3,7 +3,7 @@ import argparse
 import json
 from pathlib import Path
 from langchain_core.messages import messages_from_dict
-from agent.execution.local import LocalEnvironment
+from agent.execution.native import NativeEnvironment
 from agent.task.budget import StepBudget
 from agent.storage.history import LocalHistory
 from agent.task.runner import TaskRunner
@@ -55,8 +55,8 @@ def main(argv=None):
     task=args.task or old.get('request')
     if not repo or not task:
         parser.error('A new task requires --repo and --task')
-    if old.get('environment_key',{}).get('backend','LocalEnvironment')!='LocalEnvironment':
-        parser.error('Use the original Docker backend to resume; this CLI will not recreate it silently')
+    if old and old.get('environment_key',{}).get('backend')!='NativeEnvironment':
+        parser.error('旧任务须使用冻结源码和原执行后端恢复，不迁移检查点')
     saved=old.get('budget',{})
     policy=('max_steps','max_tokens','timeout_seconds','report_reserve','report_token_reserve',
             'report_time_reserve','transport_retry_limit')
@@ -64,7 +64,7 @@ def main(argv=None):
     if args.max_steps is not None:
         values['max_steps']=args.max_steps
     budget=StepBudget(**values)
-    env=LocalEnvironment(repo,artifact_root=old.get('environment_key',{}).get('artifact_root'))
+    env=NativeEnvironment(repo,artifact_root=old.get('environment_key',{}).get('artifact_root'))
     history=[]
     if old:
         initial=json.loads(old['history'][0]['data']['content'])

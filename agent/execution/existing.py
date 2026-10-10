@@ -77,7 +77,11 @@ def execute(loop, args, folder):
         loop.state['assistant_process'] = {'pid': pid, 'entry': args['entry'], 'entry_sha256': sha}
         loop.persist('existing_process_started', loop.state['assistant_process'])
 
-    result = run_process(command, cwd=loop.repo, stdout_path=folder/'stdout.log', stderr_path=folder/'stderr.log',
+    from agent.execution.native import NativeEnvironment
+    backend = NativeEnvironment(loop.repo, artifact_root=loop.root.parent.parent/'execution'/loop.root.name,
+                                access_mode=getattr(loop, 'access_mode', 'sandbox'),
+                                read_roots=loop.state.get('read_roots', []))
+    result = backend.run_process(command, stdout_path=folder/'stdout.log', stderr_path=folder/'stderr.log',
                          timeout=timeout, env=env, on_started=started)
     result.update(entry=args['entry'], entry_sha256=sha, command=command,
                   stdout=log_excerpt(folder/'stdout.log'), stderr=log_excerpt(folder/'stderr.log'),

@@ -18,6 +18,40 @@ from agent.execution.process import log_excerpt
 from agent.settings import PROJECT_ROOT
 
 
+def program_arguments(command):
+    """Recognize a standalone Windows argv invocation, never interpret shell syntax."""
+    quoted, escaped = False, False
+    for char in command:
+        if escaped:
+            escaped = False
+        elif char == '\\':
+            escaped = True
+        elif char == '"':
+            quoted = not quoted
+        elif not quoted and char in '&|<>^\r\n':
+            return None
+    if '%' in command or quoted:
+        return None
+    import ctypes
+    from ctypes import wintypes
+    count = ctypes.c_int()
+    api = ctypes.windll.shell32.CommandLineToArgvW
+    api.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    api.restype = ctypes.POINTER(wintypes.LPWSTR)
+    pointer = api(command, ctypes.byref(count))
+    if not pointer:
+        return None
+    try:
+        args = [pointer[i] for i in range(count.value)]
+    finally:
+        release = ctypes.windll.kernel32.LocalFree
+        release.argtypes, release.restype = [ctypes.c_void_p], ctypes.c_void_p
+        release(ctypes.cast(pointer, ctypes.c_void_p))
+    if args and Path(args[0]).is_absolute() and Path(args[0]).suffix.lower() == '.exe':
+        return args
+    return None
+
+
 def clean_environment(extra=None):
     names = ('SystemRoot', 'WINDIR', 'COMSPEC', 'SystemDrive', 'USERPROFILE',
              'LOCALAPPDATA', 'APPDATA', 'HOMEDRIVE', 'HOMEPATH')
@@ -37,6 +71,26 @@ def safe_tree(root):
             path = Path(directory)/name
             if _link(path) or (path.is_file() and path.stat().st_nlink != 1):
                 raise ValueError('隔离副本含有链接或多重硬链接，拒绝发布：' + str(path))
+
+
+def copy_dependencies(source, destination):
+    from agent.source.snapshots import _link, _reason
+    if _link(source):
+        raise ValueError('项目依赖目录含链接，与当前原生隔离不兼容：'+str(source))
+    for directory, folders, files in os.walk(source, followlinks=False):
+        for name in [*folders, *files]:
+            path = Path(directory)/name
+            if _link(path):
+                raise ValueError('项目依赖含链接，与当前原生隔离不兼容：'+str(path))
+        folders[:] = [name for name in folders if name not in {'__pycache__', '.git'}]
+        for name in files:
+            relative = (Path(directory)/name).relative_to(source)
+            if _reason(relative) or relative.suffix in {'.pyc', '.pyo'}:
+                continue
+            target = destination/relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(Path(directory)/name, target)
+    destination.mkdir(parents=True, exist_ok=True)
 
 
 class NativeEnvironment(LocalEnvironment):
@@ -72,9 +126,10 @@ class NativeEnvironment(LocalEnvironment):
             # the Windows shell; it is not a textual rewrite of supplied code.
             body = inputs/'operation.cmd'
             body.write_bytes(command.encode('utf-8'))
-            wrapper = inputs/'wrapper.cmd'
-            wrapper.write_text('@echo off\ncall "..\\inputs\\operation.cmd"\nexit /b %errorlevel%\n', encoding='utf-8')
-            return [os.environ.get('COMSPEC', r'C:\Windows\System32\cmd.exe'), '/d', '/c', r'..\inputs\wrapper.cmd'], mappings
+            argv = program_arguments(command)
+            if argv:
+                return self._argv(argv, False, box, source, inputs, outputs)
+            return [os.environ.get('COMSPEC', r'C:\Windows\System32\cmd.exe')], mappings
         argv = list(command)
         if not argv or not Path(argv[0]).is_absolute():
             raise ValueError('隔离执行器需要明确的程序路径')
@@ -96,7 +151,8 @@ class NativeEnvironment(LocalEnvironment):
             if candidate.is_relative_to(self.repo_root):
                 replacement = source/candidate.relative_to(self.repo_root)
             elif any(candidate.is_relative_to(Path(root)) for root in self.read_roots):
-                continue  # Explicit read-only ACL, never a publication target.
+                root = next(Path(root) for root in self.read_roots if candidate.is_relative_to(Path(root)))
+                replacement = self.material_paths[str(root)] / candidate.relative_to(root)
             elif candidate.is_relative_to(Path(box).parent) or candidate.is_relative_to(self.artifact_root) or candidate.is_relative_to(outputs.parent.parent):
                 replacement = outputs/('%02d-' % index + candidate.name)
                 if candidate.is_file():
@@ -154,10 +210,13 @@ class NativeEnvironment(LocalEnvironment):
         return changes
 
     def run_process(self, command, *, stdout_path, stderr_path, timeout=None, shell=False,
-                    env=None, on_started=None):
+                    env=None, on_started=None, max_output_bytes=None):
         timeout = self.timeout if timeout is None else timeout
         if timeout <= 0:
             raise ValueError('timeout 必须大于 0')
+        if shell:
+            from agent.execution.process import shell_arguments
+            shell_arguments(command)
         if self.access_mode == 'full':
             from agent.execution.process import run_process
             environment = clean_environment(env)
@@ -177,16 +236,43 @@ class NativeEnvironment(LocalEnvironment):
         inputs, outputs, temporary = box/'inputs', box/'outputs', box/'tmp'
         for folder in (inputs, outputs, temporary):
             folder.mkdir()
-        argv, mappings = self._argv(command, shell, box, source, inputs, outputs)
         environment = clean_environment(env)
         environment.update(TEMP=str(temporary), TMP=str(temporary), HOME=str(temporary),
                            PATH=str(self.runtime)+';'+str(Path(os.environ['SystemRoot'])/'System32'))
-        readable = [str(self.runtime), str(inputs), *self.read_roots]
+        # Dependencies are copied without links. Avoid Node's ancestor realpath
+        # scan, which would otherwise require read permissions outside the box.
+        environment['NODE_OPTIONS'] = '--preserve-symlinks --preserve-symlinks-main ' + environment.get('NODE_OPTIONS', '')
+        # Copy filtered, authorized materials; a raw directory ACL would expose
+        # credentials that ordinary read tools deliberately exclude.
+        self.material_paths = {}
+        for index, root in enumerate(self.read_roots):
+            copy = SourceSnapshot.capture(root, box/'materials'/str(index))
+            self.material_paths[str(Path(root))] = copy.root
+        readable = [str(self.runtime), str(inputs), *map(str, self.material_paths.values())]
+        modules = self.repo_root/'node_modules'
+        if modules.is_dir():
+            copied = box/'dependencies/node_modules'
+            copy_dependencies(modules, copied)
+            readable.append(str(copied))
+            environment['NODE_PATH'] = str(copied)
+        for name in ('.venv', 'venv'):
+            packages = self.repo_root/name/'Lib/site-packages'
+            if packages.is_dir():
+                copied = box/'dependencies/python'
+                copy_dependencies(packages, copied)
+                readable.append(str(copied))
+                if not (self.runtime/'Lib/site-packages/sitecustomize.py').is_file():
+                    raise OSError('私有 Python 依赖初始化组件缺失，未解除隔离')
+                environment['MONOPLANER_DEPENDENCY_DIR'] = str(copied)
+                break
+        argv, mappings = self._argv(command, shell, box, source, inputs, outputs)
         writable = [str(outputs), str(temporary)]
         (readable if self.read_only else writable).append(str(source))
         request = {'argv': argv, 'cwd': str(source), 'readable': readable, 'writable': writable,
                    'env': environment, 'timeout_ms': max(1, int(timeout*1000)), 'result': str(box/'status.json')}
-        if shell:
+        if max_output_bytes is not None:
+            request.update(max_output_bytes=max_output_bytes, logs=[str(stdout_path), str(stderr_path)])
+        if shell and len(argv) == 1:
             request['shell_body'] = command
         (box/'request.json').write_text(json.dumps(request, ensure_ascii=False), encoding='utf-8')
         for path in (stdout_path, stderr_path):
@@ -201,7 +287,8 @@ class NativeEnvironment(LocalEnvironment):
             # closing the Job kills children; unfinished status is never replayed.
             process.communicate(json.dumps(request, ensure_ascii=False).encode('utf-8'))
         result = json.loads((box/'status.json').read_text(encoding='utf-8-sig')) if (box/'status.json').is_file() else {}
-        if process.returncode != 0 or result.get('status') == 'initializing' or result.get('isolation') != 'lpac':
+        if (process.returncode != 0 or result.get('status') == 'initializing'
+                or result.get('isolation') != 'lpac' or not result.get('cleanup_ok')):
             return {'exit_code': None, 'timed_out': False, 'error': '原生隔离执行未完成，未发布任何修改',
                     'error_kind': 'sandbox_unavailable', 'record': str(box/'status.json')}
         for produced, destination in mappings:
@@ -209,7 +296,9 @@ class NativeEnvironment(LocalEnvironment):
                 safe_tree(outputs)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(produced, destination)
-        changes = [] if self.read_only or result['timed_out'] else self._publish(before, source, box)
+        changes = [] if self.read_only or result['timed_out'] or result.get('output_limited') else self._publish(before, source, box)
+        if result.get('output_limited'):
+            result.update(exit_code=None, error_kind='probe_output_limit')
         result.update(stdout_log=str(stdout_path), stderr_log=str(stderr_path),
                       changed_files=changes, sandbox_record=str(box/'status.json'), seconds=time.monotonic()-started)
         return result

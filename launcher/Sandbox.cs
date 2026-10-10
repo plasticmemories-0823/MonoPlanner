@@ -28,6 +28,10 @@ internal static class Sandbox
         public Limits basic; public ulong readOps,writeOps,otherOps,readBytes,writeBytes,otherBytes;
         public UIntPtr processMemory,jobMemory,peakProcess,peakJob;
     }
+    [StructLayout(LayoutKind.Sequential)] struct MemoryCounters {
+        public int size, faults; public UIntPtr peakWorking, working, peakPaged, paged, peakNonPaged, nonPaged, pagefile, peakPagefile;
+    }
+    [DllImport("psapi.dll", SetLastError=true)] static extern bool GetProcessMemoryInfo(IntPtr process,ref MemoryCounters counters,int size);
     [DllImport("userenv.dll", CharSet=CharSet.Unicode)] static extern int CreateAppContainerProfile(string name,string display,string description,IntPtr caps,int count,out IntPtr sid);
     [DllImport("userenv.dll", CharSet=CharSet.Unicode)] static extern int DeleteAppContainerProfile(string name);
     [DllImport("userenv.dll", CharSet=CharSet.Unicode)] static extern int DeriveAppContainerSidFromAppContainerName(string name,out IntPtr sid);
@@ -76,7 +80,9 @@ internal static class Sandbox
         }
         if(!remove) {
             var flags=inheritance==InheritanceFlags.None ? AceFlags.None : AceFlags.ContainerInherit|AceFlags.ObjectInherit;
-            acl.InsertAce(0,new CommonAce(flags,AceQualifier.AccessDenied,(int)(FileSystemRights.ChangePermissions|FileSystemRights.TakeOwnership),sid,false,null));
+            var denied=FileSystemRights.ChangePermissions|FileSystemRights.TakeOwnership;
+            if(rights==FileSystemRights.ReadAndExecute) denied|=FileSystemRights.Write|FileSystemRights.Delete|FileSystemRights.DeleteSubdirectoriesAndFiles;
+            acl.InsertAce(0,new CommonAce(flags,AceQualifier.AccessDenied,(int)denied,sid,false,null));
             int index=1;
             while(index<acl.Count) {var ace=acl[index] as CommonAce;
                 if(ace==null || ace.AceQualifier!=AceQualifier.AccessDenied || (ace.AceFlags&AceFlags.Inherited)!=0) break; index++;}
@@ -92,20 +98,19 @@ internal static class Sandbox
         Console.InputEncoding=new UTF8Encoding(false); Console.OutputEncoding=new UTF8Encoding(false);
         var json=new JavaScriptSerializer { MaxJsonLength=16*1024*1024 };
         string profile="MonoPlanner.Run."+Guid.NewGuid().ToString("N");
-        IntPtr sid=IntPtr.Zero,attrs=IntPtr.Zero,capPtr=IntPtr.Zero,policy=IntPtr.Zero,envPtr=IntPtr.Zero,handles=IntPtr.Zero,job=IntPtr.Zero;
+        IntPtr sid=IntPtr.Zero,attrs=IntPtr.Zero,capPtr=IntPtr.Zero,capArray=IntPtr.Zero,policy=IntPtr.Zero,envPtr=IntPtr.Zero,handles=IntPtr.Zero,job=IntPtr.Zero;
+        var allocatedSids=new List<IntPtr>(); Dictionary<string,object> request=null;
         ProcessInfo process=new ProcessInfo();
         var grants=new List<Tuple<string,FileSystemRights>>();
         SecurityIdentifier identity=null;
         try {
-            var request=json.Deserialize<Dictionary<string,object>>(Console.In.ReadToEnd());
+            request=json.Deserialize<Dictionary<string,object>>(Console.In.ReadToEnd());
             if(request.ContainsKey("cleanup_profile")) {
                 profile=(string)request["cleanup_profile"];
                 if(!profile.StartsWith("monoplanner.run.",StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Not a MonoPlanner execution profile");
                 Marshal.ThrowExceptionForHR(DeriveAppContainerSidFromAppContainerName(profile,out sid)); identity=new SecurityIdentifier(sid);
                 foreach(string path in (System.Collections.IEnumerable)request["paths"]) {
-                    var access=Directory.GetAccessControl(path);
-                    bool found=false; foreach(FileSystemAccessRule rule in access.GetAccessRules(true,false,typeof(SecurityIdentifier))) if(rule.IdentityReference.Equals(identity)) found=true;
-                    if(found) {access.PurgeAccessRules(identity); Check(SetFileSecurity(path,4,access.GetSecurityDescriptorBinaryForm()));}
+                    Access(path,identity,FileSystemRights.Traverse|FileSystemRights.ReadAttributes,true);
                 }
                 return 0;
             }
@@ -123,10 +128,13 @@ internal static class Sandbox
             attrs=Marshal.AllocHGlobal(size); Check(InitializeProcThreadAttributeList(attrs,3,0,ref size));
             string[] names={"registryRead"};
             int capSize=Marshal.SizeOf(typeof(SidAttributes));
-            var capArray=Marshal.AllocHGlobal(capSize*names.Length);
+            capArray=Marshal.AllocHGlobal(capSize*names.Length);
             for(int i=0;i<names.Length;i++) {
                 IntPtr groups,capabilities; int groupCount,capCount;
                 Check(DeriveCapabilitySidsFromName(names[i],out groups,out groupCount,out capabilities,out capCount));
+                for(int n=0;n<groupCount;n++) allocatedSids.Add(Marshal.ReadIntPtr(groups,n*IntPtr.Size));
+                for(int n=0;n<capCount;n++) allocatedSids.Add(Marshal.ReadIntPtr(capabilities,n*IntPtr.Size));
+                allocatedSids.Add(groups); allocatedSids.Add(capabilities);
                 Marshal.StructureToPtr(new SidAttributes {sid=Marshal.ReadIntPtr(capabilities),attributes=4},IntPtr.Add(capArray,capSize*i),false);
             }
             var caps=new Capabilities { sid=sid,caps=capArray,count=names.Length }; capPtr=Marshal.AllocHGlobal(Marshal.SizeOf(caps)); Marshal.StructureToPtr(caps,capPtr,false);
@@ -153,21 +161,39 @@ internal static class Sandbox
             IntPtr token; Check(OpenProcessToken(process.process,8,out token));
             try { int value,needed; Check(GetTokenInformation(token,29,out value,4,out needed)); if(value!=1) throw new IOException("Child is not AppContainer; execution refused"); } finally {CloseHandle(token);}
             if(ResumeThread(process.thread)==uint.MaxValue) Check(false);
-            bool timedOut=WaitForSingleObject(process.process,(uint)timeout)==258;
-            int exit; if(timedOut) TerminateJobObject(job,124);
+            long deadline=DateTime.UtcNow.Ticks+(long)timeout*10000;
+            bool outputLimited=false, timedOut=false;
+            while(WaitForSingleObject(process.process,50)==258) {
+                if(request.ContainsKey("max_output_bytes")) {
+                    long limit=Convert.ToInt64(request["max_output_bytes"]);
+                    foreach(string path in (System.Collections.IEnumerable)request["logs"])
+                        if(File.Exists(path) && new FileInfo(path).Length>limit) outputLimited=true;
+                }
+                if(outputLimited || DateTime.UtcNow.Ticks>=deadline) {timedOut=!outputLimited; break;}
+            }
+            int exit; if(timedOut || outputLimited) TerminateJobObject(job,124);
             WaitForSingleObject(process.process,5000); Check(GetExitCodeProcess(process.process,out exit));
             TerminateJobObject(job,0); // No background children survive a completed operation.
-            File.WriteAllText((string)request["result"],json.Serialize(new {exit_code=timedOut?124:exit,timed_out=timedOut,pid=process.pid,isolation="lpac",profile=profile}),Encoding.UTF8);
+            var memory=new MemoryCounters {size=Marshal.SizeOf(typeof(MemoryCounters))};
+            GetProcessMemoryInfo(process.process,ref memory,memory.size);
+            File.WriteAllText((string)request["result"],json.Serialize(new {exit_code=timedOut?124:exit,timed_out=timedOut,output_limited=outputLimited,pid=process.pid,isolation="lpac",profile=profile,peak_working_set_bytes=memory.peakWorking.ToUInt64(),cleanup_ok=false}),Encoding.UTF8);
             return 0;
         } catch(Exception error) { Console.Error.WriteLine("SANDBOX_INIT_OR_RUNTIME_ERROR: "+error); return 125; }
         finally {
             if(job!=IntPtr.Zero) {TerminateJobObject(job,125); CloseHandle(job);}
             if(process.thread!=IntPtr.Zero) CloseHandle(process.thread);
             if(process.process!=IntPtr.Zero) CloseHandle(process.process);
-            if(identity!=null) for(int i=grants.Count-1;i>=0;i--) try {Access(grants[i].Item1,identity,grants[i].Item2,true);} catch(Exception error) {Console.Error.WriteLine("SANDBOX_ACL_CLEANUP: "+error.Message);}
+            bool cleaned=true;
+            if(identity!=null) for(int i=grants.Count-1;i>=0;i--) try {Access(grants[i].Item1,identity,grants[i].Item2,true);} catch(Exception error) {cleaned=false;Console.Error.WriteLine("SANDBOX_ACL_CLEANUP: "+error.Message);}
             if(attrs!=IntPtr.Zero) {DeleteProcThreadAttributeList(attrs);Marshal.FreeHGlobal(attrs);}
-            foreach(IntPtr p in new [] {capPtr,policy,envPtr,handles}) if(p!=IntPtr.Zero) Marshal.FreeHGlobal(p);
-            if(sid!=IntPtr.Zero) {FreeSid(sid); DeleteAppContainerProfile(profile);}
+            foreach(IntPtr p in new [] {capPtr,capArray,policy,envPtr,handles}) if(p!=IntPtr.Zero) Marshal.FreeHGlobal(p);
+            foreach(IntPtr p in allocatedSids) if(p!=IntPtr.Zero) LocalFree(p);
+            if(sid!=IntPtr.Zero) {FreeSid(sid); if(DeleteAppContainerProfile(profile)<0) cleaned=false;}
+            if(request!=null && request.ContainsKey("result") && File.Exists((string)request["result"])) {
+                var result=json.Deserialize<Dictionary<string,object>>(File.ReadAllText((string)request["result"]));
+                result["cleanup_ok"]=cleaned;
+                File.WriteAllText((string)request["result"],json.Serialize(result),Encoding.UTF8);
+            }
         }
     }
 }

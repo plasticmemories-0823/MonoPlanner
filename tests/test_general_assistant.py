@@ -35,7 +35,7 @@ class GeneralAssistantTests(unittest.TestCase):
                      usage_file=args.get('usage_file', ''))
 
     def test_fixed_tools_and_aggregate_parameter_feedback(self):
-        self.assertEqual(len(CHAT_TOOLS), 10)
+        self.assertEqual(len(CHAT_TOOLS), 13)
         for schema in ASSISTANT_SCHEMA.values():
             self.assertFalse(schema['additionalProperties'])
             self.assertEqual(set(schema['required']), set(schema['properties']))
@@ -46,7 +46,7 @@ class GeneralAssistantTests(unittest.TestCase):
 
     def test_read_does_not_bootstrap_coding_and_retains_tool_pair(self):
         model = ScriptedModel([reply('read_file', path='first.py', offset=0, limit=80, reread_reason=''), text_reply('VALUE 是1')])
-        with patch('agent.server.runtime.LocalEnvironment', side_effect=AssertionError('not coding')):
+        with patch('agent.server.runtime.NativeEnvironment', side_effect=AssertionError('not coding')):
             result = self.invoke(model, '查询文件')
         self.assertEqual(result['status'], 'chat_complete')
         self.assertEqual(len(model.calls), 2)
@@ -92,7 +92,7 @@ class GeneralAssistantTests(unittest.TestCase):
 
     def test_existing_run_records_real_failure_and_does_not_initialize_acceptance(self):
         model = ScriptedModel([self.task("print('真实失败')\nraise SystemExit(3)\n"), text_reply('失败，要修复吗')])
-        with patch('agent.server.runtime.LocalEnvironment', side_effect=AssertionError('not coding')):
+        with patch('agent.server.runtime.NativeEnvironment', side_effect=AssertionError('not coding')):
             result = self.invoke(model, '运行已有任务')
         self.assertEqual(result['status'], 'chat_complete')
         self.assertEqual(result['result']['existing_runs'][0]['status'], 'failed')

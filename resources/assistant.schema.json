@@ -1,22 +1,137 @@
 {
   "list_files": {
-    "type": "object", "additionalProperties": false,
-    "properties": {"path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}},
-    "required": ["path", "offset", "limit"]
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "type": "string"
+      },
+      "offset": {
+        "type": "integer"
+      },
+      "limit": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "path",
+      "offset",
+      "limit"
+    ]
   },
   "read_file": {
-    "type": "object", "additionalProperties": false,
-    "properties": {"path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}, "reread_reason": {"type": "string"}},
-    "required": ["path", "offset", "limit", "reread_reason"]
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "type": "string"
+      },
+      "offset": {
+        "type": "integer"
+      },
+      "limit": {
+        "type": "integer"
+      },
+      "reread_reason": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "offset",
+      "limit",
+      "reread_reason"
+    ]
   },
   "search_files": {
-    "type": "object", "additionalProperties": false,
-    "properties": {"path": {"type": "string"}, "query": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}},
-    "required": ["path", "query", "offset", "limit"]
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "type": "string"
+      },
+      "query": {
+        "type": "string"
+      },
+      "offset": {
+        "type": "integer"
+      },
+      "limit": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "path",
+      "query",
+      "offset",
+      "limit"
+    ]
   },
   "run_existing": {
-    "type": "object", "additionalProperties": false,
-    "properties": {"entry": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "timeout": {"type": "integer"}, "usage_file": {"type": "string"}},
-    "required": ["entry", "args", "timeout", "usage_file"]
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "entry": {
+        "type": "string"
+      },
+      "args": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "timeout": {
+        "type": "integer"
+      },
+      "usage_file": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "entry",
+      "args",
+      "timeout",
+      "usage_file"
+    ]
+  },
+  "list_applications": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "query": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "open_file": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "type": "string"
+      },
+      "application_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "application_id"
+    ]
+  },
+  "launch_application": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "application_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "application_id"
+    ]
   }
 }

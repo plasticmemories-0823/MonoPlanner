@@ -7,7 +7,7 @@ import time
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, message_to_dict, messages_from_dict, messages_to_dict
 
 from agent.execution.executor import OperationExecutor
-from agent.execution.local import LocalEnvironment
+from agent.execution.native import NativeEnvironment
 from agent.execution.web import WEB_NAMES, execute_calls
 from agent.model.client import configure_call
 from agent.model.context import admit
@@ -25,18 +25,21 @@ from agent.server import assistant
 
 
 class ConversationRunner(TaskRunner):
-    def __init__(self, model, repo, *, phase='decide', read_roots=None, **kwargs):
+    def __init__(self, model, repo, *, phase='decide', read_roots=None, access_mode='sandbox', conversation_id=None, **kwargs):
         kwargs.pop('interactive', None)
         super().__init__(model, None, interactive=True, yield_boundary=True, **kwargs)
         self.repo, self.phase = repo, phase
         self.read_roots = list(read_roots or [])
+        self.access_mode = access_mode
+        self.conversation_id = conversation_id
         self.mailbox = self.control_source
         self.control_source = lambda: [r for r in self.mailbox() if r['kind'] != 'message']
 
     def activate(self):
         if not self.repo or not Path(self.repo).is_dir():
             raise ValueError('工作需要选择一个已有仓库；普通聊天无需仓库')
-        self.environment = LocalEnvironment(self.repo, artifact_root=self.root.parent.parent/'execution'/self.root.name)
+        self.environment = NativeEnvironment(self.repo, artifact_root=self.root.parent.parent/'execution'/self.root.name,
+                                             access_mode=self.access_mode, read_roots=self.read_roots)
         if self.root.is_relative_to(self.environment.repo_root) or self.root.is_relative_to(self.environment.artifact_root):
             raise ValueError('Task records must stay outside source and execution mounts')
         self.env_key = recovery.environment_key(self.environment)
@@ -87,7 +90,8 @@ class ConversationRunner(TaskRunner):
         self.rules = CONVERSATION_RULES + '\nThe following rules apply ONLY to coding work tools:\n' + TASK_RULES
         self.rules += '\nSelected workspace: ' + (self.repo or '(none)')
         self.rules += '\nAuthorized read-only directories: ' + json.dumps(self.read_roots, ensure_ascii=False)
-        self.rules += '\nPython executable: ' + sys.executable
+        from agent.settings import PROJECT_ROOT
+        self.rules += '\nPython executable: ' + str(PROJECT_ROOT/'launcher/runtime/python/python.exe')
         self.rules += '\nTask networking: ' + ('enabled' if self.runtime_settings['online'] else 'disabled')
         if required_consumer(text):
             self.rules += ARTIFACT_RULES

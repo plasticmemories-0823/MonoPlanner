@@ -281,7 +281,9 @@ class ConversationTests(unittest.TestCase):
 
     def test_real_acceptance_failure_returns_to_model_and_completed_write_does_not_replay(self):
         from test_task_runner import CODE, Model
-        from support import python_command
+        from support import python_command as shell_command
+        from agent.settings import PROJECT_ROOT
+        python_command = lambda code: shell_command(code, str(PROJECT_ROOT/"launcher/runtime/python/python.exe"))
         import json
         (self.repo/'sample.py').write_text('def value():\n    return 0\n')
         def candidate(value):
@@ -309,7 +311,9 @@ class ConversationTests(unittest.TestCase):
 
     def test_new_requirement_after_write_keeps_completed_change_and_cancels_next_write(self):
         from agent.execution.executor import OperationExecutor
-        from support import python_command
+        from support import python_command as shell_command
+        from agent.settings import PROJECT_ROOT
+        python_command = lambda code: shell_command(code, str(PROJECT_ROOT/"launcher/runtime/python/python.exe"))
         from test_task_runner import CODE, Model
         original = OperationExecutor.execute
         done = []

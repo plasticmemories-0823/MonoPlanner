@@ -7,8 +7,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 
 
-def python_command(code):
-    argv = [sys.executable, "-B", "-X", "utf8", "-c", code]
+def python_command(code, executable=None):
+    argv = [executable or sys.executable, "-B", "-X", "utf8", "-c", code]
     return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
 

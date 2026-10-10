@@ -20,6 +20,7 @@ import httpx
 from langgraph_sdk import get_client
 from agent.storage.purge import begin_purge, finish_purge
 from urllib.parse import urlsplit
+from agent.server.desktop import routes as desktop_routes
 
 
 LOADED_SERVICE = service_identity()
@@ -197,7 +198,7 @@ async def settings(request: Request):
         return JSONResponse({'error': str(exc)}, status_code=400, headers={'Cache-Control': 'no-store'})
 
 
-app = Starlette(routes=[Route('/service', service, methods=['GET']),
+app = Starlette(routes=[*desktop_routes, Route('/service', service, methods=['GET']),
                        Route('/workspace', workspace, methods=['GET', 'POST']),
                        Route('/workspace/directories', directories, methods=['GET']),
                        Route('/settings', settings, methods=['GET', 'POST']),

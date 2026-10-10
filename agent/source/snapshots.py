@@ -125,27 +125,30 @@ def _walk(root, preserve_files=(), ignored_directories=()):
 def _selected_files(root, runtime_files=()):
     """Git includes staged, dirty and new files; fallback is a pruned source walk."""
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    # Source discovery is trusted host work, so repository fsmonitor hooks must
+    # not execute outside the native sandbox merely because Git reads an index.
+    git = ["git", "-c", "core.fsmonitor=false", "-C", str(root)]
     try:
-        probe = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        probe = subprocess.run([*git, "rev-parse", "--show-toplevel"],
                                capture_output=True, timeout=10, **options)
     except FileNotFoundError:
         probe = None
     if (probe is not None and probe.returncode == 0
             and Path(os.fsdecode(probe.stdout.strip())).resolve() == root):
         listed = subprocess.run([
-            "git", "-C", str(root), "ls-files", "--cached", "--others",
+            *git, "ls-files", "--cached", "--others",
             "--exclude-standard", "-z", "--", ".",
         ], capture_output=True, timeout=30, **options)
         if listed.returncode != 0:
             raise SnapshotError("git ls-files failed; source selection was not complete.")
-        tracked_result = subprocess.run(["git", "-C", str(root), "ls-files", "--cached", "-z"],
+        tracked_result = subprocess.run([*git, "ls-files", "--cached", "-z"],
                                         capture_output=True, timeout=30, **options)
         if tracked_result.returncode != 0:
             raise SnapshotError("git ls-files failed to distinguish tracked source files.")
         tracked = {Path(os.fsdecode(item)) for item in tracked_result.stdout.split(b"\0") if item}
         selected = {Path(os.fsdecode(item)) for item in listed.stdout.split(b"\0") if item}
         ignored_result = subprocess.run([
-            "git", "-C", str(root), "ls-files", "--others", "--ignored",
+            *git, "ls-files", "--others", "--ignored",
             "--exclude-standard", "--directory", "-z",
         ], capture_output=True, timeout=30, **options)
         if ignored_result.returncode != 0:
@@ -257,6 +260,7 @@ class SourceSnapshot:
     @contextmanager
     def environment_like(self, environment, artifact_root, *, read_only=False):
         """Preserve the execution backend; own and close only the new container."""
+        from agent.execution.native import NativeEnvironment
         if isinstance(environment, DockerEnvironment):
             child = DockerEnvironment(
                 self.root, environment.image, f"agent-snapshot-{uuid.uuid4().hex}",
@@ -269,6 +273,11 @@ class SourceSnapshot:
                 yield child
             finally:
                 child.close()
+        elif isinstance(environment, NativeEnvironment):
+            child = NativeEnvironment(self.root, timeout=environment.timeout, artifact_root=artifact_root,
+                                      access_mode=environment.access_mode, read_only=read_only,
+                                      read_roots=environment.read_roots)
+            yield child
         elif isinstance(environment, LocalEnvironment):
             child = LocalEnvironment(self.root, timeout=environment.timeout, artifact_root=artifact_root)
             child.python_executable = environment.python_executable

@@ -10,8 +10,9 @@ from agent.execution.web import WEB_NAMES, WebProvider, WebUnknown, archive_file
 from agent.model.tools import ASSISTANT_SCHEMA
 from agent.storage.records import save
 
-READ_NAMES = {'list_files', 'read_file', 'search_files'}
-ASSISTANT_NAMES = {*READ_NAMES, 'run_existing'}
+READ_NAMES = {'list_files', 'read_file', 'search_files', 'list_applications'}
+OPEN_NAMES = {'open_file', 'launch_application'}
+ASSISTANT_NAMES = {*READ_NAMES, *OPEN_NAMES, 'run_existing'}
 
 
 def validate(name, args):
@@ -48,6 +49,9 @@ def invoke(loop, call, folder, history):
         provider = WebProvider()
         return provider.search(args[field], loop, folder) if name == 'web_search' else provider.fetch(args[field], loop, folder)
     validate(name, args)
+    if name in OPEN_NAMES or name == 'list_applications':
+        from agent.execution.desktop import invoke as desktop_invoke
+        return desktop_invoke(loop, name, args)
     files = AssistantFiles(loop.repo, loop.state.get('read_roots', []))
     if name == 'list_files':
         return files.list(args['path'], args['offset'], args['limit'])
@@ -68,7 +72,7 @@ def execute_calls(loop, response, history=None):
         loop.persist('assistant_prepared')
     calls = pending['calls']
     conflict = (any(c['name'] not in ASSISTANT_NAMES | WEB_NAMES for c in calls)
-                or (any(c['name'] == 'run_existing' for c in calls) and len(calls) != 1))
+                or (any(c['name'] in {'run_existing', *OPEN_NAMES} for c in calls) and len(calls) != 1))
     while pending['cursor'] < len(calls):
         call = calls[pending['cursor']]
         folder = loop.root/'assistant'/('call-%04d-%02d' % (pending['call'], pending['cursor']))

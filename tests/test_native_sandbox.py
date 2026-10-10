@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import socket
 import unittest
 
 from agent.execution.native import NativeEnvironment
@@ -110,3 +111,74 @@ subprocess.run([sys.executable,'-c',%r],check=True)
         report, _ = self.run_code('from pathlib import Path;Path(%r).write_text("explicit")' % str(self.outside))
         self.assertEqual(report['exit_code'], 0)
         self.assertEqual(self.outside.read_text(), 'explicit')
+
+    def test_live_control_listener_and_credential_canary_are_inaccessible(self):
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(('127.0.0.1', 0)); listener.listen()
+        port = listener.getsockname()[1]
+        key = self.root/'backend-key.json'; key.write_text('LOCAL_SECRET_CANARY')
+        report, text = self.run_code('''import socket
+from pathlib import Path
+try:socket.create_connection(('127.0.0.1',%r),1);print('ESCAPED')
+except OSError as e:print(e.winerror)
+try:print(Path(%r).read_text())
+except PermissionError:print('KEY_DENIED')
+''' % (port, str(key)))
+        self.assertEqual(report['exit_code'], 0)
+        self.assertIn('10013', text)
+        self.assertIn('KEY_DENIED', text)
+        self.assertNotIn('LOCAL_SECRET_CANARY', text)
+
+    def test_hardlinks_cannot_escape_or_be_published(self):
+        report, text = self.run_code('import os\ntry:os.link(%r,"escape.txt");print("ESCAPED")\nexcept OSError:print("DENIED")' % str(self.outside))
+        self.assertEqual(report['exit_code'], 0)
+        self.assertIn('DENIED', text)
+        with self.assertRaisesRegex(ValueError, '链接'):
+            self.run_code('import os;os.link("original.txt","duplicate.txt")')
+        self.assertFalse((self.repo/'duplicate.txt').exists())
+
+    def test_output_bound_stops_entire_job(self):
+        report = self.backend.run_process([self.backend.python_executable, '-c', 'import time\nwhile True:print("x"*4096,flush=True);time.sleep(.01)'],
+            stdout_path=self.root/'stdout.log', stderr_path=self.root/'stderr.log', timeout=15, max_output_bytes=2048)
+        self.assertTrue(report['output_limited'])
+        self.assertIsNone(report['exit_code'])
+        self.assertLess(report['seconds'], 10)
+
+    def test_standalone_shell_argv_preserves_code_and_quotes(self):
+        code = 'print("中文引号\\\"\\\\")'
+        command = subprocess.list2cmdline([self.backend.python_executable, '-c', code])
+        report = self.backend.run_process(command, shell=True, stdout_path=self.root/'stdout.log', stderr_path=self.root/'stderr.log')
+        self.assertEqual(report['exit_code'], 0)
+        self.assertIn('中文引号"\\', (self.root/'stdout.log').read_text(encoding='utf-8'))
+
+    def test_authorized_materials_are_filtered_and_read_only(self):
+        material = self.root/'materials'; material.mkdir()
+        (material/'reference.txt').write_text('reference'); (material/'.env').write_text('PRIVATE_CANARY')
+        self.backend.read_roots = [str(material)]
+        report = self.backend.run_process([self.backend.python_executable, '-c',
+            'import sys;from pathlib import Path;p=Path(sys.argv[1]);print(p.read_text());print(p.with_name(".env").exists())\ntry:p.write_text("bad")\nexcept PermissionError:print("READ_ONLY")', str(material/'reference.txt')],
+            stdout_path=self.root/'stdout.log', stderr_path=self.root/'stderr.log')
+        self.assertEqual(report['exit_code'], 0)
+        text = (self.root/'stdout.log').read_text()
+        self.assertIn('reference\nFalse\nREAD_ONLY', text)
+        self.assertEqual((material/'reference.txt').read_text(), 'reference')
+
+    def test_project_dependencies_are_available_but_read_only(self):
+        dependency = self.repo/'.venv/Lib/site-packages'; dependency.mkdir(parents=True)
+        (dependency/'installed_sample.py').write_text('value=123')
+        report, text = self.run_code('import installed_sample;from pathlib import Path;print(installed_sample.value)\ntry:Path(installed_sample.__file__).write_text("bad")\nexcept PermissionError:print("READ_ONLY")')
+        self.assertEqual(report['exit_code'], 0)
+        self.assertIn('123\nREAD_ONLY', text)
+        self.assertEqual((dependency/'installed_sample.py').read_text(), 'value=123')
+
+    @unittest.skipUnless((PROJECT_ROOT/'launcher/runtime/node/node.exe').is_file(), 'Bundled Node not prepared')
+    def test_node_dependencies_are_available_but_read_only(self):
+        dependency = self.repo/'node_modules/sample'; dependency.mkdir(parents=True)
+        (dependency/'index.js').write_text('module.exports=123')
+        command = [str(PROJECT_ROOT/'launcher/runtime/node/node.exe'), '-e',
+            'const fs=require("fs");console.log(require("sample"));try{fs.writeFileSync(require.resolve("sample"),"bad");console.log("ESCAPED")}catch(e){console.log(e.code=== "EPERM"||e.code==="EACCES"?"READ_ONLY":e.code)}']
+        report = self.backend.run_process(command, stdout_path=self.root/'stdout.log', stderr_path=self.root/'stderr.log')
+        self.assertEqual(report['exit_code'], 0)
+        self.assertIn('123\nREAD_ONLY', (self.root/'stdout.log').read_text())
+        self.assertEqual((dependency/'index.js').read_text(), 'module.exports=123')

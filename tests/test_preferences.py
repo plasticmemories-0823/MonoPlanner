@@ -101,4 +101,5 @@ class PreferencesTests(unittest.TestCase):
         self.assertTrue(all(body['tools'] == bodies[0]['tools'] for body in bodies))
         self.assertEqual([t['function']['name'] for t in bodies[0]['tools']],
                              ['submit_work', 'repair_work', 'freeze_acceptance', 'revise_acceptance', 'web_search', 'web_fetch',
-                              'list_files', 'read_file', 'search_files', 'run_existing'])
+                              'list_files', 'read_file', 'search_files', 'run_existing',
+                              'list_applications', 'open_file', 'launch_application'])

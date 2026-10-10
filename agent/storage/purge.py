@@ -93,6 +93,19 @@ def finish_purge(store, thread, identities):
         # is expected on retry; path/link/workspace checks still always run.
         paths = archive_paths(store, identities, check_state=False)
         protect_workspaces(db, paths)
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if 'desktop_requests' in tables:
+            preview_root = store.path.parent/'previews'
+            for row in db.execute('SELECT data FROM desktop_requests WHERE thread=?', (thread,)):
+                item = json.loads(row[0])
+                if item.get('kind') == 'preview':
+                    path = Path(item['record'])
+                    if path.parent != preview_root or _link(path) or _link(preview_root):
+                        raise ValueError('预览路径超出保存范围，未进行删除。')
+                    path.unlink(missing_ok=True)
+        for table in ('desktop_requests', 'desktop_files', 'permissions'):
+            if table in tables:
+                db.execute('DELETE FROM '+table+' WHERE thread=?', (thread,))
         for path in paths:
             def remove_readonly(function, name, error):
                 target = Path(name)

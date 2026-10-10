@@ -92,4 +92,28 @@ def run_existing(**kwargs) -> dict:
     return kwargs
 
 
-CHAT_TOOLS = (*WORK_TOOLS, web_search, web_fetch, list_files, read_file, search_files, run_existing)
+@tool(args_schema=ASSISTANT_SCHEMA['list_applications'])
+def list_applications(**kwargs) -> dict:
+    """List registered applications and their IDs; query='' lists all."""
+    return kwargs
+
+
+@tool(args_schema=ASSISTANT_SCHEMA['open_file'])
+def open_file(**kwargs) -> dict:
+    """Preview an authorized file locally; application_id='' uses isolated in-app preview.
+    A registered application ID requests external opening with one target-bound user approval.
+    File contents are not automatically sent to the model. Never execute scripts as documents.
+    """
+    return kwargs
+
+
+@tool(args_schema=ASSISTANT_SCHEMA['launch_application'])
+def launch_application(**kwargs) -> dict:
+    """Request a registered application's launch by ID, without shell or extra arguments.
+    In sandbox mode the human must click the chat button; this never upgrades task permissions.
+    """
+    return kwargs
+
+
+CHAT_TOOLS = (*WORK_TOOLS, web_search, web_fetch, list_files, read_file, search_files,
+              run_existing, list_applications, open_file, launch_application)

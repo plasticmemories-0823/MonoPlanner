@@ -75,7 +75,8 @@ def projection(root, task, seq, record, db):
         name, args = payload['name'], payload.get('args', {})
         args = args if isinstance(args, dict) else {}
         labels = {'list_files': '正在列出目录', 'read_file': '正在读取文件', 'search_files': '正在搜索文件',
-                  'run_existing': '正在运行已有任务', 'web_search': '正在搜索网页', 'web_fetch': '正在读取网页'}
+                  'run_existing': '正在运行已有任务', 'web_search': '正在搜索网页', 'web_fetch': '正在读取网页',
+                  'list_applications': '正在查找应用', 'open_file': '正在准备打开文件', 'launch_application': '正在准备启动应用'}
         detail = args.get('path') or args.get('entry') or args.get('query') or args.get('url', '')
         if name == 'search_files':
             detail += '\n' + args.get('query', '')

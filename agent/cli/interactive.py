@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 
 from agent.task.budget import StepBudget
 from agent.settings import load_settings
-from agent.execution.local import LocalEnvironment
+from agent.execution.native import NativeEnvironment
 from agent.cli.workspace import load_saved_repo, save_repo
 
 
@@ -45,17 +45,17 @@ def parse_args(argv=None):
     return args
 
 
-def open_workspace(path: str) -> LocalEnvironment:
+def open_workspace(path: str) -> NativeEnvironment:
     """交互输入可以粘贴带引号、带空格的目录路径。"""
     path = path.strip()
     if len(path) >= 2 and path[0] == path[-1] and path[0] in ("'", '"'):
         path = path[1:-1]
     if not path.strip():
         raise ValueError("仓库路径不能为空")
-    return LocalEnvironment(path)
+    return NativeEnvironment(path)
 
 
-def select_workspace(args) -> LocalEnvironment:
+def select_workspace(args) -> NativeEnvironment:
     if args.repo is not None:
         return open_workspace(args.repo)
 

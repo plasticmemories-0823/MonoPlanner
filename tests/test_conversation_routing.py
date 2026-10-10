@@ -21,7 +21,7 @@ class ConversationRoutingTests(unittest.TestCase):
     def test_chat_without_repository_never_initializes_source_or_executor(self):
         model = fixtures.ScriptedModel([fixtures.text_reply('你好')])
         with patch('agent.server.graph.model_factory', return_value=model), \
-                patch('agent.server.runtime.LocalEnvironment', side_effect=AssertionError('chat must not initialize source')):
+                patch('agent.server.runtime.NativeEnvironment', side_effect=AssertionError('chat must not initialize source')):
             result = self.compiled.invoke({'messages': [HumanMessage(content='你好', id='one')]}, self.config)
         self.assertEqual(result['status'], 'chat_complete')
         self.assertFalse(result['workspace_bound'])
@@ -129,7 +129,7 @@ class ConversationRoutingTests(unittest.TestCase):
     def test_missing_repository_pairs_first_work_call_without_initializing_source(self):
         model = fixtures.ScriptedModel([fixtures.investigation(['first.py']), fixtures.text_reply('请先选择仓库')])
         with patch('agent.server.graph.model_factory', return_value=model), \
-                patch('agent.server.runtime.LocalEnvironment', side_effect=AssertionError('no repository')):
+                patch('agent.server.runtime.NativeEnvironment', side_effect=AssertionError('no repository')):
             result = self.compiled.invoke({'messages': [HumanMessage(content='读取文件', id='one')]}, self.config)
         self.assertEqual(result['status'], 'chat_complete')
         self.assertEqual(len(model.calls), 2)

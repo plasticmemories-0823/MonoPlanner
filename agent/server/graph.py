@@ -18,6 +18,7 @@ from agent.task.budget import StepBudget
 from agent.server.runtime import ConversationRunner
 from agent.storage.preferences import Preferences, state_root
 from agent.execution.assistant_files import authorized_roots
+from agent.storage.permissions import Permissions
 
 ACTIVE = {'needs_plan', 'executing'}
 FINISHED = {'chat_complete', 'verified_success', 'task_blocked', 'settings_required'}
@@ -121,8 +122,11 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
     if not session or session['task_id'] != state['task_id']:
         raise ValueError('Conversation/task association changed')
     writer = get_stream_writer()
+    permission = Permissions(state_root()).boundary(thread)
     runner = ConversationRunner(LazyModel(session['runtime_settings']), session['repo'], phase=phase,
                         read_roots=session.get('read_roots', []),
+                        access_mode=permission['effective'],
+                        conversation_id=thread,
                         state_dir=state_root()/'tasks'/session['task_id'], interactive=True,
                         event_sink=writer, runtime_settings=session['runtime_settings'],
                         control_source=lambda: store.pending(thread))
