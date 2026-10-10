@@ -54,6 +54,7 @@ def code_key(root=None):
         'agent/storage/live_reasoning.py',
         'agent/storage/purge.py',
         'agent/execution/probe_batch.py', 'agent/source/preparation.py',
+        'agent/source/probe_preparation.py',
         'agent/source/lifecycle.py', 'agent/source/view.py',
         'agent/source/versions.py', 'agent/source/index.py',
         'agent/storage/records.py', 'agent/acceptance/final.py',

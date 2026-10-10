@@ -11,9 +11,10 @@ from agent.source.snapshots import SourceSnapshot
 
 class ProbeBatch:
     """Share one immutable source/container only inside a live plan invocation."""
-    def __init__(self, environment, directory, source_factory=None):
+    def __init__(self, environment, directory, source_factory=None, prepared_source=None):
         self.environment = environment
         self.source_factory = source_factory
+        self.prepared_source = prepared_source
         self.directory = Path(directory)
         self.child = self.snapshot = None
         self.version = None
@@ -23,7 +24,10 @@ class ProbeBatch:
     def _start(self, version, timeout):
         started = time.monotonic()
         self.folder = self.directory / ('session-' + uuid.uuid4().hex)
-        self.snapshot = (self.source_factory(version).export(self.folder / 'source')
+        self.folder.mkdir(parents=True)
+        self.snapshot = self.prepared_source(version) if self.prepared_source is not None else None
+        prepared = self.snapshot is not None
+        self.snapshot = self.snapshot or (self.source_factory(version).export(self.folder / 'source')
             if self.source_factory is not None else SourceSnapshot.capture(
                 self.environment.repo_root, self.folder / 'source',
                 excluded_roots=(self.environment.artifact_root,),
@@ -36,7 +40,8 @@ class ProbeBatch:
         self.child.repo_read_only = True
         self.child.root_read_only = True
         self.stats = {'source_version': version, 'source_digest': self.snapshot.digest,
-                      'commands': 0, 'command_seconds': 0.0}
+                      'commands': 0, 'command_seconds': 0.0, 'prepared_source': prepared,
+                      'source_seconds': time.monotonic() - started}
         try:
             self.child.start()
         except BaseException:

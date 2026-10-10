@@ -73,18 +73,25 @@ class SourceView:
                 self.cache_bytes += len(raw)
         return raw
 
-    def export(self, destination):
+    def export(self, destination, *, cancel=None):
         """Materialize only archived bytes for an isolated probe, never live files."""
         destination = Path(destination)
         destination.mkdir(parents=True, exist_ok=False)
         target = destination / 'source'
         target.mkdir()
         for name in self.files:
+            if cancel is not None and cancel.is_set():
+                from concurrent.futures import CancelledError
+                raise CancelledError()
             raw = self.read_bytes(name)
             path = target / name
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open('xb') as stream:
-                stream.write(raw)
+                for offset in range(0, len(raw), 1024 * 1024):
+                    if cancel is not None and cancel.is_set():
+                        from concurrent.futures import CancelledError
+                        raise CancelledError()
+                    stream.write(raw[offset:offset + 1024 * 1024])
             if self.baseline is not None and name in self.baseline.files:
                 original = _safe_file(self.baseline.root, Path(name))
                 path.chmod(original.stat().st_mode)

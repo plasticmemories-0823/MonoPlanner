@@ -15,6 +15,7 @@ class OperationExecutor:
         self.root = Path(records).resolve()
         self.versioned_reads = versioned_reads
         self.prepared = None
+        self.prepared_probe = None
         self.prepared_line_hits = 0
         self.navigator = None
         self.visible_reads = {}
@@ -24,7 +25,9 @@ class OperationExecutor:
         from agent.execution.probe_batch import ProbeBatch
         if getattr(self, "_probe_batch", None) is not None:
             raise RuntimeError("Nested probe batches are not allowed")
-        batch = ProbeBatch(self.environment, directory, source_factory=self.evidence.view if self.versioned_reads else None) if enabled else None
+        batch = ProbeBatch(self.environment, directory,
+            source_factory=self.evidence.view if self.versioned_reads else None,
+            prepared_source=self.prepared_probe) if enabled else None
         self._probe_batch = batch
         try:
             yield

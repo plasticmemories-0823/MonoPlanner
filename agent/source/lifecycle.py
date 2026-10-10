@@ -24,7 +24,11 @@ def begin(loop):
     if not loop.optimize_source or not loop.overlap_preparation:
         return
     if loop.preparation is None:
-        loop.preparation = Preparation(loop.root / 'source-records' / 'prepared')
+        from agent.execution.docker import DockerEnvironment
+        loop.preparation = Preparation(loop.root / 'source-records' / 'prepared',
+            prepare_probes=isinstance(loop.environment, DockerEnvironment))
+        if loop.preparation.probes is not None:
+            loop.executor.prepared_probe = loop.preparation.probes.take
     collect(loop)
     loop.preparation.start(loop.evidence.view())
 

@@ -1,5 +1,4 @@
 """Reference reuse remains bounded and originals are checked before actual use."""
-import json
 import os
 from pathlib import Path
 import tempfile
@@ -59,8 +58,9 @@ class IncrementalHistoryTests(unittest.TestCase):
         self.assertLessEqual(self.store.message_cache_bytes, 150)
         self.assertLessEqual(len(self.store.message_cache), 2)
         self.assertEqual(self.store.load(), state)
-        self.store.message_cache.clear()
-        self.store.message_cache_bytes = 0
+        self.store.close()
+        self.assertEqual(self.store.message_cache, {})
+        self.assertEqual(self.store.message_cache_bytes, 0)
 
     def test_failed_new_original_does_not_publish_checkpoint(self):
         state = {'history': [{'content': 'one'}]}

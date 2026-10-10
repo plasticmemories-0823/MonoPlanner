@@ -134,8 +134,8 @@ class TaskRunner:
                         else selected.invoke(messages))
             received = True
         except ModelInterrupted as exc:
-            if self.preparation and self.preparation.active:
-                self.preparation.active['cancel'].set()
+            if self.preparation:
+                self.preparation.cancel()
             if exc.sent:
                 self.budget.settle_request(ticket, None)
                 self.state.setdefault('model_usage', []).append({'call': ticket.call_id, 'purpose': purpose,

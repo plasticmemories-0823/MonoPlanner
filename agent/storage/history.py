@@ -23,7 +23,8 @@ class LocalHistory:
     MESSAGE_CACHE_BYTES = 32 * 1024 * 1024
     MESSAGE_CACHE_ITEMS = 4096
     AUDIT_EVENTS = {'model_request_started', 'step_started', 'plan_accepted',
-                    'acceptance_frozen', 'acceptance_trial_started', 'task_returned'}
+                    'acceptance_frozen', 'acceptance_trial_started', 'task_returned',
+                    'assistant_started', 'web_started', 'final_acceptance_started'}
 
     def __init__(self, root):
         self.root = Path(root).resolve()

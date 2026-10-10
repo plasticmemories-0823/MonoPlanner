@@ -58,9 +58,11 @@ def build_preparation(view, previous, cancel, max_seconds=8.0):
 
 class Preparation:
     """One worker; main thread alone publishes artifacts and updates SQLite."""
-    def __init__(self, directory):
+    def __init__(self, directory, *, prepare_probes=False):
         self.directory = directory
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='source-prepare')
+        from agent.source.probe_preparation import ProbePreparation
+        self.probes = ProbePreparation(self.pool, directory / 'probes') if prepare_probes else None
         self.active = None
         self.cache, self.seen, self.jobs = {}, set(), []
         self.bundle, self.closed = None, False
@@ -68,16 +70,21 @@ class Preparation:
         self.commit_seconds = self.close_seconds = 0.0
 
     def start(self, view):
-        if self.closed or view.version in self.seen:
+        if self.closed:
             return
-        if self.active is not None:
-            if self.active['version'] != view.version:
-                self.active['cancel'].set()
-            return  # Never queue multiple heavy whole-source jobs.
-        cancel = Event()
-        future = self.pool.submit(build_preparation, view, dict(self.cache), cancel)
-        self.active = {'version': view.version, 'future': future, 'cancel': cancel}
-        self.seen.add(view.version)
+        if view.version not in self.seen:
+            if self.active is not None:
+                if self.active['version'] != view.version:
+                    self.active['cancel'].set()
+            else:
+                cancel = Event()
+                future = self.pool.submit(build_preparation, view, dict(self.cache), cancel)
+                self.active = {'version': view.version, 'future': future, 'cancel': cancel}
+                self.seen.add(view.version)
+        # Preserve the existing index priority. Short model waits can cancel a
+        # queued copy without competing with ordinary source preparation.
+        if self.probes is not None:
+            self.probes.start(view)
 
     def collect(self, version, archive=None):
         active = self.active
@@ -117,22 +124,30 @@ class Preparation:
         if self.closed:
             return
         started = time.monotonic()
-        if self.active is not None:
-            self.active['cancel'].set()
+        self.cancel()
         self.pool.shutdown(wait=True, cancel_futures=True)
+        if self.probes is not None:
+            self.probes.finish()
         self.collect(version, archive)
         self.closed = True
         self.close_seconds = time.monotonic() - started
 
+    def cancel(self):
+        if self.active is not None:
+            self.active['cancel'].set()
+        if self.probes is not None:
+            self.probes.cancel()
+
     def report(self):
         overlap = total = 0.0
-        for job in self.jobs:
+        probe_jobs = self.probes.jobs if self.probes is not None else []
+        for job in self.jobs + probe_jobs:
             if 'started' not in job:
                 continue
             total += job['ended'] - job['started']
             overlap += sum(max(0.0, min(job['ended'], end) - max(job['started'], start))
                            for start, end in self.model_intervals)
-        return {'jobs': self.jobs, 'worker_seconds': total,
+        return {'jobs': self.jobs, 'probe_jobs': probe_jobs, 'worker_seconds': total,
                 'overlapped_model_seconds': overlap,
                 'main_commit_seconds': self.commit_seconds,
                 'cleanup_wait_seconds': self.close_seconds,
