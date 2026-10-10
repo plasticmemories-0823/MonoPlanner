@@ -27,6 +27,10 @@ class ConversationRoutingTests(unittest.TestCase):
         self.assertFalse(result['workspace_bound'])
         self.assertEqual(len(model.calls), 1)
         self.assertFalse(list((self.root/'runs'/'tasks').glob('*/baseline/*')))
+        rules = model.calls[0][0].content
+        self.assertIn('Windows; shell commands use cmd.exe', rules)
+        self.assertIn('native LPAC isolation', rules)
+        self.assertNotIn('Docker copy mounted read-only', rules)
 
     def test_chat_work_chat_routes_share_public_context_without_replaying_reads(self):
         model = fixtures.ScriptedModel([fixtures.text_reply('你好'), fixtures.investigation(['first.py']),

@@ -203,6 +203,9 @@ const StreamSession = ({
     }),
     threadId: threadId ?? null,
     reconnectOnMount: true,
+    // Coalesce presentation updates from dense SDK streams; keep every event
+    // in the SDK store and leave request/execution timing unchanged.
+    throttle: 50,
     fetchStateHistory: { limit: 1 },
     onFinish: async (_state, metadata) => {
       const finishedThread = metadata?.thread_id || threadId;

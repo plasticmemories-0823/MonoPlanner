@@ -453,5 +453,5 @@ class ConversationTests(unittest.TestCase):
         before = model.request_options
         with patch('agent.server.graph.create_model', return_value=model), patch('agent.server.graph.load_settings', return_value={}):
             selected = model_factory()
-        self.assertEqual(selected.client.tags, ['langsmith:nostream', 'langsmith:do-not-render'])
+        self.assertEqual(selected.client.tags, ['nostream', 'langsmith:do-not-render'])
         self.assertEqual(selected.request_options, before)

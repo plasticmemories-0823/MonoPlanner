@@ -92,6 +92,10 @@ class ConversationRunner(TaskRunner):
         self.rules += '\nSelected workspace: ' + (self.repo or '(none)')
         self.rules += '\nAuthorized read-only materials: ' + json.dumps(self.read_sources, ensure_ascii=False)
         self.rules += '\nCurrent user-selected permission: ' + self.access_mode
+        self.rules += ('\nExecution environment: Windows; shell commands use cmd.exe, not Bash. '
+                       'Use fixed read/search tools for source lookup. For Python execution use the '
+                       'explicit executable below; Unix commands and heredocs are not available. '
+                       'Sandbox/ask mode uses native LPAC isolation; full mode uses Windows user permissions.')
         from agent.settings import PROJECT_ROOT
         self.rules += '\nPython executable: ' + str(PROJECT_ROOT/'launcher/runtime/python/python.exe')
         self.rules += '\nTask networking: ' + ('enabled' if self.runtime_settings['online'] else 'disabled')

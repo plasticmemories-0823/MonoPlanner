@@ -55,7 +55,8 @@ def model_factory(settings=None):
     model = create_model(load_settings(settings))
     # The UI subscribes to messages-tuple as well as public graph values.
     # Suppress automatic LangChain streaming of private tool arguments.
-    model.client.tags = ['langsmith:nostream', 'langsmith:do-not-render']
+    model.client.tags = list(dict.fromkeys([*(model.client.tags or []),
+                                         'nostream', 'langsmith:do-not-render']))
     return model
 
 
