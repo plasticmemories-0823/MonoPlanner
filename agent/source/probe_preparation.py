@@ -1,6 +1,9 @@
 """Prepare at most one immutable probe copy while a model request is pending."""
 from concurrent.futures import CancelledError
+import hashlib
+import os
 from pathlib import Path
+import stat
 from threading import Event
 import time
 import uuid
@@ -11,6 +14,36 @@ def prepare_copy(view, directory, cancel):
     snapshot = view.export(directory, cancel=cancel)
     return {'snapshot': snapshot, 'version': view.version,
             'started': started, 'ended': time.monotonic()}
+
+
+def validate_copy(snapshot):
+    """Hash the complete fresh tree without resolving every parent repeatedly.
+
+    No files, including generated files, may appear before the first command.
+    Reject links before descending; the normal post-command audit is unchanged.
+    """
+    root = snapshot.root
+    if not root.is_dir() or root.resolve() != root:
+        raise ValueError('Prepared probe source integrity failed')
+    found, folders = {}, [(root, Path())]
+    while folders:
+        folder, relative = folders.pop()
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode) or (getattr(info, 'st_file_attributes', 0)
+                        & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)):
+                    raise ValueError('Prepared probe source integrity failed: link')
+                name = relative / entry.name
+                if stat.S_ISDIR(info.st_mode):
+                    folders.append((Path(entry.path), name))
+                elif stat.S_ISREG(info.st_mode):
+                    with open(entry.path, 'rb') as source:
+                        found[name.as_posix()] = hashlib.file_digest(source, 'sha256').hexdigest()
+                else:
+                    raise ValueError('Prepared probe source integrity failed: special file')
+    if found != snapshot.files:
+        raise ValueError('Prepared probe source integrity failed')
 
 
 class ProbePreparation:
@@ -60,8 +93,8 @@ class ProbePreparation:
             self._finish('stale')
             return None
         snapshot = self._finish('consumed')
-        if snapshot is not None and not snapshot.verify_integrity()['valid']:
-            raise ValueError('Prepared probe source integrity failed')
+        if snapshot is not None:
+            validate_copy(snapshot)
         return snapshot
 
     def cancel(self):

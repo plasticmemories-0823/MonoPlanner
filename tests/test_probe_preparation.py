@@ -1,5 +1,7 @@
 """Only immutable source copying overlaps model waits; execution stays lazy."""
 from concurrent.futures import ThreadPoolExecutor, CancelledError
+import os
+import subprocess
 from pathlib import Path
 from threading import Event
 from unittest.mock import patch
@@ -49,9 +51,48 @@ class ProbePreparationTests(unittest.TestCase):
         worker = self.worker()
         worker.start(view)
         snapshot = worker.active['future'].result(timeout=10)['snapshot']
-        (snapshot.root/'sample.py').write_text('corrupt')
+        path = snapshot.root/'sample.py'
+        old = path.stat()
+        path.write_bytes(path.read_bytes().replace(b'return 0', b'return 9'))
+        os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
         with self.assertRaisesRegex(ValueError, 'integrity failed'):
             worker.take(view.version)
+
+    def test_extra_file_in_fresh_copy_is_rejected(self):
+        view = self.view()
+        worker = self.worker()
+        worker.start(view)
+        snapshot = worker.active['future'].result(timeout=10)['snapshot']
+        (snapshot.root/'extra.py').write_text('extra')
+        with self.assertRaisesRegex(ValueError, 'integrity failed'):
+            worker.take(view.version)
+
+    def test_prepared_root_cannot_be_redirected(self):
+        view = self.view()
+        worker = self.worker()
+        worker.start(view)
+        snapshot = worker.active['future'].result(timeout=10)['snapshot']
+        with patch.object(Path, 'resolve', return_value=self.root/'different'):
+            with self.assertRaisesRegex(ValueError, 'integrity failed'):
+                worker.take(view.version)
+
+    def test_directory_link_is_rejected_before_reading_its_target(self):
+        view = self.view()
+        worker = self.worker()
+        worker.start(view)
+        snapshot = worker.active['future'].result(timeout=10)['snapshot']
+        outside = self.root/'outside'
+        outside.mkdir()
+        (outside/'private.txt').write_text('outside')
+        link = snapshot.root/'redirect'
+        if os.name == 'nt':
+            subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(outside)],
+                           check=True, capture_output=True)
+        else:
+            link.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'integrity failed: link'):
+            worker.take(view.version)
+        self.assertEqual((outside/'private.txt').read_text(), 'outside')
 
     def test_unfinished_copy_is_optional_and_job_queue_is_bounded(self):
         view = self.view()
