@@ -103,6 +103,11 @@ def build(destination, make_zip=True):
     (destination/'portable.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
     def shipped(path):
         name = path.relative_to(destination).as_posix()
+        runtime_entries = {'python', 'node', 'git', 'webview', 'MonoPlanner.Sandbox.exe',
+                           'MonoPlanner.Sandbox.exe.config', 'MonoPlanner.FilePicker.exe', 'WebView2Loader.dll',
+                           'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.WinForms.dll', 'LICENSE.txt', 'version.txt'}
+        if name.startswith('launcher/runtime/') and path.relative_to(destination).parts[2] not in runtime_entries:
+            return False
         return (path.is_file() and path.name != 'checksums.json'
                 and not name.startswith(('web/.next/server/route-cache/', 'web/.next/cache/'))
                 and '__pycache__' not in path.parts and path.suffix != '.pyc')
