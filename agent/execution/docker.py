@@ -140,7 +140,9 @@ class DockerEnvironment:
             "-c", "exec sleep infinity",
         ]
         if getattr(self, "root_read_only", False):
-            arguments[1:1] = ["--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=268435456"]
+            # Docker defaults tmpfs to noexec. Compiler probes must be able to
+            # run their temporary products inside this isolated filesystem.
+            arguments[1:1] = ["--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=268435456"]
         result = self._docker(arguments, capture_output=True, text=True,
                               encoding="utf-8", errors="replace")
         (self.artifact_root / "container-start.stdout.log").write_text(

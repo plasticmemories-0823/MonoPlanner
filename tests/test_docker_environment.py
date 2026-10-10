@@ -57,6 +57,19 @@ class DockerEnvironmentTests(unittest.TestCase):
         self.assertTrue((self.artifacts / "container.json").is_file())
 
     @patch("agent.execution.docker.subprocess.run")
+    def test_readonly_probe_can_execute_temporary_compiler_products(self, run):
+        run.side_effect = self._successful_run
+        self.environment.repo_read_only = self.environment.root_read_only = True
+        self.environment.start()
+        args = run.call_args.args[0]
+        self.assertIn('--read-only', args)
+        self.assertIn('/tmp:rw,exec,nosuid,nodev,size=268435456', args)
+        mounts = [args[i+1] for i, arg in enumerate(args) if arg == '--mount']
+        self.assertTrue(mounts[0].endswith(',readonly'))
+        self.assertEqual(args[args.index('--network')+1], 'none')
+        self.environment.close()
+
+    @patch("agent.execution.docker.subprocess.run")
     def test_name_collision_is_reported_without_stopping_existing_container(self, run):
         run.return_value = subprocess.CompletedProcess([], 125, "", "name already in use")
         with self.assertRaisesRegex(RuntimeError, "name already in use"):
