@@ -60,6 +60,7 @@ const useTypedStream = useStream<
 type StreamContextType = ReturnType<typeof useTypedStream> & {
   apiUrl: string;
   progress?: ProgressEvent;
+  retainMessage: (message: Message) => void;
 };
 const StreamContext = createContext<StreamContextType | undefined>(undefined);
 
@@ -117,6 +118,13 @@ const StreamSession = ({
     key: "",
     messages: [],
   });
+  const retainMessage = (message: Message) =>
+    setArchive((old) => ({
+      key,
+      messages: mergePublicMessages(old.key === key ? old.messages : [], [
+        message,
+      ]),
+    }));
   const streamValue = useTypedStream({
     apiUrl,
     apiKey: apiKey ?? undefined,
@@ -163,6 +171,10 @@ const StreamSession = ({
       }
     },
     onThreadId: (id) => {
+      if (!threadId)
+        setArchive((old) =>
+          old.key === key ? { ...old, key: `${apiUrl}\0${id}` } : old,
+        );
       setThreadId(id);
       // Refetch threads list when thread ID changes.
       // Wait for some seconds before fetching so we're able to get the new thread that was created.
@@ -242,6 +254,7 @@ const StreamSession = ({
         messages,
         apiUrl,
         progress,
+        retainMessage,
       }}
     >
       {children}

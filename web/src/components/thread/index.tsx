@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import { Fragment, ReactNode, useEffect, useRef } from "react";
+import { Fragment, ReactNode, useCallback, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext } from "@/providers/Stream";
@@ -26,6 +26,9 @@ import {
 import { useQueryState, parseAsBoolean } from "nuqs";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import ThreadHistory from "./history";
+import { ResizableHistory } from "./history/resizable";
+import { mergePublicMessages } from "@/lib/public-messages";
+import { activityAnchors } from "@/lib/activity-groups";
 import { toast } from "sonner";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Workspace, useWorkspace } from "./workspace";
@@ -104,13 +107,23 @@ export function Thread() {
     stream,
     threadId,
   );
-  const messages = [...stream.messages, ...pendingMessages];
+  const messages = mergePublicMessages(stream.messages, pendingMessages);
   const isLoading = stream.isLoading;
   const activity = useActivity(stream.apiUrl, threadId, isLoading);
   const [readRoots, setReadRoots] = useState<string[]>([]);
   const savedReadRoots = JSON.stringify(stream.values.read_roots || []);
-  useEffect(() => { setReadRoots(JSON.parse(savedReadRoots)); }, [threadId, savedReadRoots]);
+  useEffect(() => {
+    setReadRoots(JSON.parse(savedReadRoots));
+  }, [threadId, savedReadRoots]);
   const messageIds = new Set(messages.map((message) => message.id));
+  const anchors = activityAnchors(messages);
+  const groupedActivity = new Map<string, typeof activity.items>();
+  for (const row of activity.items) {
+    const anchor = anchors.get(row.after_id) || row.after_id;
+    const group = groupedActivity.get(anchor) || [];
+    group.push(row);
+    groupedActivity.set(anchor, group);
+  }
 
   const lastError = useRef<string | undefined>(undefined);
 
@@ -136,10 +149,10 @@ export function Thread() {
 
       // Message is defined, and it has not been logged yet. Save it, and send the error
       lastError.current = message;
-      toast.error("An error occurred. Please try again.", {
+      toast.error("当前请求未完成，消息和运行记录已保留", {
         description: (
           <p>
-            <strong>Error:</strong> <code>{message}</code>
+            <strong>诊断：</strong> <code>{message}</code>
           </p>
         ),
         richColors: true,
@@ -181,6 +194,7 @@ export function Thread() {
       if (await queueMessage(newHumanMessage)) setInput("");
       return;
     }
+    stream.retainMessage(newHumanMessage);
 
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
 
@@ -214,14 +228,15 @@ export function Thread() {
     setInput("");
   };
 
-  const handleRegenerate = (
-    parentCheckpoint: Checkpoint | null | undefined,
-  ) => {
-    // Do this so the loading state is correct
-    prevMessageLength.current = prevMessageLength.current - 1;
-    setFirstTokenReceived(false);
-    toast.info("请追加新要求；已执行操作不能通过回退聊天记录重跑。");
-  };
+  const handleRegenerate = useCallback(
+    (parentCheckpoint: Checkpoint | null | undefined) => {
+      // Do this so the loading state is correct
+      prevMessageLength.current = prevMessageLength.current - 1;
+      setFirstTokenReceived(false);
+      toast.info("请追加新要求；已执行操作不能通过回退聊天记录重跑。");
+    },
+    [],
+  );
 
   const chatStarted = !!threadId || !!messages.length;
   const hasNoAIOrToolMessages = !messages.find(
@@ -230,34 +245,13 @@ export function Thread() {
 
   return (
     <div className="flex h-screen w-full overflow-hidden">
-      <div className="relative hidden lg:flex">
-        <motion.div
-          className="absolute z-20 h-full overflow-hidden border-r bg-white"
-          style={{ width: 300 }}
-          animate={
-            isLargeScreen
-              ? { x: chatHistoryOpen ? 0 : -300 }
-              : { x: chatHistoryOpen ? 0 : -300 }
-          }
-          initial={{ x: -300 }}
-          transition={
-            isLargeScreen
-              ? { type: "spring", stiffness: 300, damping: 30 }
-              : { duration: 0 }
-          }
-        >
-          <div
-            className="relative h-full"
-            style={{ width: 300 }}
-          >
-            <ThreadHistory />
-          </div>
-        </motion.div>
-      </div>
+      <ResizableHistory open={chatHistoryOpen}>
+        <ThreadHistory />
+      </ResizableHistory>
 
       <div
         className={cn(
-          "grid w-full grid-cols-[1fr_0fr] transition-all duration-500",
+          "grid min-w-0 flex-1 grid-cols-[1fr_0fr]",
           artifactOpen && "grid-cols-[3fr_2fr]",
         )}
       >
@@ -267,14 +261,6 @@ export function Thread() {
             !chatStarted && "grid-rows-[1fr]",
           )}
           layout={isLargeScreen}
-          animate={{
-            marginLeft: chatHistoryOpen ? (isLargeScreen ? 300 : 0) : 0,
-            width: chatHistoryOpen
-              ? isLargeScreen
-                ? "calc(100% - 300px)"
-                : "100%"
-              : "100%",
-          }}
           transition={
             isLargeScreen
               ? { type: "spring", stiffness: 300, damping: 30 }
@@ -347,16 +333,14 @@ export function Thread() {
                           />
                         )}
                         <ActivityRows
-                          items={activity.items.filter(
-                            (row) => row.after_id === message.id,
-                          )}
+                          items={groupedActivity.get(message.id || "") || []}
                         />
                       </Fragment>
                     ))}
                   <ActivityRows
-                    items={activity.items.filter(
-                      (row) => !messageIds.has(row.after_id),
-                    )}
+                    items={[...groupedActivity]
+                      .filter(([anchor]) => !messageIds.has(anchor))
+                      .flatMap(([, items]) => items)}
                   />
                   {activity.error && (
                     <p className="text-muted-foreground text-sm">
@@ -373,9 +357,11 @@ export function Thread() {
                       handleRegenerate={handleRegenerate}
                     />
                   )}
-                  {isLoading && !firstTokenReceived && (
-                    <AssistantMessageLoading />
-                  )}
+                  {isLoading &&
+                    !firstTokenReceived &&
+                    !activity.items.some((row) => row.status === "running") && (
+                      <AssistantMessageLoading />
+                    )}
                 </>
               }
               footer={
@@ -427,7 +413,8 @@ export function Thread() {
                         }}
                         aria-label="消息输入框"
                         placeholder="发消息，或描述你想完成的工作…"
-                        className="placeholder:text-muted-foreground/70 field-sizing-content max-h-80 min-h-28 w-full resize-none border-none bg-transparent px-5 pt-5 pb-3 text-base shadow-none ring-0 outline-none focus:ring-0 focus:outline-none"
+                        rows={1}
+                        className="placeholder:text-muted-foreground/70 field-sizing-content max-h-48 min-h-12 w-full resize-none border-none bg-transparent px-4 pt-3 pb-1 text-base shadow-none ring-0 outline-none focus:ring-0 focus:outline-none"
                       />
 
                       <div
@@ -455,7 +442,12 @@ export function Thread() {
                             apiUrl={stream.apiUrl}
                             current={stream.values.runtime_settings}
                           />
-                          <ReadSources apiUrl={stream.apiUrl} roots={readRoots} onChange={setReadRoots} disabled={isLoading} />
+                          <ReadSources
+                            apiUrl={stream.apiUrl}
+                            roots={readRoots}
+                            onChange={setReadRoots}
+                            disabled={isLoading}
+                          />
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
                           {isLoading && (
@@ -484,11 +476,36 @@ export function Thread() {
                         </div>
                       </div>
                     </form>
-                    {activity.usage && <p className="text-muted-foreground px-4 pb-2 text-xs" data-testid="usage-summary">
-                      助手已记录 Token：{activity.usage.total_tokens.toLocaleString()} · 未缓存输入：{activity.usage.uncached_input_tokens.toLocaleString()}
-                      {" · "}请求：{activity.usage.calls} · 模型用时：{activity.usage.model_seconds.toFixed(1)} 秒
-                      {activity.usage.unknown_calls > 0 && ` · ${activity.usage.unknown_calls} 次用量未知`}
-                    </p>}
+                    {
+                      <p
+                        className="text-muted-foreground px-4 pb-2 text-xs"
+                        data-testid="usage-summary"
+                      >
+                        <span title="按已返回缓存用量的输入 Token 加权；含联网辅助调用。">
+                          缓存命中：
+                          {activity.usage?.cache_rate != null
+                            ? `${(activity.usage.cache_rate * 100).toFixed(1)}%${activity.usage.cache_unknown_calls ? "（部分记录）" : ""}`
+                            : "暂无数据"}
+                        </span>
+                        {" · "}
+                        <span title="最近一次主模型请求的输入与已完成输出，包含提示词、工具和必要思考续接；等待回复时为估算。不是累计 Token。">
+                          上下文：
+                          {activity.usage?.context &&
+                          activity.usage.context.window_tokens > 0
+                            ? `${activity.usage.context.estimated ? "≈" : ""}${((activity.usage.context.used_tokens / activity.usage.context.window_tokens) * 100).toFixed(1)}%`
+                            : "暂无数据"}
+                        </span>
+                        {activity.usage && (
+                          <>
+                            {" · "}已记录 Token：
+                            {activity.usage.total_tokens.toLocaleString()}
+                            {" · "}请求：{activity.usage.calls}
+                            {activity.usage.unknown_calls > 0 &&
+                              ` · ${activity.usage.unknown_calls} 次用量未知`}
+                          </>
+                        )}
+                      </p>
+                    }
                     {(isLoading || stream.values.status) && (
                       <div
                         role="status"

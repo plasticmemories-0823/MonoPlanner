@@ -30,7 +30,7 @@ PROGRESS = {
     'acceptance_trial_started': ('acceptance', '正在原始源码上试跑验收'),
     'final_acceptance_started': ('acceptance', '正在运行实际验收'),
     'final_acceptance_finished': ('acceptance_finished', '实际验收结果已保存'),
-    'plan_rejected': ('repair', '交付未通过校验，等待原作者纠正'),
+    'plan_rejected': ('repair', '提交信息需要修正，正在处理'),
     'user_input_applied': ('updated', '新要求已接入，重新安排剩余工作'),
     'paused': ('paused', '已在安全位置暂停'),
 }

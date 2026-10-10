@@ -11,6 +11,14 @@ class OfflineModel:
     def bind_tools(self, tools):
         return self
 
+    def invoke_with_progress(self, messages, on_reasoning):
+        for text in ('正在确认本轮要求。', '继续核对可用材料。', '随后给出公开回复。'):
+            on_reasoning(text)
+            time.sleep(1 if '流式' in messages[-1].text else .3)
+        response = self.invoke(messages)
+        response.additional_kwargs['reasoning_content'] = '正在确认本轮要求。继续核对可用材料。随后给出公开回复。'
+        return response
+
     def invoke(self, messages):
         last = messages[-1]
         if isinstance(last, ToolMessage):
@@ -46,20 +54,24 @@ class OfflineModel:
             return AIMessage(content='我会读取指定的小文件。', tool_calls=[{
                 'name': 'submit_work', 'id': 'offline-read', 'args': value}],
                 additional_kwargs={'reasoning_content': 'PRIVATE_BROWSER_REASONING'},
-                usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5})
+                usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5,
+                                'input_token_details': {'cache_read': 2}})
         return self.text('已收到：' + request + '。这是离线浏览器验证，没有调用付费 API。')
 
     @staticmethod
     def web(name, **args):
-        return AIMessage(content='正在查找公开网页。', tool_calls=[{'name': name, 'id': 'offline-'+name, 'args': args}],
+        return AIMessage(content='正在查找公开网页。' if name.startswith('web_') else '正在读取指定文件。',
+            tool_calls=[{'name': name, 'id': 'offline-'+name, 'args': args}],
             additional_kwargs={'reasoning_content': 'PRIVATE_BROWSER_REASONING'},
-            usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5})
+            usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5,
+                            'input_token_details': {'cache_read': 2}})
 
     @staticmethod
     def text(content):
         return AIMessage(content=content,
             additional_kwargs={'reasoning_content': 'PRIVATE_BROWSER_REASONING'},
-            usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5})
+            usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5,
+                            'input_token_details': {'cache_read': 2}})
 
 
 application.model_factory = lambda settings=None: OfflineModel()

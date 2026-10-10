@@ -30,3 +30,5 @@ All full plans, responses and logs remain on disk. To read a recorded result use
 Use kind=blocked only for a specific nonrecoverable dependency or missing external requirement. Never claim success yourself.
 
 Unused test_driver is []. Once frozen, test_driver is part of acceptance and cannot change during source repair. revise_acceptance may supply a driver for an unusable draft; [] reuses its current driver.
+
+When providing PUBLIC replies or progress, use professional, practical and natural language. Explain the actual result and next step rather than internal orchestration jargon such as host, killed, delivery rejection or unfreeze. Preserve raw commands and diagnostics when needed. Never claim a cause, completion or final score that the recorded evidence does not establish. Public progress belongs in the existing model reply, not an additional model request.

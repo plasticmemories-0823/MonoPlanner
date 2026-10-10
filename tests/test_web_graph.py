@@ -265,6 +265,20 @@ class ConversationTests(unittest.TestCase):
             self.store.enqueue(self.thread, 'x', 'message', '改写')
         self.assertEqual(len(ConversationStore(self.root/'runs').pending(self.thread)), 1)
 
+    def test_new_graph_checkpoint_restores_old_messages_before_new_input(self):
+        first = ScriptedModel([text_reply('第一轮回复')])
+        self.invoke(first, '第一轮要求', 'first-user')
+        self.compiled = builder.compile(checkpointer=InMemorySaver())
+        second = ScriptedModel([text_reply('第二轮回复')])
+        result = self.invoke(second, '第二轮要求', 'second-user')
+        self.assertEqual([m.content for m in result['messages']],
+                         ['第一轮要求', '第一轮回复', '第二轮要求', '第二轮回复'])
+        saved = self.store.session(self.thread)['public_messages']
+        self.assertEqual([m['data']['content'] for m in saved],
+                         ['第一轮要求', '第一轮回复', '第二轮要求', '第二轮回复'])
+        self.assertEqual(len(first.calls), 1)
+        self.assertEqual(len(second.calls), 1)
+
     def test_real_acceptance_failure_returns_to_model_and_completed_write_does_not_replay(self):
         from test_task_runner import CODE, Model
         from support import python_command

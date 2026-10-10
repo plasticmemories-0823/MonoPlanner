@@ -63,6 +63,27 @@ class ConfiguredModel:
         bound = self.client.bind_tools(list(self.tools), strict=True) if self.tools else self.client
         return bound.invoke(messages, **self.request_options)
 
+    def invoke_with_progress(self, messages, on_reasoning):
+        """Stream one request; only reasoning is exposed before completion."""
+        from langchain_core.messages import message_chunk_to_message
+        from agent.model.payload import RAW_TOOL_CALLS
+        bound = self.client.bind_tools(list(self.tools), strict=True) if self.tools else self.client
+        complete = None
+        for chunk in bound.stream(messages, stream_usage=True, **self.request_options):
+            thought = chunk.additional_kwargs.get('reasoning_content')
+            if isinstance(thought, str) and thought:
+                on_reasoning(thought)
+            complete = chunk if complete is None else complete + chunk
+        if complete is None or not complete.response_metadata.get('finish_reason'):
+            raise RuntimeError('Model stream ended without a complete response')
+        response = message_chunk_to_message(complete)
+        if complete.tool_call_chunks:
+            response.additional_kwargs[RAW_TOOL_CALLS] = [
+                {'id': call['id'], 'type': 'function', 'function': {
+                    'name': call['name'], 'arguments': call['args']}}
+                for call in complete.tool_call_chunks]
+        return response
+
 
 def configure_call(model, purpose, timeout=None):
     # Check the class, not dynamic attributes produced by test mocks.

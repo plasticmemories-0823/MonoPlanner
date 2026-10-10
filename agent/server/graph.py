@@ -8,6 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.types import Overwrite
 
 from agent.model.client import create_model
 from agent.model.errors import ModelRequestNotSent
@@ -87,7 +88,9 @@ def intake(state: ConversationState, config: RunnableConfig):
     selected = state.get('repo') or (session or {}).get('repo', '')
     repo = str(Path(selected).expanduser().resolve()) if selected else ''
     roots = authorized_roots(state.get('read_roots', (session or {}).get('read_roots', [])))
-    presentation = {'messages': public, 'repo': repo, 'read_roots': roots}
+    # A fresh graph may contain only the new input. Appending the recovered
+    # list would leave that input before the older messages in the reducer.
+    presentation = {'messages': Overwrite(public), 'repo': repo, 'read_roots': roots}
     record = store.enqueue(thread, latest.id, 'message', latest.text)
     if session and record['applied']:
         can_resume = session['status'] in {'paused', 'awaiting_user'} and bool(store.pending(thread))
@@ -140,7 +143,7 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
         text = ('实际验收通过。' if status == 'verified_success' else
                 '请先在设置中配置可用的 DeepSeek API Key，然后重新发送消息。' if status == 'settings_required' else
                 '已在安全位置暂停，可以补充要求或继续。' if status in {'paused', 'awaiting_user'} else
-                f'任务状态：{status}；尚未确认完成，已保留现场。')
+                '任务尚未完成，已保留运行记录，供后续检查。')
         updates.append(AIMessage(content=text, id=session['task_id']+'-'+status))
     # Presentation recovery never restores execution cursors. Those remain
     # solely in the task checkpoint, including unknown-operation protection.

@@ -2,22 +2,34 @@ import { Checkpoint, Message } from "@langchain/langgraph-sdk";
 import { getContentString } from "../utils";
 import { CommandBar } from "./shared";
 import { MarkdownText } from "../markdown-text";
+import { memo } from "react";
 
 // Public graph messages carry no tool parameters or private diagnostics.
-export function AssistantMessage({ message, isLoading }: {
+export const AssistantMessage = memo(function AssistantMessage({
+  message,
+  isLoading,
+}: {
   message: Message | undefined;
   isLoading: boolean;
   handleRegenerate: (parent: Checkpoint | null | undefined) => void;
 }) {
   if (message?.type !== "ai") return null;
   const content = getContentString(message.content);
-  return <div className="group mr-auto flex w-full flex-col gap-2">
-    <div className="py-1"><MarkdownText>{content}</MarkdownText></div>
-    <div className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-      <CommandBar content={content} isLoading={isLoading} isAiMessage />
+  return (
+    <div className="group mr-auto flex w-full flex-col gap-2">
+      <div className="py-1">
+        <MarkdownText>{content}</MarkdownText>
+      </div>
+      <div className="opacity-0 group-focus-within:opacity-100 group-hover:opacity-100">
+        <CommandBar
+          content={content}
+          isLoading={isLoading}
+          isAiMessage
+        />
+      </div>
     </div>
-  </div>;
-}
+  );
+});
 
 export function AssistantMessageLoading() {
   return (

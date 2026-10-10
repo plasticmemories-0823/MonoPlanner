@@ -1,0 +1,55 @@
+export type ActivityUsage = {
+  total_tokens: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  cache_known_input_tokens: number;
+  cache_unknown_calls: number;
+  uncached_input_tokens: number;
+  calls: number;
+  unknown_calls: number;
+  model_seconds: number;
+  context?: {
+    used_tokens: number;
+    window_tokens: number;
+    estimated: boolean;
+  } | null;
+};
+
+// Cache percentages are weighted by input tokens. Context belongs to the
+// latest task request, rather than the sum of all calls in a conversation.
+export function combineUsage(rows: ActivityUsage[]) {
+  const totals: ActivityUsage = {
+    total_tokens: 0,
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    cache_known_input_tokens: 0,
+    cache_unknown_calls: 0,
+    uncached_input_tokens: 0,
+    calls: 0,
+    unknown_calls: 0,
+    model_seconds: 0,
+    context: null,
+  };
+  for (const value of rows) {
+    for (const key of [
+      "total_tokens",
+      "input_tokens",
+      "cached_input_tokens",
+      "cache_known_input_tokens",
+      "cache_unknown_calls",
+      "uncached_input_tokens",
+      "calls",
+      "unknown_calls",
+      "model_seconds",
+    ] as const) {
+      totals[key] += value[key] || 0;
+    }
+    totals.context = value.context || null;
+  }
+  return {
+    ...totals,
+    cache_rate: totals.cache_known_input_tokens
+      ? totals.cached_input_tokens / totals.cache_known_input_tokens
+      : null,
+  };
+}

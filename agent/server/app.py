@@ -103,6 +103,30 @@ async def activity(request: Request):
         return JSONResponse({'error': str(exc)}, status_code=400)
 
 
+async def conversations(request: Request):
+    result = await asyncio.to_thread(lambda: ConversationStore(state_root()).visibility())
+    return JSONResponse({'visibility': result},
+                        headers={'Cache-Control': 'no-store'})
+
+
+async def visibility(request: Request):
+    try:
+        origin = request.headers.get('origin')
+        parsed = urlsplit(origin) if origin else None
+        if parsed and (parsed.scheme != 'http' or parsed.hostname not in {'127.0.0.1', 'localhost', 'monoplanner.localhost'}
+                       or parsed.port != int(os.getenv('MONOPLANER_UI_PORT', '3000'))):
+            return JSONResponse({'error': '仅允许本机前端管理对话'}, status_code=403)
+        if not request.headers.get('content-type', '').startswith('application/json'):
+            return JSONResponse({'error': '请求必须使用 JSON'}, status_code=415)
+        value = await request.json()
+        if set(value) != {'visibility'}:
+            raise ValueError('只接受 visibility 字段')
+        return JSONResponse(await asyncio.to_thread(lambda: ConversationStore(state_root()).set_visibility(
+            request.path_params['thread'], value['visibility'])))
+    except (ValueError, TypeError, KeyError) as exc:
+        return JSONResponse({'error': str(exc)}, status_code=400)
+
+
 async def settings(request: Request):
     try:
         if request.method != 'GET':
@@ -132,5 +156,7 @@ app = Starlette(routes=[Route('/service', service, methods=['GET']),
                        Route('/workspace/directories', directories, methods=['GET']),
                        Route('/settings', settings, methods=['GET', 'POST']),
                        Route('/settings/api-key', settings, methods=['DELETE']),
+                       Route('/conversations', conversations, methods=['GET']),
+                       Route('/threads/{thread}/visibility', visibility, methods=['POST']),
                        Route('/threads/{thread}/control', controls, methods=['GET', 'POST']),
                        Route('/threads/{thread}/activity', activity, methods=['GET'])])

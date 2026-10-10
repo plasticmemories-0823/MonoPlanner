@@ -14,12 +14,16 @@ import {
 } from "react";
 import { createClient } from "./client";
 
+export type Visibility = "active" | "archived" | "deleted";
+export type ManagedThread = Thread & { visibility: Visibility };
+
 interface ThreadContextType {
-  getThreads: () => Promise<Thread[]>;
-  threads: Thread[];
-  setThreads: Dispatch<SetStateAction<Thread[]>>;
+  getThreads: () => Promise<ManagedThread[]>;
+  threads: ManagedThread[];
+  setThreads: Dispatch<SetStateAction<ManagedThread[]>>;
   threadsLoading: boolean;
   setThreadsLoading: Dispatch<SetStateAction<boolean>>;
+  setVisibility: (thread: string, visibility: Visibility) => Promise<void>;
 }
 
 const ThreadContext = createContext<ThreadContextType | undefined>(undefined);
@@ -47,10 +51,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const [authScheme] = useQueryState("authScheme", {
     defaultValue: envAuthScheme || "",
   });
-  const [threads, setThreads] = useState<Thread[]>([]);
+  const [threads, setThreads] = useState<ManagedThread[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
 
-  const getThreads = useCallback(async (): Promise<Thread[]> => {
+  const getThreads = useCallback(async (): Promise<ManagedThread[]> => {
     const finalApiUrl = resolveApiUrl(apiUrl, envApiUrl);
     const resolvedAssistantId = assistantId || envAssistantId;
     if (!finalApiUrl || !resolvedAssistantId) return [];
@@ -67,8 +71,34 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       limit: 100,
     });
 
-    return threads;
+    const response = await fetch(`${finalApiUrl}/conversations`, {
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("无法读取对话管理信息");
+    const { visibility } = await response.json();
+    return threads.map((thread) => ({
+      ...thread,
+      visibility: visibility[thread.thread_id] || "active",
+    }));
   }, [apiUrl, envApiUrl, assistantId, authScheme, envAssistantId]);
+
+  const setVisibility = async (thread: string, visibility: Visibility) => {
+    const response = await fetch(
+      `${resolveApiUrl(apiUrl, envApiUrl)}/threads/${thread}/visibility`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ visibility }),
+      },
+    );
+    const value = await response.json();
+    if (!response.ok) throw new Error(value.error || "对话管理操作未完成");
+    setThreads((old) =>
+      old.map((item) =>
+        item.thread_id === thread ? { ...item, visibility } : item,
+      ),
+    );
+  };
 
   const value = {
     getThreads,
@@ -76,6 +106,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     setThreads,
     threadsLoading,
     setThreadsLoading,
+    setVisibility,
   };
 
   return (

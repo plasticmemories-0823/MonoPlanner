@@ -10,7 +10,7 @@ from agent.task.instructions import ARTIFACT_RULES
 from agent.acceptance.artifact_checks import required_consumer, requested_calls
 from agent.model.client import configure_call
 from agent.model.errors import ModelRequestNotSent, ModelResponseNotSaved, is_context_overflow
-from agent.model.payload import request_reservation
+from agent.model.payload import request_reservation, estimate_input_tokens
 from agent.source.snapshots import SourceSnapshot
 from agent.source.versions import SourceVersions
 from agent.acceptance.contracts import VerificationSpec
@@ -20,7 +20,7 @@ from agent.task.contracts import WorkRequest
 from agent.task.instructions import TASK_RULES, CONVERSATION_RULES
 from agent.model.tools import WORK_TOOLS
 from agent.task import dialogue, operations, repair
-from agent.model.context import admit
+from agent.model.context import admit, CONTEXT_WINDOW_TOKENS
 from agent.model import compaction
 from agent.source import lifecycle as source_runtime
 from agent.acceptance import revisions
@@ -116,10 +116,22 @@ class TaskRunner:
         folder = self.root / "requests" / ("call-%04d" % ticket.call_id)
         save(folder / "request.json", {"messages": messages_to_dict(messages), "purpose": purpose})
         self.state["request_pending"] = {"call": ticket.call_id, "reservation": ticket.reserved_tokens, "purpose": purpose}
+        self.state['context_usage'] = {'used_tokens': estimate_input_tokens(messages, self.tools),
+            'window_tokens': CONTEXT_WINDOW_TOKENS, 'estimated': True, 'call': ticket.call_id}
         self.persist("model_request_started", self.state["request_pending"])
         model_started = time.monotonic()
+        live = None
+        received = False
+        if self.event_sink and callable(getattr(type(selected), 'invoke_with_progress', None)):
+            from agent.storage.live_reasoning import LiveReasoning
+            public = self.state.get('public_events', [])
+            anchor = ((self.state.get('conversation_turn') or {}).get('id')
+                      or (public[-1]['id'] if public else ''))
+            live = LiveReasoning(self.root, ticket.call_id, anchor)
         try:
-            response = selected.invoke(messages)
+            response = (selected.invoke_with_progress(messages, live.append) if live
+                        else selected.invoke(messages))
+            received = True
         except ModelRequestNotSent:
             self.budget.cancel_request(ticket)
             self.state["request_pending"] = None
@@ -136,11 +148,17 @@ class TaskRunner:
             self.persist("model_request_error_unknown_usage")
             raise
         finally:
+            if live and not received:
+                live.finish('unknown')
             if self.preparation is not None:
                 self.preparation.note_request(model_started, time.monotonic())
         self.budget.settle_request(ticket, response)
         self.state.setdefault('model_usage', []).append({'call': ticket.call_id, 'purpose': purpose,
             'seconds': time.monotonic() - model_started, 'usage': response.usage_metadata})
+        usage = response.usage_metadata
+        if usage and all(type(usage.get(k)) is int for k in ('input_tokens', 'output_tokens')):
+            self.state['context_usage'].update(used_tokens=usage['input_tokens'] + usage['output_tokens'],
+                                               estimated=False)
         raw = message_to_dict(response)
         save(folder / "response.json", raw)
         self.state["request_pending"] = None
@@ -149,6 +167,8 @@ class TaskRunner:
         else:
             self.state["response_pending"] = raw
         self.persist("model_response_received", {"call": ticket.call_id})
+        if live:
+            live.finish('completed', response.additional_kwargs.get('reasoning_content', ''))
         if self.state.get('baseline'):
             source_runtime.collect(self)
         return raw

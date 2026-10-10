@@ -20,6 +20,8 @@ class ConversationStore:
                     seq INTEGER PRIMARY KEY, thread TEXT NOT NULL, id TEXT NOT NULL,
                     kind TEXT NOT NULL, text TEXT NOT NULL, applied INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(thread, id));
+                CREATE TABLE IF NOT EXISTS presentation (
+                    thread TEXT PRIMARY KEY, visibility TEXT NOT NULL DEFAULT 'active');
             ''')
 
     @contextmanager
@@ -85,3 +87,21 @@ class ConversationStore:
         with self.connection() as db:
             db.executemany('UPDATE inputs SET applied=1 WHERE thread=? AND id=?',
                            [(self.thread(thread), identity) for identity in identities])
+
+    def visibility(self):
+        with self.connection() as db:
+            return {r['thread']: r['visibility'] for r in db.execute('SELECT * FROM presentation')}
+
+    def set_visibility(self, thread, visibility):
+        thread = self.thread(thread)
+        if visibility not in {'active', 'archived', 'deleted'}:
+            raise ValueError('visibility must be active, archived or deleted')
+        with self.connection() as db:
+            row = db.execute('SELECT data FROM sessions WHERE thread=?', (thread,)).fetchone()
+            session = json.loads(row['data']) if row else {}
+            pending = db.execute('SELECT 1 FROM inputs WHERE thread=? AND applied=0 LIMIT 1', (thread,)).fetchone()
+            if visibility != 'active' and (session.get('status') in {'needs_plan', 'executing'} or pending):
+                raise ValueError('请先暂停任务，并等待当前请求或操作结束。')
+            db.execute('INSERT INTO presentation VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET visibility=excluded.visibility',
+                       (thread, visibility))
+        return {'thread_id': thread, 'visibility': visibility}

@@ -40,6 +40,7 @@ def code_key():
         'agent/source/paging.py', 'agent/execution/probe.py',
         'agent/source/exploration.py',
         'agent/storage/recovery.py', 'agent/storage/history.py', 'agent/storage/conversations.py', 'agent/storage/activity.py',
+        'agent/storage/live_reasoning.py',
         'agent/execution/probe_batch.py', 'agent/source/preparation.py',
         'agent/source/lifecycle.py', 'agent/source/view.py',
         'agent/source/versions.py', 'agent/source/index.py',
