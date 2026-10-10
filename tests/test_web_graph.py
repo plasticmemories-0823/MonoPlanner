@@ -133,6 +133,39 @@ class ConversationTests(unittest.TestCase):
         self.assertIn('第一次', repr(model.calls[-1]))
         self.assertNotIn('PRIVATE_REASONING', repr(model.calls[-1]))
 
+    def test_new_message_after_lost_graph_view_keeps_saved_public_history(self):
+        model = ScriptedModel([text_reply('已保存的公开回答'), text_reply('继续回答')])
+        self.invoke(model)
+        self.compiled = builder.compile(checkpointer=InMemorySaver())
+        result = self.invoke(model, '新问题', 'user-two')
+        self.assertEqual(len(model.calls), 2)
+        self.assertIn('已保存的公开回答', repr(model.calls[-1]))
+        self.assertTrue(any(m.type == 'ai' and m.content == '已保存的公开回答' for m in result['messages']))
+
+    def test_duplicate_after_lost_graph_view_restores_reply_without_another_request(self):
+        model = ScriptedModel([text_reply('已有回答')])
+        first = self.invoke(model)
+        self.compiled = builder.compile(checkpointer=InMemorySaver())
+        repeated = self.invoke(model)
+        self.assertEqual(repeated['task_id'], first['task_id'])
+        self.assertEqual(len(model.calls), 1)
+        self.assertTrue(any(m.type == 'ai' and m.content == '已有回答' for m in repeated['messages']))
+
+    def test_recovered_pending_messages_do_not_replace_the_submitted_input(self):
+        from langchain_core.messages import messages_to_dict
+        model = ScriptedModel([text_reply('已有回答'), text_reply('接入此前消息')])
+        self.invoke(model)
+        session = self.store.session(self.thread)
+        saved = [HumanMessage(content='第一条排队消息', id='queued-first'),
+                 HumanMessage(content='第二条排队消息', id='queued-later')]
+        session['public_messages'].extend(messages_to_dict(saved))
+        self.store.save_session(self.thread, session)
+        for message in saved:
+            self.store.enqueue(self.thread, message.id, 'message', message.content)
+        self.compiled = builder.compile(checkpointer=InMemorySaver())
+        self.invoke(model, '第一条排队消息', 'queued-first')
+        self.assertEqual(self.store.session(self.thread)['request'], '第一条排队消息')
+
     def test_chat_after_runtime_error_starts_a_new_task_without_replaying_failed_work(self):
         from agent.source.snapshots import SnapshotError
         model = ScriptedModel([investigation(['first.py']), text_reply('你好，上一项工作仍保留失败现场。')])

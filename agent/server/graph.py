@@ -74,8 +74,10 @@ def thread_id(config):
 def intake(state: ConversationState, config: RunnableConfig):
     store, thread = ConversationStore(state_root()), thread_id(config)
     session = store.session(thread)
-    public = state.get('messages') or messages_from_dict((session or {}).get('public_messages', []))
-    latest = next((m for m in reversed(public) if isinstance(m, HumanMessage)), None)
+    saved = messages_from_dict((session or {}).get('public_messages', []))
+    incoming = state.get('messages') or []
+    public = add_messages(saved, incoming)
+    latest = next((m for m in reversed(incoming or public) if isinstance(m, HumanMessage)), None)
     if latest is None:
         raise ValueError('No saved user input; an explicit message is required')
     if not latest.id:
