@@ -15,7 +15,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from agent.server.graph import builder
 from agent.storage.activity import projection, read_activity
 from agent.storage.conversations import ConversationStore
-from test_web_graph import FixtureDocker, ScriptedModel, text_reply, investigation
+from test_web_graph import FixtureDocker, ScriptedModel, text_reply, investigation, start_reply
 
 
 class ActivityTests(unittest.TestCase):
@@ -50,7 +50,7 @@ class ActivityTests(unittest.TestCase):
         return read_activity(self.runs, self.store.session(self.thread)['activity_tasks'], cursors or {}, page_size)
 
     def test_display_reads_exact_thinking_and_operation_without_changing_history(self):
-        model = ScriptedModel([investigation(['first.py']), text_reply()])
+        model = ScriptedModel([start_reply(), investigation(['first.py']), text_reply()])
         result = self.run_model(model)
         root = self.runs/'tasks'/result['task_id']
         before = {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()}
@@ -62,7 +62,7 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(reads[-1]['status'], 'succeeded')
         self.assertIn('first.py', reads[-1]['detail'])
         self.assertEqual(before, {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()})
-        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(len(model.calls), 3)
         self.assertEqual(self.read(display['cursors'])['items'], [])
 
     def test_waiting_is_visible_while_model_holds_execution_lease(self):
