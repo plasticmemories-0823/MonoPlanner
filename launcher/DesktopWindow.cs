@@ -163,7 +163,17 @@ internal sealed class DesktopWindow : Form
         var scheduler = TaskScheduler.FromCurrentSynchronizationContext();
         try
         {
-            CoreWebView2Environment.CreateAsync(null, profile).ContinueWith(environment => {
+            string browser = null;
+            try { CoreWebView2Environment.GetAvailableBrowserVersionString(); }
+            catch(WebView2RuntimeNotFoundException) {
+                var candidates=Directory.GetDirectories(Path.Combine(Program.Runtime,"webview"));
+                if(candidates.Length!=1) throw new IOException("备用 WebView2 运行时缺失或不明确");
+                browser=candidates[0];
+            }
+            if(Environment.GetEnvironmentVariable("MONOPLANER_FIXED_WEBVIEW")=="1") {
+                browser=Directory.GetDirectories(Path.Combine(Program.Runtime,"webview"))[0];
+            }
+            CoreWebView2Environment.CreateAsync(browser, profile).ContinueWith(environment => {
                 if (environment.IsFaulted) { SetBusy(false); ShowError(environment.Exception.GetBaseException().Message); return; }
                 try
                 {

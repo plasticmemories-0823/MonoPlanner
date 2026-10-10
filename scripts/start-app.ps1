@@ -9,7 +9,9 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $taskProject = [IO.Path]::GetFullPath($ProjectRoot)
-$taskLogs = Join-Path $taskProject 'validation/launcher-logs'
+$taskPortable = Test-Path -LiteralPath (Join-Path $taskProject 'portable.json')
+$taskData = Join-Path $env:LOCALAPPDATA 'MonoPlanner/Data'
+$taskLogs = if ($taskPortable) { Join-Path $taskData 'launcher-logs' } else { Join-Path $taskProject 'validation/launcher-logs' }
 $taskMutex = $null
 $taskLockHeld = $false
 $taskClient = $null
@@ -131,6 +133,17 @@ try {
     $taskBackend = Join-Path $taskProject '.venv-web/Scripts/langgraph.exe'
     $taskNext = Join-Path $taskProject 'web/node_modules/next/dist/bin/next'
     $taskNode = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($taskPortable) {
+        $taskBackend = Join-Path $taskProject 'launcher/runtime/python/python.exe'
+        $taskNext = Join-Path $taskProject 'web/server.js'
+        $taskNode = @{Source=(Join-Path $taskProject 'launcher/runtime/node/node.exe')}
+        $env:MONOPLANER_STATE_DIR = Join-Path $taskData 'state'
+        $env:MONOPLANER_BACKEND_PORT = "$BackendPort"
+        $env:MONOPLANER_UI_PORT = "$FrontendPort"
+        $env:PATH = (Join-Path $taskProject 'launcher/runtime/git/cmd')+';'+(Join-Path $taskProject 'launcher/runtime/node')+';'+(Join-Path $env:WINDIR 'System32')
+        $env:PORT = "$FrontendPort"
+        $env:HOSTNAME = '127.0.0.1'
+    }
     Add-Type -AssemblyName System.Net.Http
     $taskHandler = New-Object Net.Http.HttpClientHandler
     $taskHandler.UseProxy = $false
@@ -153,7 +166,7 @@ try {
     }
     if (-not (Test-Path -LiteralPath $taskBackend)) { throw '未找到 .venv-web/Scripts/langgraph.exe；请按 README 安装后端依赖。' }
     if (-not $taskNode -or -not (Test-Path -LiteralPath $taskNext)) { throw '未找到 Node.js 或前端依赖；请按 README 完成安装。' }
-    $taskPython = Join-Path $taskProject '.venv-web/Scripts/python.exe'
+    $taskPython = if ($taskPortable) { $taskBackend } else { Join-Path $taskProject '.venv-web/Scripts/python.exe' }
     $taskExpected = (& $taskPython -B -X utf8 (Join-Path $taskProject 'agent/server/service.py')) | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or -not $taskExpected.source_hash) { throw '无法核对后端版本；未复用旧服务。' }
     $taskStaleBackend = $taskBackendPids.Count -gt 0 -and -not (Test-Ready 'backend' $BackendPort)
@@ -169,12 +182,14 @@ try {
     $taskBackendProcess = $null
     $taskFrontendProcess = $null
     if ($taskBackendPids.Count -eq 0) {
-        $taskBackendProcess = Start-ServiceProcess $taskBackend @('dev','--host','127.0.0.1','--port',"$BackendPort",'--no-browser','--no-reload') $taskProject 'backend'
+        $taskArguments = if ($taskPortable) { @('-B','-X','utf8','-m','agent.server.portable') } else { @('dev','--host','127.0.0.1','--port',"$BackendPort",'--no-browser','--no-reload') }
+        $taskBackendProcess = Start-ServiceProcess $taskBackend $taskArguments $taskProject 'backend'
     }
     Wait-Service 'backend' $BackendPort $taskBackendProcess
-    $taskMode = if (Test-Path -LiteralPath (Join-Path $taskProject 'web/.next/BUILD_ID')) { 'start' } else { 'dev' }
+    $taskMode = if ($taskPortable) { 'portable' } elseif (Test-Path -LiteralPath (Join-Path $taskProject 'web/.next/BUILD_ID')) { 'start' } else { 'dev' }
     if ($taskFrontendPids.Count -eq 0) {
-        $taskFrontendProcess = Start-ServiceProcess $taskNode.Source @($taskNext,$taskMode,'--hostname','127.0.0.1','--port',"$FrontendPort") (Join-Path $taskProject 'web') 'frontend'
+        $taskArguments = if ($taskPortable) { @($taskNext) } else { @($taskNext,$taskMode,'--hostname','127.0.0.1','--port',"$FrontendPort") }
+        $taskFrontendProcess = Start-ServiceProcess $taskNode.Source $taskArguments (Join-Path $taskProject 'web') 'frontend'
     }
     Wait-Service 'frontend' $FrontendPort $taskFrontendProcess
     $taskResult = @{ project = $taskProject; url = "http://127.0.0.1:$FrontendPort/"; frontend_mode = $taskMode;

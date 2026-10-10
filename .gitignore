@@ -39,3 +39,5 @@ htmlcov/
 /.langgraph_api/
 /.venv-web/
 /launcher/runtime/
+/dist/
+/.next/

@@ -12,6 +12,7 @@ internal static class Program
 {
     internal static readonly string Root = AppDomain.CurrentDomain.BaseDirectory;
     internal static readonly string Runtime = Path.Combine(Root, "launcher", "runtime");
+    internal static readonly string Data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MonoPlanner", "Data");
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool SetDllDirectory(string path);
@@ -38,8 +39,9 @@ internal static class Program
 
     internal static string Failure()
     {
-        string file = Path.Combine(Root, "validation", "launcher-logs", "last-error.txt");
-        return File.Exists(file) ? File.ReadAllText(file) : "操作失败，请查看 validation/launcher-logs。";
+        string logs = File.Exists(Path.Combine(Root,"portable.json")) ? Path.Combine(Data,"launcher-logs") : Path.Combine(Root,"validation","launcher-logs");
+        string file = Path.Combine(logs, "last-error.txt");
+        return File.Exists(file) ? File.ReadAllText(file) : "操作失败，请查看启动日志："+logs;
     }
 
     [STAThread]

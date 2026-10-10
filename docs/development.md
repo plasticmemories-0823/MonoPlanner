@@ -10,7 +10,7 @@
 | `agent/task/` | 任务调度、操作契约与预算 |
 | `agent/model/` | DeepSeek 请求、严格工具定义、前缀检查与压缩 |
 | `agent/source/` | 源码快照、索引、区间原文与增量地图 |
-| `agent/execution/` | 本地／Docker 执行与隔离调查 |
+| `agent/execution/` | 原生 LPAC／显式完全访问／Docker 执行及文件打开 |
 | `agent/acceptance/` | 验收试跑、冻结、修订与最终结果 |
 | `agent/storage/` | 原始记录、检查点、会话与恢复 |
 | `resources/` | Schema、提示词与运行驱动 |
@@ -58,7 +58,8 @@ pnpm --dir web build
 - 先在原始源码上试跑验收，再冻结并释放修改。冻结的代码、驱动、回归命令及用户固定验收不能被普通聊天改写。
 - 零用例、新增跳过、加载失败、不完整结果、超时和真实失败不能算通过。验收修订继续走证据与源码版本对照。
 - 完整历史只追加，压缩只替换请求视图；摘要不批准执行或覆盖真实失败。当前压缩阈值约 80 万输入 Token。
-- 本地执行不是操作系统安全沙箱；需要只读、无网 Shell 调查时使用 Docker 后端。
+- 日常执行默认使用原生 LPAC 和 Job Object；隔离调查强制只读、无网。Docker 后端保留给正式评测。完全访问仅由用户按对话开启，不改变工具表。
+- `list_applications`、`open_file`、`launch_application` 属于聊天工具；外部打开的精确目标需要一次性用户授权，不能当成代码执行绕过沙盒。
 
 ## 回退与记录
 
