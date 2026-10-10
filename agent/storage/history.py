@@ -1,5 +1,7 @@
 """SQLite indexes the existing archive; files hold originals, one loop owns execution."""
 from contextlib import contextmanager
+from collections import OrderedDict
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -18,16 +20,27 @@ def sha(raw):
 
 
 class LocalHistory:
+    MESSAGE_CACHE_BYTES = 32 * 1024 * 1024
+    MESSAGE_CACHE_ITEMS = 4096
+    AUDIT_EVENTS = {'model_request_started', 'step_started', 'plan_accepted',
+                    'acceptance_frozen', 'acceptance_trial_started', 'task_returned'}
+
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.connection = None
         self.stats = {'read_cache_hits': 0, 'resumed': 0, 'direct_returns': 0}
         self.last_commit = 0
+        self.message_cache = OrderedDict()
+        self.message_cache_bytes = 0
+        self.stats.update(message_cache_hits=0, message_serializations=0, message_audits=0)
 
     def close(self):
+        self.message_cache.clear()
+        self.message_cache_bytes = 0
         if self.connection is not None:
             self.connection.close()
+            self.connection = None
 
     @contextmanager
     def lease(self):
@@ -57,6 +70,8 @@ class LocalHistory:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def _open(self):
+        self.message_cache.clear()
+        self.message_cache_bytes = 0
         db = self.root/'history.sqlite3'
         if db.is_symlink():
             raise ValueError('History database cannot be a link')
@@ -76,9 +91,9 @@ class LocalHistory:
             save(self.root/'state.json', {'format':'task-history-reference','database':'history.sqlite3',
                 'meaning':'Progress references only; original history is in this archive.'})
 
-    def _immutable(self, relative, value):
+    def _immutable(self, relative, value, raw=None):
         path = self.root/relative
-        raw = encode(value).encode('utf-8')
+        raw = encode(value).encode('utf-8') if raw is None else raw
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             if path.is_symlink() or path.read_bytes() != raw:
@@ -101,8 +116,39 @@ class LocalHistory:
         return {'path':safe.relative_to(self.root).as_posix(), 'sha256':sha(safe.read_bytes())}
 
     def _message(self, message):
-        key = sha(encode(message).encode())
-        return self._immutable('history/messages/'+key+'.json', message)
+        key = id(message)
+        cached = self.message_cache.get(key)
+        if cached and cached['original'] is message and cached['value'] == message:
+            self.message_cache.move_to_end(key)
+            self.stats['message_cache_hits'] += 1
+            return dict(cached['reference'])
+        if cached:
+            self.message_cache_bytes -= self.message_cache.pop(key)['size']
+        raw = encode(message).encode('utf-8')
+        self.stats['message_serializations'] += 1
+        reference = self._immutable('history/messages/'+sha(raw)+'.json', message, raw)
+        # Keep a separate value to detect in-place edits, and bound both copies.
+        size = len(raw) * 2
+        if size <= self.MESSAGE_CACHE_BYTES:
+            while self.message_cache and (self.message_cache_bytes + size > self.MESSAGE_CACHE_BYTES
+                    or len(self.message_cache) >= self.MESSAGE_CACHE_ITEMS):
+                self.message_cache_bytes -= self.message_cache.popitem(last=False)[1]['size']
+            self.message_cache[key] = {'original': message, 'value': deepcopy(message),
+                                      'reference': reference, 'size': size}
+            self.message_cache_bytes += size
+        return dict(reference)
+
+    def _audit_messages(self, packed):
+        references = packed['history_refs'] + packed.get('chat_history_refs', [])
+        for name in ('pending', 'compaction_pending'):
+            reference = (packed.get(name) or {}).get('response_ref')
+            if reference:
+                references.append(reference)
+        for reference in {r['path']: r for r in references}.values():
+            raw = _safe_file(self.root, Path(reference['path'])).read_bytes()
+            if sha(raw) != reference['sha256']:
+                raise ValueError('Recorded history checksum mismatch: '+reference['path'])
+            self.stats['message_audits'] += 1
 
     def _register(self, reference, kind, query='', scope='', source=''):
         old = self.connection.execute('SELECT sha256 FROM artifacts WHERE path=?', (reference['path'],)).fetchone()
@@ -127,6 +173,8 @@ class LocalHistory:
             pending['response_ref'] = self._message(pending.pop('response'))
             pending['rows_refs'] = [self._reference(self.root/r['record']) for r in pending.pop('rows')]
             packed['pending'] = pending
+        if event in self.AUDIT_EVENTS:
+            self._audit_messages(packed)
         number = self.last_commit + 1
         import uuid
         name = 'history/checkpoints/%06d-%s.json' % (number, uuid.uuid4().hex)
