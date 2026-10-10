@@ -24,6 +24,7 @@ def code_key(root=None):
         'agent/task/runner.py', 'agent/task/dialogue.py', 'resources/prompts/conversation.txt', 'agent/task/operations.py',
         'agent/server/graph.py', 'agent/server/app.py', 'langgraph.json',
         'agent/server/runtime.py', 'agent/storage/preferences.py', 'agent/settings.py',
+        'agent/server/execution.py', 'agent/execution/docker.py',
         'agent/server/workspaces.py',
         'agent/execution/web.py', 'resources/web.schema.json',
         'agent/server/assistant.py', 'agent/execution/assistant_files.py', 'agent/execution/existing.py',

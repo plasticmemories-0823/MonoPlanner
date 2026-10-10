@@ -77,6 +77,33 @@ subprocess.run([sys.executable,'-c',%r],check=True)
         self.assertIn('DENIED', text)
         self.assertEqual((self.repo/'original.txt').read_text(), 'original')
 
+    def test_embedded_python_imports_workspace_for_code_module_and_script(self):
+        (self.repo/'project_sample.py').write_text('VALUE = "workspace-import-ok"\nprint(VALUE)\n')
+        scripts = self.repo/'scripts'; scripts.mkdir()
+        (scripts/'sibling.py').write_text('VALUE = "script-sibling-ok"\n')
+        (scripts/'main.py').write_text('import sibling, project_sample; print(sibling.VALUE)\n')
+        self.backend.read_only = True
+        cases = [(['-c', 'import project_sample'], 'workspace-import-ok'),
+                 (['-m', 'project_sample'], 'workspace-import-ok'),
+                 ([str(scripts/'main.py')], 'script-sibling-ok')]
+        for args, expected in cases:
+            with self.subTest(args=args):
+                result = self.backend.run_process([self.backend.python_executable, *args],
+                    stdout_path=self.root/'stdout.log', stderr_path=self.root/'stderr.log')
+                self.assertEqual(result['exit_code'], 0, (self.root/'stderr.log').read_text())
+                self.assertIn(expected, (self.root/'stdout.log').read_text())
+                self.assertEqual(result['isolation'], 'lpac')
+                self.assertEqual(result['changed_files'], [])
+
+    def test_executor_workspace_binding_cannot_be_overridden_by_call_parameters(self):
+        (self.repo/'project_sample.py').write_text('VALUE = "sandbox-copy"\n')
+        result = self.backend.run_process([self.backend.python_executable, '-c',
+            'import project_sample,os;print(project_sample.VALUE);print(os.getcwd()==os.environ["MONOPLANER_WORKSPACE_DIR"])'],
+            env={'MONOPLANER_WORKSPACE_DIR': str(self.root)},
+            stdout_path=self.root/'stdout.log', stderr_path=self.root/'stderr.log')
+        self.assertEqual(result['exit_code'], 0)
+        self.assertIn('sandbox-copy\nTrue', (self.root/'stdout.log').read_text())
+
     def test_shell_body_is_preserved(self):
         report = self.backend.run_process('echo shell-ok', stdout_path=self.root/'stdout.log',
                                          stderr_path=self.root/'stderr.log', shell=True)

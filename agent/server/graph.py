@@ -25,6 +25,7 @@ from agent.storage.read_sources import ReadSources
 from agent.storage.records import save
 from agent.storage.usage import summarize
 from agent.server import interrupts
+from agent.server.execution import workspace_binding
 
 ACTIVE = {'needs_plan', 'executing'}
 FINISHED = {'chat_complete', 'verified_success', 'task_blocked', 'settings_required'}
@@ -121,6 +122,7 @@ def intake(state: ConversationState, config: RunnableConfig):
                    'history': messages_to_dict(public[:-1]), 'status': 'needs_plan',
                    'last_input': latest.id, 'public_messages': messages_to_dict(public)}
         session['runtime_settings'] = Preferences().defaults()
+        session['execution_binding'] = workspace_binding(repo)
         session['read_roots'] = roots
         session['read_sources'] = sources
         session['activity_tasks'] = previous + [{'id': session['task_id'], 'input_id': latest.id}]
@@ -142,6 +144,7 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
         session['read_sources'] = ReadSources(state_root()).get(thread, session.get('read_roots', []))
         session['read_roots'] = [s['path'] for s in session['read_sources'] if s['kind'] == 'directory']
         runner = ConversationRunner(LazyModel(session['runtime_settings']), session['repo'], phase=phase,
+                        execution_binding=session.get('execution_binding', {'backend': 'native'}),
                         read_roots=session.get('read_roots', []),
                         read_sources=session['read_sources'],
                         access_mode=permission['effective'],

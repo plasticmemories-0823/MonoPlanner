@@ -223,6 +223,7 @@ class NativeEnvironment(LocalEnvironment):
         if self.access_mode == 'full':
             from agent.execution.process import run_process
             environment = clean_environment(env)
+            environment['MONOPLANER_WORKSPACE_DIR'] = str(self.repo_root)
             environment['PATH'] = os.environ.get('PATH', '')
             return run_process(command, cwd=self.repo_root, stdout_path=stdout_path,
                                stderr_path=stderr_path, timeout=timeout, shell=shell,
@@ -242,6 +243,7 @@ class NativeEnvironment(LocalEnvironment):
         environment = clean_environment(env)
         environment.update(TEMP=str(temporary), TMP=str(temporary), HOME=str(temporary),
                            PATH=str(self.runtime)+';'+str(Path(os.environ['SystemRoot'])/'System32'))
+        environment['MONOPLANER_WORKSPACE_DIR'] = str(source)
         # Dependencies are copied without links. Avoid Node's ancestor realpath
         # scan, which would otherwise require read permissions outside the box.
         environment['NODE_OPTIONS'] = '--preserve-symlinks --preserve-symlinks-main ' + environment.get('NODE_OPTIONS', '')

@@ -24,7 +24,7 @@ from agent.server import assistant
 
 
 class ConversationRunner(TaskRunner):
-    def __init__(self, model, repo, *, phase='decide', read_roots=None, read_sources=None, access_mode='sandbox', conversation_id=None, **kwargs):
+    def __init__(self, model, repo, *, phase='decide', read_roots=None, read_sources=None, access_mode='sandbox', conversation_id=None, execution_binding=None, **kwargs):
         kwargs.pop('interactive', None)
         super().__init__(model, None, interactive=True, yield_boundary=True, **kwargs)
         self.repo, self.phase = repo, phase
@@ -33,14 +33,23 @@ class ConversationRunner(TaskRunner):
                                  ({'path': p, 'kind': 'directory'} for p in self.read_roots))
         self.access_mode = access_mode
         self.conversation_id = conversation_id
+        self.execution_binding = execution_binding or {'backend': 'native'}
         self.mailbox = self.control_source
         self.control_source = lambda: [r for r in self.mailbox() if r['kind'] != 'message']
 
     def activate(self):
         if not self.repo or not Path(self.repo).is_dir():
             raise ValueError('工作需要选择一个已有仓库；普通聊天无需仓库')
-        self.environment = NativeEnvironment(self.repo, artifact_root=self.root.parent.parent/'execution'/self.root.name,
-                                             access_mode=self.access_mode, read_sources=self.read_sources)
+        if self.execution_binding['backend'] == 'docker':
+            if self.access_mode == 'full' or self.read_sources:
+                raise ValueError('Formal evaluation uses its fixed isolated workspace; full access or extra materials require a new native task')
+            from agent.server.execution import ConversationDocker
+            self.environment = ConversationDocker(self.repo, self.execution_binding['image'], self.root)
+            if self.environment._container_id is None:
+                self.environment.start()
+        else:
+            self.environment = NativeEnvironment(self.repo, artifact_root=self.root.parent.parent/'execution'/self.root.name,
+                                                 access_mode=self.access_mode, read_sources=self.read_sources)
         if self.root.is_relative_to(self.environment.repo_root) or self.root.is_relative_to(self.environment.artifact_root):
             raise ValueError('Task records must stay outside source and execution mounts')
         self.env_key = recovery.environment_key(self.environment)
@@ -63,6 +72,8 @@ class ConversationRunner(TaskRunner):
                         raise ValueError('Task or engine changed; old checkpoint requires its frozen version')
                     if stored.get('runtime_settings') != self.runtime_settings:
                         raise ValueError('Task model/network settings changed; new defaults apply to new tasks only')
+                    if stored.get('execution_binding', {'backend': 'native'}) != self.execution_binding:
+                        raise ValueError('Saved execution binding changed; no backend migration')
                     self.state, self.rules = stored, stored['rules']
                     self.return_status = stored['status']
                     if stored.get('assistant_running'):
@@ -85,6 +96,9 @@ class ConversationRunner(TaskRunner):
         finally:
             from agent.source.lifecycle import close
             close(self)
+            if (self.execution_binding['backend'] == 'docker' and self.environment is not None
+                    and self.state and self.state.get('status') not in {'needs_plan', 'executing', 'paused', 'awaiting_user'}):
+                self.environment.close()
             self.history_store.close()
 
     def _run_new(self, history, text, budget, verify_command=None, acceptance=None):
@@ -92,12 +106,18 @@ class ConversationRunner(TaskRunner):
         self.rules += '\nSelected workspace: ' + (self.repo or '(none)')
         self.rules += '\nAuthorized read-only materials: ' + json.dumps(self.read_sources, ensure_ascii=False)
         self.rules += '\nCurrent user-selected permission: ' + self.access_mode
-        self.rules += ('\nExecution environment: Windows; shell commands use cmd.exe, not Bash. '
+        if self.execution_binding['backend'] == 'docker':
+            self.rules += ('\nExecution environment: fixed Linux Docker evaluation image, Bash shell, '
+                           'network disabled. Source directory inside execution is /testbed. '
+                           'Python executable: /opt/miniconda3/envs/testbed/bin/python. '
+                           'Do not use Windows host paths in execution commands.')
+        else:
+            self.rules += ('\nExecution environment: Windows; shell commands use cmd.exe, not Bash. '
                        'Use fixed read/search tools for source lookup. For Python execution use the '
                        'explicit executable below; Unix commands and heredocs are not available. '
                        'Sandbox/ask mode uses native LPAC isolation; full mode uses Windows user permissions.')
-        from agent.settings import PROJECT_ROOT
-        self.rules += '\nPython executable: ' + str(PROJECT_ROOT/'launcher/runtime/python/python.exe')
+            from agent.settings import PROJECT_ROOT
+            self.rules += '\nPython executable: ' + str(PROJECT_ROOT/'launcher/runtime/python/python.exe')
         self.rules += '\nTask networking: ' + ('enabled' if self.runtime_settings['online'] else 'disabled')
         if required_consumer(text):
             self.rules += ARTIFACT_RULES
@@ -108,6 +128,7 @@ class ConversationRunner(TaskRunner):
             'read_roots': self.read_roots,
             'read_sources': self.read_sources,
             'access_mode': self.access_mode,
+            'execution_binding': self.execution_binding,
             'status': 'needs_plan', 'plan_count': 0, 'repair_count': 0, 'plan_error': '', 'rounds': [],
             'seen_plans': [], 'pending': None, 'running_step': None, 'request_pending': None}
         self.return_status = 'needs_plan'
