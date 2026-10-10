@@ -85,7 +85,8 @@ def build(destination, make_zip=True):
     metadata = {'product': 'MonoPlanner', 'platform': 'Windows 11 x64',
                 'python': '3.13.15', 'node': '24.14.0', 'git': '2.53.0.2',
                 'webview2_sdk': '1.0.4258.31', 'webview2_fixed': '155.0.4283.45',
-                'startup_installs_dependencies': False, 'daily_requires_docker': False}
+                'startup_installs_dependencies': False, 'chat_requires_docker': False,
+                'coding_requires_docker': True, 'existing_tasks_require_docker': True}
     licenses = []
     for info in (runtime/'python/Lib/site-packages').glob('*.dist-info/METADATA'):
         values = Parser().parsestr(info.read_text(encoding='utf-8'))
