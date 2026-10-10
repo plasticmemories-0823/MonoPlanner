@@ -114,6 +114,8 @@ class LocalHistory:
     def record(self, state, event, payload):
         packed = dict(state)
         packed['history_refs'] = [self._message(m) for m in packed.pop('history')]
+        if 'chat_history' in packed:
+            packed['chat_history_refs'] = [self._message(m) for m in packed.pop('chat_history')]
         compaction = packed.get('compaction_pending')
         if compaction and compaction.get('response'):
             compaction = dict(compaction)
@@ -168,6 +170,8 @@ class LocalHistory:
             if sha(_safe_file(self.root,Path(path)).read_bytes()) != digest:
                 raise ValueError('Original record changed: '+path)
         value['history'] = [self._checked(r) for r in value.pop('history_refs')]
+        if 'chat_history_refs' in value:
+            value['chat_history'] = [self._checked(r) for r in value.pop('chat_history_refs')]
         compaction = value.get('compaction_pending')
         if compaction and compaction.get('response_ref'):
             compaction['response'] = self._checked(compaction.pop('response_ref'))

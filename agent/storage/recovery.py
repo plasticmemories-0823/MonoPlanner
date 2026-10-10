@@ -115,6 +115,8 @@ def restore(loop, stored, identity):
         stored.update(status='task_cancelled',reason=loop.budget.cancel_reason)
         return loop.result()
     if stored['status'] in {'paused', 'awaiting_user'}:
+        if not getattr(loop, 'resume_without_input', True):
+            return loop.result()
         stored['status'] = 'executing' if stored.get('pending') else 'needs_plan'
     loop.persist('task_resumed', {'completed_steps_not_replayed':True})
     return loop._drive()

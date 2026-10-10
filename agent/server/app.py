@@ -108,7 +108,7 @@ def control_value(thread, value=None):
     record = store.enqueue(thread, value['id'], value['kind'], value.get('text', ''))
     if not record['applied']:
         from agent.server.interrupts import interrupt
-        interrupt(state_root(), thread, record['kind'])
+        interrupt(state_root(), thread, record['kind'], record['id'])
     return JSONResponse({'received': True, 'id': record['id'], 'applied': bool(record['applied'])})
 
 

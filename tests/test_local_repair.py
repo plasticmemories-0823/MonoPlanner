@@ -339,7 +339,8 @@ class LocalRepairTests(unittest.TestCase):
             result = engine.run([], "return 4", StepBudget(max_steps=8))
         self.assertEqual(result["status"], "verified_success", result)
         self.assertEqual(len(requests), 3)
-        expected = wire_input([], WORK_TOOLS)["tools"]
+        from agent.model.tools import CODING_TOOLS
+        expected = wire_input([], CODING_TOOLS)["tools"]
         for body in requests:
             self.assertEqual(body["tools"], expected)
             self.assertTrue(all(t["function"]["strict"] for t in body["tools"]))

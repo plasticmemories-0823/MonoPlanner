@@ -51,8 +51,8 @@ class TaskRunner:
         self.optimize_source, self.overlap_preparation = optimize_source, overlap_preparation
         self.preparation, self.preparation_errors = None, []
         self.runtime_settings = dict(runtime_settings or {})
-        from agent.model.tools import CHAT_TOOLS
-        self.tools = CHAT_TOOLS if runtime_settings is not None else WORK_TOOLS
+        from agent.model.tools import CODING_TOOLS
+        self.tools = CODING_TOOLS
 
     def persist(self, event, payload=None):
         self.state["budget"] = asdict(self.budget)
@@ -208,11 +208,7 @@ class TaskRunner:
         if finish in {"length", "content_filter", "aborted", "insufficient_system_resource"}:
             raise ValueError("Incomplete model response: " + str(finish))
         calls = response.tool_calls
-        if self.runtime_settings and calls and not response.invalid_tool_calls:
-            from agent.server.assistant import ASSISTANT_NAMES
-            if all(c['name'] in ASSISTANT_NAMES | {'web_search', 'web_fetch'} for c in calls) and any(c['name'] in ASSISTANT_NAMES for c in calls):
-                return dialogue.AssistantReply(calls), raw
-        if self.runtime_settings and calls and not response.invalid_tool_calls and all(c['name'] in {'web_search', 'web_fetch'} for c in calls):
+        if calls and not response.invalid_tool_calls and all(c['name'] in {'web_search', 'web_fetch'} for c in calls):
             return dialogue.WebReply(calls), raw
         if self.interactive and not calls and not response.invalid_tool_calls and isinstance(response.content, str) and response.content.strip():
             return dialogue.TextReply(response.content), raw

@@ -106,24 +106,24 @@ class ProjectDockerTests(unittest.TestCase):
         self.assertNotIn('Unix commands and heredocs are not available', model.calls[0][0].content)
 
     def test_missing_image_preserves_first_work_response_and_waits(self):
-        from test_web_graph import ConversationTests, ScriptedModel, investigation
+        from test_web_graph import ConversationTests, ScriptedModel, start_reply, investigation
         fixture = ConversationTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
         (fixture.root/'runs/project-environments.json').unlink()
-        model = ScriptedModel([investigation(['first.py'])])
+        model = ScriptedModel([start_reply(), investigation(['first.py'])])
         result = fixture.invoke(model, '直接修改')
         self.assertEqual(result['status'], 'awaiting_user')
         self.assertEqual(len(model.calls), 1)
         self.assertFalse(list((fixture.root/'runs/tasks'/result['task_id']).glob('plans/*/*/result.json')))
 
     def test_permission_modes_never_select_host_execution(self):
-        from test_web_graph import ConversationTests, ScriptedModel, investigation, text_reply, FixtureDocker
+        from test_web_graph import ConversationTests, ScriptedModel, start_reply, investigation, text_reply, FixtureDocker
         from agent.storage.permissions import Permissions
         for mode in ('sandbox', 'ask', 'full'):
             with self.subTest(mode=mode):
                 fixture = ConversationTests(); fixture.setUp()
                 try:
                     Permissions(fixture.root/'runs').request(fixture.thread, mode)
-                    model = ScriptedModel([investigation(['first.py']), text_reply('读取完成')])
+                    model = ScriptedModel([start_reply(), investigation(['first.py']), text_reply('读取完成')])
                     with patch.object(FixtureDocker, 'start', wraps=lambda: None) as started:
                         result = fixture.invoke(model, '直接读取源码')
                     self.assertTrue(result['workspace_bound'])
@@ -153,12 +153,12 @@ class ProjectDockerTests(unittest.TestCase):
         from contextlib import redirect_stdout
         import io
         from agent.cli.tasks import main
-        from test_web_graph import FixtureDocker, ScriptedModel, investigation, BlockedModel
+        from test_web_graph import FixtureDocker, ScriptedModel, start_reply, investigation, BlockedModel
         self.configure()
         for name in ('one.py', 'two.py'):
             (self.repo/name).write_text('VALUE = 1\n')
         folder = self.root/'state/tasks/cli'
-        model = ScriptedModel([investigation(['one.py', 'two.py'])])
+        model = ScriptedModel([start_reply(), investigation(['one.py', 'two.py'])])
         with patch('agent.execution.task_docker.TaskDocker', FixtureDocker), \
                 patch('agent.cli.tasks.LazyModel', return_value=model), redirect_stdout(io.StringIO()):
             self.assertEqual(main(['--state-dir', str(folder), '--repo', str(self.repo), '--task', '直接读取',
@@ -170,4 +170,4 @@ class ProjectDockerTests(unittest.TestCase):
             self.assertEqual(main(['--state-dir', str(folder)]), 1)
         self.assertEqual(len(list(folder.glob('plans/*/*/result.json'))), 2)
         self.assertEqual(before[0][0].read_bytes(), before[0][1])
-        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(len(model.calls), 2)

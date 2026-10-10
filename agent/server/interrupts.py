@@ -11,16 +11,37 @@ _current = ContextVar('conversation_interrupt', default=None)
 class Signal:
     def __init__(self):
         self.kind = None
+        self.sequence = 0
+        self.pending = {}
         self.callbacks = set()
         self.lock = RLock()
 
-    def interrupt(self, kind):
+    def interrupt(self, kind, identity=None):
         with self.lock:
-            if self.kind != 'pause':
-                self.kind = kind
+            self.sequence += 1
+            self.pending[self.sequence] = (kind, identity)
+            self._refresh()
             callbacks = tuple(self.callbacks)
         for callback in callbacks:
             callback()
+        return self.sequence
+
+    def _refresh(self):
+        kinds = [kind for kind, _ in self.pending.values()]
+        self.kind = 'pause' if 'pause' in kinds else kinds[-1] if kinds else None
+
+    def consume(self, sequence):
+        """Consume exactly the observed signal; never clear a newer input."""
+        with self.lock:
+            self.pending.pop(sequence, None)
+            self._refresh()
+
+    def consume_input(self, identity):
+        with self.lock:
+            for sequence, (_, saved) in list(self.pending.items()):
+                if saved == identity:
+                    self.pending.pop(sequence)
+            self._refresh()
 
     @contextmanager
     def subscribe(self, callback):
@@ -40,13 +61,13 @@ def current():
     return _current.get()
 
 
-def interrupt(root, thread, kind):
+def interrupt(root, thread, kind, identity=None):
     if kind not in {'pause', 'message'}:
         return
     with _lock:
         signal = _active.get((str(root), thread))
     if signal:
-        signal.interrupt(kind)
+        signal.interrupt(kind, identity)
 
 
 @contextmanager

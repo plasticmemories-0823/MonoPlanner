@@ -35,7 +35,7 @@ class GeneralAssistantTests(unittest.TestCase):
                      usage_file=args.get('usage_file', ''))
 
     def test_fixed_tools_and_aggregate_parameter_feedback(self):
-        self.assertEqual(len(CHAT_TOOLS), 14)
+        self.assertEqual(len(CHAT_TOOLS), 11)
         for schema in ASSISTANT_SCHEMA.values():
             self.assertFalse(schema['additionalProperties'])
             self.assertEqual(set(schema['required']), set(schema['properties']))
@@ -109,7 +109,7 @@ class GeneralAssistantTests(unittest.TestCase):
         model = ScriptedModel([self.task('raise SystemExit(1)'), investigation(['first.py']), text_reply('请确认是否修复')])
         result = self.invoke(model, '只运行')
         self.assertEqual(result['status'], 'chat_complete')
-        self.assertIn('不自动转入源码修复', model.calls[-1][-1].content)
+        self.assertIn('Only advertised chat tools', model.calls[-1][-1].content)
         self.assertTrue(result['workspace_bound'])
         self.assertFalse(list((self.root/'runs/tasks'/result['task_id']).glob('plans/*/plan.json')))
         self.assertEqual((self.repo/'first.py').read_text(), 'VALUE = 1\n')
@@ -178,13 +178,13 @@ class GeneralAssistantTests(unittest.TestCase):
 
     def test_query_to_coding_uses_saved_response_and_visible_source(self):
         model = ScriptedModel([reply('read_file', path='first.py', offset=0, limit=80, reread_reason=''),
-                               investigation(['first.py']), text_reply()])
+                               __import__('test_web_graph').start_reply(), investigation(['first.py']), text_reply()])
         result = self.invoke(model, '调查后进入源码工作')
-        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(len(model.calls), 4)
         self.assertTrue(result['workspace_bound'])
         results = list((self.root/'runs'/'tasks'/result['task_id']/'plans').glob('*/*/result.json'))
         self.assertEqual(len(results), 1)
-        self.assertTrue(json.loads(results[0].read_text())['data']['already_visible'])
+        self.assertNotIn('already_visible', json.loads(results[0].read_text())['data'])
 
     def test_declared_package_script_and_local_module_keep_argv(self):
         package = self.repo/'package.json'

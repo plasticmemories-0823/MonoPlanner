@@ -237,7 +237,7 @@ class GraphInterruptionTests(unittest.TestCase):
         self.assertFalse(self.store.pending(self.thread))
 
     def test_interrupting_a_supplement_retains_both_user_messages(self):
-        paused = fixtures.ScriptedModel([fixtures.investigation(['first.py'])],
+        paused = fixtures.ScriptedModel([fixtures.start_reply(), fixtures.investigation(['first.py'])],
             hook=lambda n: self.store.enqueue(self.thread, 'initial-pause', 'pause'))
         self.assertEqual(self.invoke(paused, '最初要求')['status'], 'paused')
         client = WaitingClient()

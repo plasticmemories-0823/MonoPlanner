@@ -33,12 +33,12 @@ class ConversationRoutingTests(unittest.TestCase):
         self.assertNotIn('native LPAC isolation', rules)
 
     def test_chat_work_chat_routes_share_public_context_without_replaying_reads(self):
-        model = fixtures.ScriptedModel([fixtures.text_reply('你好'), fixtures.investigation(['first.py']),
+        model = fixtures.ScriptedModel([fixtures.text_reply('你好'), fixtures.start_reply(), fixtures.investigation(['first.py']),
                                        fixtures.text_reply('读完了'), fixtures.text_reply('我是一名编码助手')])
         self.invoke(model, '你好')
         work = self.invoke(model, '读取文件', 'two')
         chat = self.invoke(model, '介绍自己', 'three')
-        self.assertEqual(len(model.calls), 4)
+        self.assertEqual(len(model.calls), 5)
         self.assertEqual(chat['task_id'], work['task_id'])
         self.assertEqual(chat['status'], 'awaiting_user')
         self.assertEqual(chat['turn_status'], 'chat_complete')
@@ -48,8 +48,8 @@ class ConversationRoutingTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
 
     def test_paused_task_can_chat_without_resuming_or_losing_original_response(self):
-        model = fixtures.ScriptedModel([fixtures.investigation(['first.py']), fixtures.text_reply('你好'), fixtures.text_reply('读取已完成')],
-            hook=lambda n: self.store.enqueue(self.thread, 'pause', 'pause') if n == 1 else None)
+        model = fixtures.ScriptedModel([fixtures.start_reply(), fixtures.investigation(['first.py']), fixtures.text_reply('你好'), fixtures.text_reply('读取已完成')],
+            hook=lambda n: self.store.enqueue(self.thread, 'pause', 'pause') if n == 2 else None)
         paused = self.invoke(model, '读取文件')
         self.assertEqual(paused['status'], 'paused')
         chatted = self.invoke(model, '你好', 'two')
@@ -60,13 +60,13 @@ class ConversationRoutingTests(unittest.TestCase):
         with patch('agent.server.graph.model_factory', return_value=model):
             result = self.compiled.invoke({'messages': []}, self.config)
         self.assertNotEqual(result['status'], 'runtime_error')
-        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(len(model.calls), 4)
         self.assertEqual(len(list((self.root/'runs'/'tasks'/paused['task_id']/'plans').glob('*/*/result.json'))), 1)
 
     def test_new_defaults_do_not_change_active_task_or_restored_tool_envelope(self):
         factory_settings = []
-        model = fixtures.ScriptedModel([fixtures.investigation(['first.py']), fixtures.text_reply()],
-            hook=lambda n: self.store.enqueue(self.thread, 'pause', 'pause') if n == 1 else None)
+        model = fixtures.ScriptedModel([fixtures.start_reply(), fixtures.investigation(['first.py']), fixtures.text_reply()],
+            hook=lambda n: self.store.enqueue(self.thread, 'pause', 'pause') if n == 2 else None)
         self.invoke(model, '读取文件')
         Preferences().update({'reasoning_effort': 'low', 'online': True})
         self.store.enqueue(self.thread, 'resume', 'resume')
@@ -130,15 +130,14 @@ class ConversationRoutingTests(unittest.TestCase):
         self.assertEqual(result['status'], 'runtime_error')
         self.assertNotIn('半句话', repr(result['messages']))
 
-    def test_missing_repository_pairs_first_work_call_without_initializing_source(self):
-        model = fixtures.ScriptedModel([fixtures.investigation(['first.py']), fixtures.text_reply('请先选择仓库')])
+    def test_missing_repository_pairs_handoff_without_initializing_source(self):
+        model = fixtures.ScriptedModel([fixtures.start_reply()])
         with patch('agent.server.graph.model_factory', return_value=model), \
                 patch('agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('no repository')):
             result = self.compiled.invoke({'messages': [HumanMessage(content='读取文件', id='one')]}, self.config)
-        self.assertEqual(result['status'], 'chat_complete')
-        self.assertEqual(len(model.calls), 2)
-        self.assertIn('workspace_required', model.calls[1][-1].content)
-        self.assertEqual(model.calls[1][-1].tool_call_id, 'investigate')
+        self.assertEqual(result['status'], 'awaiting_user')
+        self.assertEqual(len(model.calls), 1)
+        self.assertFalse(result['workspace_bound'])
 
     def test_missing_key_can_be_configured_before_a_new_turn(self):
         with patch('agent.server.graph.model_factory', side_effect=ValueError('请配置 DEEPSEEK_API_KEY')):

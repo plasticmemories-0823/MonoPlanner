@@ -34,11 +34,19 @@ class FixtureDocker(LocalEnvironment):
                            timeout=self.timeout if timeout is None else timeout, shell=shell, env=env, on_started=on_started)
 
 
+def start_reply():
+    return AIMessage(content='开始准备工作资料。', tool_calls=[{'name': 'start_work', 'id': 'start', 'args': {}}],
+                     usage_metadata={'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2})
+
+
 class BlockedModel:
     def bind_tools(self, tools):
+        self.tools = tools
         return self
 
     def invoke(self, messages):
+        if any(t.name == 'start_work' for t in self.tools):
+            return start_reply()
         return AIMessage(content='', tool_calls=[{'name': 'submit_work', 'id': 'blocked',
             'args': {'kind': 'blocked', 'note': 'private explanation'}}],
             usage_metadata={'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2})
@@ -46,18 +54,27 @@ class BlockedModel:
 
 class WebGraphTests(unittest.TestCase):
     def test_existing_runner_publishes_only_safe_result(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            repo = root/'repo'
-            repo.mkdir()
-            with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(root/'runs')}), \
-                    patch('agent.server.graph.model_factory', return_value=BlockedModel()):
-                result = graph.invoke({'repo': str(repo), 'messages': [HumanMessage(content='do work', id='first')]},
-                                      {'configurable': {'thread_id': str(uuid.uuid4())}, 'recursion_limit': 100})
-            self.assertEqual(result['status'], 'task_blocked')
-            self.assertNotIn('private explanation', repr(result))
-            self.assertNotIn('verification', result['result'])
-            self.assertTrue((root/'runs'/'tasks'/result['task_id']/'history.sqlite3').exists())
+        fixture = ConversationTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        result = fixture.invoke(BlockedModel(), 'do work')
+        self.assertEqual(result['status'], 'task_blocked')
+        self.assertNotIn('private explanation', repr(result))
+        self.assertNotIn('verification', result['result'])
+        self.assertTrue((fixture.root/'runs'/'tasks'/result['task_id']/'history.sqlite3').exists())
+
+
+class ChatWorkModel:
+    """Explicit handoff fixture around the unchanged p0401 candidate model."""
+    def __init__(self, model):
+        self.model, self.calls = model, model.calls
+    def bind_tools(self, tools):
+        self.tools = tools
+        self.model.bind_tools(tools)
+        return self
+    def invoke(self, messages):
+        if any(t.name == 'start_work' for t in self.tools):
+            self.calls.append(messages)
+            return start_reply()
+        return self.model.invoke(messages)
 
 
 class ScriptedModel:
@@ -189,14 +206,14 @@ class ConversationTests(unittest.TestCase):
 
     def test_explicit_start_after_discussion_preserves_agreed_material(self):
         draft = '先使用一个独立 HTML 文件，橙色导航、搜索框和商品列表。是否现在开工？'
-        model = ScriptedModel([text_reply(draft), investigation(['first.py']), text_reply('已读取授权源码。')])
+        model = ScriptedModel([text_reply(draft), start_reply(), investigation(['first.py']), text_reply('已读取授权源码。')])
         first = self.invoke(model, '帮我做一个页面')
         self.assertEqual(first['status'], 'chat_complete')
         self.assertEqual(len(model.calls), 1)
         started = self.invoke(model, '按刚才的方案，你直接动手', 'start-work')
         self.assertIn(draft, repr(model.calls[1]))
         self.assertIn('按刚才的方案，你直接动手', repr(model.calls[1]))
-        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(len(model.calls), 4)
         self.assertNotEqual(first['task_id'], started['task_id'])
         self.assertTrue(list((self.root/'runs'/'tasks'/started['task_id']).glob('plans/*/plan.json')))
 
@@ -246,11 +263,11 @@ class ConversationTests(unittest.TestCase):
 
     def test_chat_after_runtime_error_starts_a_new_task_without_replaying_failed_work(self):
         from agent.source.snapshots import SnapshotError
-        model = ScriptedModel([investigation(['first.py']), text_reply('你好，上一项工作仍保留失败现场。')])
+        model = ScriptedModel([start_reply(), text_reply('你好，上一项工作仍保留失败现场。')])
         with patch('agent.server.runtime.ConversationRunner.bootstrap_work', side_effect=SnapshotError('ignored cache link')):
             failed = self.invoke(model, '直接读取源码', 'work-request')
         self.assertEqual(failed['status'], 'runtime_error')
-        self.assertTrue(any(m.type == 'ai' and m.content == '先读取必要的源码。' for m in failed['messages']))
+        self.assertTrue(any(m.type == 'ai' and m.content == '开始准备工作资料。' for m in failed['messages']))
         old_root = self.root/'runs'/'tasks'/failed['task_id']
         originals = {str(p.relative_to(old_root)): p.read_bytes() for p in old_root.rglob('*') if p.is_file()}
         chatted = self.invoke(model, '你好', 'after-error')
@@ -262,21 +279,21 @@ class ConversationTests(unittest.TestCase):
         self.assertFalse(self.store.pending(self.thread))
 
     def test_pause_during_model_saves_response_and_resume_does_not_resend(self):
-        model = ScriptedModel([investigation(['first.py']), text_reply()],
-            hook=lambda n: self.store.enqueue(self.thread, 'pause', 'pause') if n == 1 else None)
+        model = ScriptedModel([start_reply(), investigation(['first.py']), text_reply()],
+            hook=lambda n: self.store.enqueue(self.thread, 'pause', 'pause') if n == 2 else None)
         result = self.invoke(model, '读取文件')
         self.assertEqual(result['status'], 'paused')
-        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(len(model.calls), 2)
         # Resume, retaining the paid response, without a new requirement.
         self.store.enqueue(self.thread, 'resume', 'resume')
         with patch('agent.server.graph.model_factory', return_value=model):
             continued = self.compiled.invoke({'repo': str(self.repo), 'messages': []}, self.config)
-        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(len(model.calls), 3)
         self.assertNotEqual(continued['status'], 'runtime_error')
         self.assertTrue(list((self.root/'runs'/'tasks').glob('*/plans/*/plan.json')))
 
     def test_input_during_model_cancels_unexecuted_tool_and_balances_history(self):
-        model = ScriptedModel([investigation(['first.py']), text_reply('按新要求回答')],
+        model = ScriptedModel([start_reply(), text_reply('按新要求回答')],
             hook=lambda n: self.store.enqueue(self.thread, 'new', 'message', '只解释，不读取') if n == 1 else None)
         result = self.invoke(model, '原要求')
         self.assertEqual(result['status'], 'chat_complete')
@@ -298,7 +315,7 @@ class ConversationTests(unittest.TestCase):
         # the old plan; it must not serve as an implicit cancellation command.
         stopped = AIMessage(content='停止剩余读取。', tool_calls=[{'name': 'submit_work', 'id': 'stop',
             'args': {'kind': 'blocked', 'note': 'User cancelled the remaining read'}}])
-        model = ScriptedModel([investigation(['first.py', 'second.py']), stopped])
+        model = ScriptedModel([start_reply(), investigation(['first.py', 'second.py']), start_reply(), stopped])
         with patch.object(OperationExecutor, 'execute', operation):
             result = self.invoke(model, '读取两个文件')
         self.assertEqual(executed, ['first.py'])
@@ -308,7 +325,7 @@ class ConversationTests(unittest.TestCase):
         with archive.lease():
             self.assertIn('superseded_by_user', repr(archive.load()['history']))
         archive.close()
-        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(len(model.calls), 4)
 
     def test_unknown_request_is_not_automatically_reissued(self):
         class UnknownModel(ScriptedModel):
@@ -368,7 +385,7 @@ class ConversationTests(unittest.TestCase):
             return {'kind': 'candidate', 'note': 'Implement the required behavior', 'test_code': CODE,
                     'steps': [{'id': 'edit', 'op': 'shell', 'command': python_command(
                         "from pathlib import Path; Path('sample.py').write_text('def value():\\n    return %d\\n')" % value)}]}
-        model = Model([candidate(2), candidate(4)])
+        model = ChatWorkModel(Model([candidate(2), candidate(4)]))
         result = self.invoke(model, 'return 4')
         self.assertEqual(result['status'], 'verified_success', result)
         root = self.root/'runs'/'tasks'/result['task_id']
@@ -380,12 +397,12 @@ class ConversationTests(unittest.TestCase):
         finally:
             archive.close()
         self.assertEqual([r['verification']['status'] for r in state['rounds']], ['failed', 'passed'])
-        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(len(model.calls), 4)
         before = (root/'events.jsonl').read_bytes()
         again = self.invoke(model, 'return 4')
         self.assertEqual(again['status'], 'verified_success')
         self.assertEqual(before, (root/'events.jsonl').read_bytes())
-        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(len(model.calls), 4)
 
     def test_new_requirement_after_write_keeps_completed_change_and_cancels_next_write(self):
         from agent.execution.executor import OperationExecutor
@@ -407,7 +424,7 @@ class ConversationTests(unittest.TestCase):
                           {'id': 'later', 'op': 'shell', 'command': python_command(
                               "from pathlib import Path; Path('not-created.txt').write_text('bad')")}]}
         # Explicit preflight confirmation is provided by the existing fixture.
-        model = Model([plan, {'kind': 'blocked', 'note': 'User stopped changes'}])
+        model = ChatWorkModel(Model([plan, {'kind': 'blocked', 'note': 'User stopped changes'}]))
         with patch.object(OperationExecutor, 'execute', operation):
             result = self.invoke(model, 'return 4')
         self.assertEqual(done, ['edit'])
@@ -416,8 +433,8 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'task_blocked')
 
     def test_saved_input_applies_once_after_acknowledgment_interruption(self):
-        model = ScriptedModel([investigation(['first.py']), text_reply()],
-            hook=lambda n: self.store.enqueue(self.thread, 'new', 'message', '只解释') if n == 1 else None)
+        model = ScriptedModel([start_reply(), investigation(['first.py']), start_reply(), AIMessage(content='', tool_calls=[{'name':'submit_work','id':'stop','args':{'kind':'blocked','note':'User stops remaining work'}}])],
+            hook=lambda n: self.store.enqueue(self.thread, 'new', 'message', '只解释') if n == 2 else None)
         original = ConversationStore.acknowledge
         def interrupted(store, thread, identities):
             if 'new' in identities:
@@ -426,8 +443,8 @@ class ConversationTests(unittest.TestCase):
         with patch.object(ConversationStore, 'acknowledge', interrupted), self.assertRaises(InterruptedError):
             self.invoke(model)
         result = self.invoke(model)
-        self.assertEqual(result['status'], 'chat_complete')
-        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(len(model.calls), 4)
         self.assertEqual(sum(m.id == 'new' for m in model.calls[-1] if isinstance(m, HumanMessage)), 1)
 
     def test_unsupported_attachment_is_explicitly_rejected(self):
@@ -461,8 +478,8 @@ class ConversationTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_REASONING', repr(result))
 
     def test_lost_presentation_checkpoint_restores_public_history_without_replaying_request(self):
-        model = ScriptedModel([investigation(['first.py']), text_reply()],
-            hook=lambda n: self.store.enqueue(self.thread, 'pause', 'pause') if n == 1 else None)
+        model = ScriptedModel([start_reply(), investigation(['first.py']), text_reply()],
+            hook=lambda n: self.store.enqueue(self.thread, 'pause', 'pause') if n == 2 else None)
         first = self.invoke(model, '读取文件')
         self.assertEqual(first['status'], 'paused')
         self.compiled = builder.compile(checkpointer=InMemorySaver())
@@ -471,7 +488,7 @@ class ConversationTests(unittest.TestCase):
             recovered = self.compiled.invoke({'messages': []}, self.config)
         self.assertEqual(recovered['task_id'], first['task_id'])
         self.assertEqual(recovered['status'], 'awaiting_user')
-        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(len(model.calls), 3)
         self.assertNotIn('PRIVATE_NOTE', repr(recovered))
 
     def test_product_model_suppresses_private_automatic_streaming_without_changing_api_options(self):

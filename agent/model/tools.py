@@ -126,5 +126,14 @@ def request_file_operation(**kwargs) -> dict:
     return kwargs
 
 
-CHAT_TOOLS = (*WORK_TOOLS, web_search, web_fetch, list_files, read_file, search_files,
+@tool(args_schema={'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False})
+def start_work() -> dict:
+    """Enter coding after explicit user authorization. The host prepares original requirements
+    and repository materials before requesting any code or plan. Supply no arguments.
+    """
+    return {}
+
+
+CODING_TOOLS = (*WORK_TOOLS, web_search, web_fetch)
+CHAT_TOOLS = (start_work, web_search, web_fetch, list_files, read_file, search_files,
               run_existing, list_applications, open_file, launch_application, request_file_operation)
