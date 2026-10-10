@@ -21,16 +21,16 @@ class ConversationRoutingTests(unittest.TestCase):
     def test_chat_without_repository_never_initializes_source_or_executor(self):
         model = fixtures.ScriptedModel([fixtures.text_reply('你好')])
         with patch('agent.server.graph.model_factory', return_value=model), \
-                patch('agent.server.runtime.NativeEnvironment', side_effect=AssertionError('chat must not initialize source')):
+                patch('agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('chat must not initialize source')):
             result = self.compiled.invoke({'messages': [HumanMessage(content='你好', id='one')]}, self.config)
         self.assertEqual(result['status'], 'chat_complete')
         self.assertFalse(result['workspace_bound'])
         self.assertEqual(len(model.calls), 1)
         self.assertFalse(list((self.root/'runs'/'tasks').glob('*/baseline/*')))
         rules = model.calls[0][0].content
-        self.assertIn('Windows; shell commands use cmd.exe', rules)
-        self.assertIn('native LPAC isolation', rules)
-        self.assertNotIn('Docker copy mounted read-only', rules)
+        self.assertIn('Linux Docker, Bash shell', rules)
+        self.assertNotIn('Windows; shell commands use cmd.exe', rules)
+        self.assertNotIn('native LPAC isolation', rules)
 
     def test_chat_work_chat_routes_share_public_context_without_replaying_reads(self):
         model = fixtures.ScriptedModel([fixtures.text_reply('你好'), fixtures.investigation(['first.py']),
@@ -133,7 +133,7 @@ class ConversationRoutingTests(unittest.TestCase):
     def test_missing_repository_pairs_first_work_call_without_initializing_source(self):
         model = fixtures.ScriptedModel([fixtures.investigation(['first.py']), fixtures.text_reply('请先选择仓库')])
         with patch('agent.server.graph.model_factory', return_value=model), \
-                patch('agent.server.runtime.NativeEnvironment', side_effect=AssertionError('no repository')):
+                patch('agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('no repository')):
             result = self.compiled.invoke({'messages': [HumanMessage(content='读取文件', id='one')]}, self.config)
         self.assertEqual(result['status'], 'chat_complete')
         self.assertEqual(len(model.calls), 2)

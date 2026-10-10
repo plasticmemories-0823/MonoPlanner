@@ -15,11 +15,14 @@ def environment_key(environment):
     return {'backend':type(environment).__name__, 'repo':str(environment.repo_root.resolve()),
         'artifact_root':str(environment.artifact_root.resolve()),
         'image':getattr(environment,'image',None), 'container':getattr(environment,'_container_id',None),
-        'python':environment.python_executable, 'runtime_files':sorted(getattr(environment,'runtime_files',()))}
+        'python':environment.python_executable, 'runtime':getattr(environment, 'runtime', None),
+        'runtime_files':sorted(getattr(environment,'runtime_files',()))}
 
 
 def code_key(root=None):
     names = (
+        'agent/execution/projects.py', 'agent/execution/task_docker.py',
+        'agent/cli/interactive.py', 'agent/cli/tasks.py',
         'agent/server/interrupts.py', 'agent/model/streaming.py',
         'agent/task/runner.py', 'agent/task/dialogue.py', 'resources/prompts/conversation.txt', 'agent/task/operations.py',
         'agent/server/graph.py', 'agent/server/app.py', 'langgraph.json',

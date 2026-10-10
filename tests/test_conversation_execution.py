@@ -23,13 +23,14 @@ class ConversationExecutionTests(unittest.TestCase):
         self.task.mkdir(parents=True)
         self.image, self.cid = 'sha256:' + '1'*64, '2'*64
 
-    def test_default_native_and_only_exact_operator_binding_matches(self):
+    def test_default_requires_docker_configuration_and_exact_operator_binding_matches(self):
         with patch.dict(os.environ, {'MONOPLANER_EVALUATION_WORKSPACES': '{}'}):
-            self.assertEqual(workspace_binding(str(self.repo)), {'backend': 'native'})
+            self.assertEqual(workspace_binding(str(self.repo)), {'backend': 'docker'})
         binding = {str(self.repo): self.image}
         with patch.dict(os.environ, {'MONOPLANER_EVALUATION_WORKSPACES': json.dumps(binding)}):
-            self.assertEqual(workspace_binding(str(self.repo)), {'backend': 'docker', 'image': self.image})
-            self.assertEqual(workspace_binding(str(self.repo/'child')), {'backend': 'native'})
+            self.assertEqual(workspace_binding(str(self.repo))['image'], self.image)
+            (self.repo/'child').mkdir()
+            self.assertEqual(workspace_binding(str(self.repo/'child')), {'backend': 'docker'})
         with patch.dict(os.environ, {'MONOPLANER_EVALUATION_WORKSPACES': json.dumps({str(self.repo): 'latest'})}):
             with self.assertRaisesRegex(ValueError, 'pinned'):
                 workspace_binding(str(self.repo))
@@ -44,7 +45,7 @@ class ConversationExecutionTests(unittest.TestCase):
 
     def test_same_container_across_nodes_and_stopped_container_never_replays(self):
         first = ConversationDocker(self.repo, self.image, self.task)
-        with patch.object(first, '_docker', return_value=subprocess.CompletedProcess([], 0, self.cid, '')) as launch:
+        with patch.object(first, '_check_runtime'), patch.object(first, '_docker', return_value=subprocess.CompletedProcess([], 0, self.cid, '')) as launch:
             first.start()
             first.start()
             self.assertEqual(launch.call_count, 1)

@@ -42,7 +42,8 @@ class CliTests(unittest.TestCase):
             env = cli.open_workspace(name)
             self.assertIsInstance(cli.create_workspace_agent(object(), env), TaskRunner)
             result = {"status": "verified_success", "messages": [], "final_report": "DONE"}
-            with patch.object(TaskRunner, "run", return_value=result), redirect_stdout(io.StringIO()) as output:
+            from agent.server.runtime import ConversationRunner
+            with patch.object(ConversationRunner, "run", return_value=result), redirect_stdout(io.StringIO()) as output:
                 cli.run_one_turn(cli.create_workspace_agent(object(), env), [], "request", 5)
             self.assertIn("固定程序验收通过", output.getvalue())
 

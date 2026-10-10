@@ -12,13 +12,16 @@ class FakeDocker:
     instances = []
     outcomes = []
 
-    def __init__(self, repo_root, image='test', container_name='test', timeout=5, artifact_root=None):
+    def __init__(self, repo_root, image='test', container_name='test', timeout=5, artifact_root=None, **options):
         self.repo_root, self.image = Path(repo_root), image
         self.artifact_root = Path(artifact_root)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self.timeout, self.python_executable = timeout, 'python'
         self.starts = self.stops = 0
         self.instances.append(self)
+
+    def clone_options(self):
+        return {}
 
     def start(self):
         self.starts += 1

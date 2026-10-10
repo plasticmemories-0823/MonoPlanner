@@ -134,13 +134,15 @@ try {
     $taskNext = Join-Path $taskProject 'web/node_modules/next/dist/bin/next'
     $taskNode = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($taskPortable) {
+        $taskDockerCommand = Get-Command docker.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $taskDockerPath = if ($taskDockerCommand) { ';'+(Split-Path -Parent $taskDockerCommand.Source) } else { '' }
         $taskBackend = Join-Path $taskProject 'launcher/runtime/python/python.exe'
         $taskNext = Join-Path $taskProject 'web/server.js'
         $taskNode = @{Source=(Join-Path $taskProject 'launcher/runtime/node/node.exe')}
         $env:MONOPLANER_STATE_DIR = Join-Path $taskData 'state'
         $env:MONOPLANER_BACKEND_PORT = "$BackendPort"
         $env:MONOPLANER_UI_PORT = "$FrontendPort"
-        $env:PATH = (Join-Path $taskProject 'launcher/runtime/git/cmd')+';'+(Join-Path $taskProject 'launcher/runtime/node')+';'+(Join-Path $env:WINDIR 'System32')
+        $env:PATH = (Join-Path $taskProject 'launcher/runtime/git/cmd')+';'+(Join-Path $taskProject 'launcher/runtime/node')+$taskDockerPath+';'+(Join-Path $env:WINDIR 'System32')
         $env:PORT = "$FrontendPort"
         $env:HOSTNAME = '127.0.0.1'
     }

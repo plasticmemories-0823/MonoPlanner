@@ -46,7 +46,7 @@ class GeneralAssistantTests(unittest.TestCase):
 
     def test_read_does_not_bootstrap_coding_and_retains_tool_pair(self):
         model = ScriptedModel([reply('read_file', path='first.py', offset=0, limit=80, reread_reason=''), text_reply('VALUE 是1')])
-        with patch('agent.server.runtime.NativeEnvironment', side_effect=AssertionError('not coding')):
+        with patch('agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('not execution')):
             result = self.invoke(model, '查询文件')
         self.assertEqual(result['status'], 'chat_complete')
         self.assertEqual(len(model.calls), 2)
@@ -92,12 +92,13 @@ class GeneralAssistantTests(unittest.TestCase):
 
     def test_existing_run_records_real_failure_and_does_not_initialize_acceptance(self):
         model = ScriptedModel([self.task("print('真实失败')\nraise SystemExit(3)\n"), text_reply('失败，要修复吗')])
-        with patch('agent.server.runtime.NativeEnvironment', side_effect=AssertionError('not coding')):
+        with patch('agent.server.runtime.ConversationRunner.bootstrap_work', side_effect=AssertionError('not coding')):
             result = self.invoke(model, '运行已有任务')
         self.assertEqual(result['status'], 'chat_complete')
         self.assertEqual(result['result']['existing_runs'][0]['status'], 'failed')
         self.assertEqual(json.loads(model.calls[1][-1].content)['exit_code'], 3)
-        self.assertFalse(result['workspace_bound'])
+        self.assertTrue(result['workspace_bound'])
+        self.assertNotIn('verification_spec', result['result'])
         self.assertEqual(result['result']['usage']['total_tokens'], 17)
         self.assertEqual(result['result']['usage']['cached_input_tokens'], 6)
         repeated = self.invoke(model, '运行已有任务')
@@ -109,7 +110,8 @@ class GeneralAssistantTests(unittest.TestCase):
         result = self.invoke(model, '只运行')
         self.assertEqual(result['status'], 'chat_complete')
         self.assertIn('不自动转入源码修复', model.calls[-1][-1].content)
-        self.assertFalse(result['workspace_bound'])
+        self.assertTrue(result['workspace_bound'])
+        self.assertFalse(list((self.root/'runs/tasks'/result['task_id']).glob('plans/*/plan.json')))
         self.assertEqual((self.repo/'first.py').read_text(), 'VALUE = 1\n')
 
     def test_timeout_and_subprocess_environment_do_not_leak_provider_credentials(self):
@@ -187,9 +189,8 @@ class GeneralAssistantTests(unittest.TestCase):
     def test_declared_package_script_and_local_module_keep_argv(self):
         package = self.repo/'package.json'
         package.write_text(json.dumps({'scripts': {'test': 'node existing.js'}}))
-        with patch('agent.execution.existing.shutil.which', return_value='node-runtime'):
-            command, _, _ = command_for(str(self.repo), 'package.json#test', ['quoted value', '中文\\path'])
-        self.assertEqual(command, ['node-runtime', '--run', 'test', '--', 'quoted value', '中文\\path'])
+        command, _, _ = command_for(str(self.repo), 'package.json#test', ['quoted value', '中文\\path'])
+        self.assertEqual(command, ['/usr/bin/env', 'node', '--run', 'test', '--', 'quoted value', '中文\\path'])
         command, _, _ = command_for(str(self.repo), 'module:first', ['--one'])
         self.assertEqual(command[-3:], ['-m', 'first', '--one'])
         with self.assertRaises(ValueError):

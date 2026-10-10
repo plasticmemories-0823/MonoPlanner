@@ -1,12 +1,13 @@
 """One existing planner loop; persistent lookup and resume do not need a model."""
 import argparse
 import json
+import uuid
 from pathlib import Path
 from langchain_core.messages import messages_from_dict
-from agent.execution.native import NativeEnvironment
 from agent.task.budget import StepBudget
 from agent.storage.history import LocalHistory
-from agent.task.runner import TaskRunner
+from agent.server.runtime import ConversationRunner
+from agent.execution.projects import workspace_binding
 
 
 class LazyModel:
@@ -51,11 +52,11 @@ def main(argv=None):
     elif args.find is not None or args.status:
         parser.error('No existing indexed task at this path')
     old=old or {}
-    repo=args.repo or old.get('environment_key',{}).get('repo')
+    repo=args.repo or old.get('repo') or old.get('environment_key',{}).get('repo')
     task=args.task or old.get('request')
     if not repo or not task:
         parser.error('A new task requires --repo and --task')
-    if old and old.get('environment_key',{}).get('backend')!='NativeEnvironment':
+    if old and not old.get('execution_binding'):
         parser.error('旧任务须使用冻结源码和原执行后端恢复，不迁移检查点')
     saved=old.get('budget',{})
     policy=('max_steps','max_tokens','timeout_seconds','report_reserve','report_token_reserve',
@@ -64,17 +65,18 @@ def main(argv=None):
     if args.max_steps is not None:
         values['max_steps']=args.max_steps
     budget=StepBudget(**values)
-    env=NativeEnvironment(repo,artifact_root=old.get('environment_key',{}).get('artifact_root'))
     history=[]
     if old:
-        initial=json.loads(old['history'][0]['data']['content'])
-        history=messages_from_dict(initial.get('public_conversation',[]))
-    loop=TaskRunner(LazyModel(),env,state_dir=folder,pause_after_steps=args.pause_after_steps)
+        history=messages_from_dict(old.get('public_conversation',[]))
+    controls=[{'id': uuid.uuid4().hex, 'kind': 'resume'}] if old.get('status') in {'paused', 'awaiting_user'} else []
+    loop=ConversationRunner(LazyModel(),repo,state_dir=folder,pause_after_steps=args.pause_after_steps,
+                            control_source=lambda: controls,
+                            yield_boundary=False, execution_binding=old.get('execution_binding') or workspace_binding(repo))
     result=loop.run(history,task,budget,
         verify_command=args.verify_command if args.verify_command is not None else old.get('verify_command'),
         acceptance=args.acceptance if args.acceptance is not None else old.get('acceptance'))
     print(json.dumps({k:v for k,v in result.items() if k not in {'messages','rounds','verification'}},ensure_ascii=False,indent=2))
-    return 0 if result['status'] in {'verified_success','paused'} else 1
+    return 0 if result['status'] in {'verified_success','paused','chat_complete'} else 1
 
 
 if __name__=='__main__':

@@ -144,7 +144,7 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
         session['read_sources'] = ReadSources(state_root()).get(thread, session.get('read_roots', []))
         session['read_roots'] = [s['path'] for s in session['read_sources'] if s['kind'] == 'directory']
         runner = ConversationRunner(LazyModel(session['runtime_settings']), session['repo'], phase=phase,
-                        execution_binding=session.get('execution_binding', {'backend': 'native'}),
+                        execution_binding=session.get('execution_binding', {'backend': 'docker'}),
                         read_roots=session.get('read_roots', []),
                         read_sources=session['read_sources'],
                         access_mode=permission['effective'],
@@ -186,13 +186,15 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
                     and 'awaiting_approval' in runner_state.get('desktop_approvals', {}).values() else
                 '任务未能启动，已保存错误记录。请检查运行环境后重新提交。' if session.get('initialization_failed') else
                 '请先在设置中配置可用的 DeepSeek API Key，然后重新发送消息。' if status == 'settings_required' else
+                runner_state['reason'] if status == 'awaiting_user' and 'Docker' in runner_state.get('reason', '') else
                 '已暂停，可以补充要求或继续。' if status in {'paused', 'awaiting_user'} else
                 '任务尚未完成，已保留运行记录，供后续检查。')
         updates.append(AIMessage(content=text, id=session['task_id']+'-'+status))
     # Presentation recovery never restores execution cursors. Those remain
     # solely in the task checkpoint, including unknown-operation protection.
     session.update(status=result['status'], result=public_result(result),
-                   workspace_bound=bool(runner_state.get('baseline')),
+                   execution_binding=runner_state.get('execution_binding', session.get('execution_binding')),
+                   workspace_bound=bool(runner_state.get('baseline') or runner_state.get('environment_key')),
                    public_messages=messages_to_dict(add_messages(state.get('messages', []), updates)))
     store.save_session(thread, session)
     return {'messages': updates, 'status': status, 'result': public_result(result),

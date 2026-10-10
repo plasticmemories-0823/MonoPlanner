@@ -32,7 +32,7 @@ class ProbeBatch:
         self.child = DockerEnvironment(
             self.snapshot.root, self.environment.image,
             'agent-probe-' + uuid.uuid4().hex, timeout=timeout,
-            artifact_root=self.runtime)
+            artifact_root=self.runtime, **self.environment.clone_options())
         self.child.repo_read_only = True
         self.child.root_read_only = True
         self.stats = {'source_version': version, 'source_digest': self.snapshot.digest,

@@ -5,13 +5,12 @@ import os
 from pathlib import Path
 import re
 import shutil
-import sys
 
 from agent.execution.assistant_files import AssistantFiles
 from agent.execution.process import log_excerpt
 
 
-def command_for(workspace, entry, args):
+def command_for(workspace, entry, args, environment=None):
     if not workspace:
         raise ValueError('运行已有任务需要选择工作目录')
     if len(args) > 100 or any('\0' in v or '\n' in v or '\r' in v for v in args):
@@ -29,24 +28,22 @@ def command_for(workspace, entry, args):
         prefix = ['-m', module]
     else:
         path = files.path(base)
-        prefix = [str(path)]
+        prefix = [environment.host_to_container(path) if environment else '/testbed/' + path.relative_to(root).as_posix()]
     raw = files.bytes(path)
     suffix = path.suffix.lower()
     if separator:
         if path.name != 'package.json' or not target or target not in json.loads(raw).get('scripts', {}):
             raise ValueError('使用 package.json#已有脚本名称，不接受临时任务正文')
         # Node 22 --run dispatches only an existing package script; no npm installation.
-        executable, prefix = shutil.which('node'), ['--run', target, '--']
+        executable, prefix = '/usr/bin/env', ['node', '--run', target, '--']
     elif suffix == '.py':
-        candidates = [root/'.venv/Scripts/python.exe', root/'.venv/bin/python',
-                      root/'venv/Scripts/python.exe', root/'venv/bin/python']
-        executable = str(next((p for p in candidates if p.is_file()), Path(sys.executable)))
+        executable = environment.python_executable if environment else '/opt/miniconda3/envs/testbed/bin/python'
     elif suffix in {'.js', '.mjs', '.cjs'}:
-        executable = shutil.which('node')
+        executable, prefix = '/usr/bin/env', ['node', *prefix]
     elif suffix == '.ps1':
-        executable, prefix = shutil.which('pwsh') or shutil.which('powershell'), ['-NoProfile', '-NonInteractive', '-File', str(path)]
+        executable, prefix = '/usr/bin/env', ['pwsh', '-NoProfile', '-NonInteractive', '-File', *prefix]
     elif suffix == '.sh':
-        executable = shutil.which('bash')
+        executable = '/bin/bash'
     else:
         raise ValueError('仅运行已有 .py/.js/.mjs/.cjs/.ps1/.sh 或 package.json#任务；不启动普通应用')
     if not executable:
@@ -55,7 +52,14 @@ def command_for(workspace, entry, args):
 
 
 def execute(loop, args, folder):
-    command, entry, sha = command_for(loop.repo, args['entry'], args['args'])
+    # Check the entry before creating a container; generated/inline code stays rejected.
+    command_for(loop.repo, args['entry'], args['args'])
+    loop.activate()
+    backend = loop.environment
+    command, entry, sha = command_for(loop.repo, args['entry'], args['args'], backend)
+    from agent.storage.recovery import environment_key
+    loop.state['environment_key'] = environment_key(backend)
+    loop.persist('existing_environment_frozen')
     timeout = args['timeout']
     if not 1 <= timeout <= loop.task_timeout:
         raise ValueError('timeout 必须在 1..任务超时秒数之间')
@@ -70,19 +74,18 @@ def execute(loop, args, folder):
         if candidate.exists():
             candidate = AssistantFiles(loop.repo).path(args['usage_file'])
             previous_usage = (candidate.stat().st_mtime_ns, hashlib.sha256(candidate.read_bytes()).hexdigest())
-    env = {k: v for k, v in os.environ.items() if not re.search(r'(API_KEY|ACCESS_TOKEN|SECRET|PASSWORD)', k, re.I)}
-    env.update(PYTHONUNBUFFERED='1', PYTHONPATH=str(Path(loop.repo).resolve()))
-
     def started(pid):
-        loop.state['assistant_process'] = {'pid': pid, 'entry': args['entry'], 'entry_sha256': sha}
+        loop.state['assistant_process'] = {'container_id': pid, 'entry': args['entry'], 'entry_sha256': sha}
         loop.persist('existing_process_started', loop.state['assistant_process'])
 
-    from agent.execution.native import NativeEnvironment
-    backend = NativeEnvironment(loop.repo, artifact_root=loop.root.parent.parent/'execution'/loop.root.name,
-                                access_mode=getattr(loop, 'access_mode', 'sandbox'),
-                                read_sources=loop.state.get('read_sources', []))
-    result = backend.run_process(command, stdout_path=folder/'stdout.log', stderr_path=folder/'stderr.log',
-                         timeout=timeout, env=env, on_started=started)
+    outputs = backend.artifact_root/'existing'/folder.name
+    outputs.mkdir(parents=True, exist_ok=True)
+    result = backend.run_process(command, stdout_path=outputs/'stdout.log', stderr_path=outputs/'stderr.log',
+                                timeout=timeout, on_started=started)
+    for name in ('stdout.log', 'stderr.log'):
+        shutil.copy2(outputs/name, folder/name)
+    if result.get('error') and result.get('exit_code') is None:
+        result['status'] = 'unknown'
     result.update(entry=args['entry'], entry_sha256=sha, command=command,
                   stdout=log_excerpt(folder/'stdout.log'), stderr=log_excerpt(folder/'stderr.log'),
                   notice='运行结果不是编码验收；失败只报告，不自动修改源码。')

@@ -193,8 +193,8 @@ export function ExecutionPermissions({
                   <span className="block font-medium">{name(mode)}</span>
                   <span className="text-muted-foreground mt-1 block text-xs leading-5 font-normal">
                     {mode === "sandbox"
-                      ? "执行留在沙盒，允许受控预览；不启动外部软件，不写入目录外文件。"
-                      : mode === "ask" ? "执行仍留在沙盒；外部打开及明确的目录外文件操作须逐次批准。" : "使用当前 Windows 用户权限，不逐次确认；不会申请管理员权限。"}
+                      ? "编码和脚本在 Docker 中执行；允许受控预览，不启动外部软件或写入目录外文件。"
+                      : mode === "ask" ? "编码仍在 Docker；外部打开及明确的目录外文件操作须逐次批准。" : "本机文件操作与外部打开不逐次确认；编码仍在 Docker，不申请管理员权限。"}
                   </span>
                 </span>
                 {permission.requested === mode && (
@@ -206,7 +206,7 @@ export function ExecutionPermissions({
           {confirmFull && (
             <div className="space-y-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
               <p>
-                完全权限不提供目录隔离，也不会申请管理员权限。确认后，此对话持续使用该选择，直到你手动切回沙盒。
+                完全权限允许本机文件操作与外部打开，无需逐次确认；编码仍在 Docker 中执行。不会申请管理员权限，此选择持续到你手动关闭。
               </p>
               <div className="flex justify-end gap-2">
                 <Button

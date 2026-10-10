@@ -265,6 +265,7 @@ class SourceSnapshot:
             child = DockerEnvironment(
                 self.root, environment.image, f"agent-snapshot-{uuid.uuid4().hex}",
                 timeout=environment.timeout, artifact_root=artifact_root,
+                **environment.clone_options(),
             )
             child.repo_read_only = read_only
             child.root_read_only = read_only

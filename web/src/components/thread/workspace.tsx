@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { ProjectExecution } from "./project-execution";
 import {
   Dialog,
   DialogContent,
@@ -197,7 +198,7 @@ export function Workspace({
             </Button>
           </div>
           <div
-            className="bg-muted/20 h-72 overflow-y-auto rounded-xl border p-2"
+            className="bg-muted/20 h-48 overflow-y-auto rounded-xl border p-2"
             aria-label="文件夹列表"
             aria-busy={loading}
           >
@@ -233,6 +234,7 @@ export function Workspace({
               </p>
             )}
           </div>
+          {!readOnly && page?.path && <ProjectExecution apiUrl={apiUrl} repo={page.path} />}
           {error && (
             <p
               role="alert"

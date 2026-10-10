@@ -6,7 +6,7 @@ import time
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, message_to_dict, messages_from_dict, messages_to_dict
 
 from agent.execution.executor import OperationExecutor
-from agent.execution.native import NativeEnvironment
+from agent.execution.projects import require_binding, workspace_binding, EnvironmentRequired
 from agent.execution.web import WEB_NAMES, execute_calls
 from agent.model.client import configure_call
 from agent.model.context import admit
@@ -26,32 +26,31 @@ from agent.server import assistant
 class ConversationRunner(TaskRunner):
     def __init__(self, model, repo, *, phase='decide', read_roots=None, read_sources=None, access_mode='sandbox', conversation_id=None, execution_binding=None, **kwargs):
         kwargs.pop('interactive', None)
-        super().__init__(model, None, interactive=True, yield_boundary=True, **kwargs)
+        super().__init__(model, None, interactive=True, yield_boundary=kwargs.pop('yield_boundary', True), **kwargs)
         self.repo, self.phase = repo, phase
         self.read_roots = list(read_roots or [])
         self.read_sources = list(read_sources if read_sources is not None else
                                  ({'path': p, 'kind': 'directory'} for p in self.read_roots))
         self.access_mode = access_mode
         self.conversation_id = conversation_id
-        self.execution_binding = execution_binding or {'backend': 'native'}
-        self.mailbox = self.control_source
+        self.execution_binding = execution_binding or workspace_binding(repo)
+        self.mailbox = self.control_source or (lambda: [])
         self.control_source = lambda: [r for r in self.mailbox() if r['kind'] != 'message']
 
     def activate(self):
         if not self.repo or not Path(self.repo).is_dir():
             raise ValueError('工作需要选择一个已有仓库；普通聊天无需仓库')
-        if self.execution_binding['backend'] == 'docker':
-            if self.access_mode == 'full' or self.read_sources:
-                raise ValueError('Formal evaluation uses its fixed isolated workspace; full access or extra materials require a new native task')
-            from agent.server.execution import ConversationDocker
-            self.environment = ConversationDocker(self.repo, self.execution_binding['image'], self.root)
-            if self.environment._container_id is None:
-                self.environment.start()
-        else:
-            self.environment = NativeEnvironment(self.repo, artifact_root=self.root.parent.parent/'execution'/self.root.name,
-                                                 access_mode=self.access_mode, read_sources=self.read_sources)
+        if not self.execution_binding.get('image'):
+            self.execution_binding = require_binding(self.repo)
+            self.state['execution_binding'] = self.execution_binding
+            self.persist('execution_binding_frozen')
+        binding = require_binding(self.repo, self.execution_binding)
+        from agent.execution.task_docker import TaskDocker
+        self.environment = TaskDocker(self.repo, binding['image'], self.root,
+                                     runtime=binding['runtime'], read_sources=self.read_sources)
         if self.root.is_relative_to(self.environment.repo_root) or self.root.is_relative_to(self.environment.artifact_root):
             raise ValueError('Task records must stay outside source and execution mounts')
+        self.environment.start()
         self.env_key = recovery.environment_key(self.environment)
 
     def run(self, history, text, budget, verify_command=None, acceptance=None):
@@ -72,15 +71,18 @@ class ConversationRunner(TaskRunner):
                         raise ValueError('Task or engine changed; old checkpoint requires its frozen version')
                     if stored.get('runtime_settings') != self.runtime_settings:
                         raise ValueError('Task model/network settings changed; new defaults apply to new tasks only')
-                    if stored.get('execution_binding', {'backend': 'native'}) != self.execution_binding:
+                    if stored.get('execution_binding') != self.execution_binding:
                         raise ValueError('Saved execution binding changed; no backend migration')
                     self.state, self.rules = stored, stored['rules']
                     self.return_status = stored['status']
                     if stored.get('assistant_running'):
                         stored.update(status='execution_unknown', reason='已有操作结果不明，保留现场，不自动重试')
                         return self.result()
-                    if stored.get('baseline'):
+                    if stored.get('baseline') or stored.get('environment_key'):
                         self.activate()
+                        if stored.get('environment_key') != self.env_key:
+                            raise ValueError('Saved execution environment changed; no automatic replacement')
+                    if stored.get('baseline'):
                         return recovery.restore(self, stored, self.identity)
                     recovery.restore_budget(self, stored)
                     if stored.get('request_pending') or stored.get('web_running') or stored.get('web_request_pending'):
@@ -92,11 +94,11 @@ class ConversationRunner(TaskRunner):
                     if stored['status'] in {'paused', 'awaiting_user'} and self.mailbox():
                         stored['status'] = 'needs_plan'
                     return self._drive()
-                return self._run_new(history, text, budget)
+                return self._run_new(history, text, budget, verify_command, acceptance)
         finally:
             from agent.source.lifecycle import close
             close(self)
-            if (self.execution_binding['backend'] == 'docker' and self.environment is not None
+            if (self.environment is not None
                     and self.state and self.state.get('status') not in {'needs_plan', 'executing', 'paused', 'awaiting_user'}):
                 self.environment.close()
             self.history_store.close()
@@ -106,23 +108,23 @@ class ConversationRunner(TaskRunner):
         self.rules += '\nSelected workspace: ' + (self.repo or '(none)')
         self.rules += '\nAuthorized read-only materials: ' + json.dumps(self.read_sources, ensure_ascii=False)
         self.rules += '\nCurrent user-selected permission: ' + self.access_mode
-        if self.execution_binding['backend'] == 'docker':
-            self.rules += ('\nExecution environment: fixed Linux Docker evaluation image, Bash shell, '
-                           'network disabled. Source directory inside execution is /testbed. '
-                           'Python executable: /opt/miniconda3/envs/testbed/bin/python. '
-                           'Do not use Windows host paths in execution commands.')
+        self.rules += ('\nExecution environment: Linux Docker, Bash shell, network disabled. '
+                       'All coding and existing script execution stays inside Docker, even in full permission mode. '
+                       'Source directory is /testbed; do not use Windows host paths in commands. '
+                       'Full permission applies only to trusted host file/application operations.')
+        if self.execution_binding.get('runtime'):
+            self.rules += '\nContainer Python executable: ' + self.execution_binding['runtime']['python']
         else:
-            self.rules += ('\nExecution environment: Windows; shell commands use cmd.exe, not Bash. '
-                       'Use fixed read/search tools for source lookup. For Python execution use the '
-                       'explicit executable below; Unix commands and heredocs are not available. '
-                       'Sandbox/ask mode uses native LPAC isolation; full mode uses Windows user permissions.')
-            from agent.settings import PROJECT_ROOT
-            self.rules += '\nPython executable: ' + str(PROJECT_ROOT/'launcher/runtime/python/python.exe')
-        self.rules += '\nTask networking: ' + ('enabled' if self.runtime_settings['online'] else 'disabled')
+            self.rules += '\nProject Docker environment is not configured; ask the user to select it before executing.'
+        if self.read_sources:
+            self.rules += '\nReadonly material paths in execution: ' + json.dumps({
+                s['path']: f'/agent-materials/{i}' for i, s in enumerate(self.read_sources)}, ensure_ascii=False)
+        self.rules += '\nWeb tools: ' + ('enabled' if self.runtime_settings.get('online') else 'disabled')
         if required_consumer(text):
             self.rules += ARTIFACT_RULES
         self.state = {'engine': 'MonoPlaner V0.9', 'identity': self.identity, 'code_key': self.code_key,
-            'request': text, 'acceptance': None, 'verify_command': None, 'runtime_settings': self.runtime_settings,
+            'request': text, 'repo': self.repo, 'acceptance': acceptance, 'verify_command': verify_command, 'runtime_settings': self.runtime_settings,
+            'public_conversation': messages_to_dict(history),
             'rules': self.rules, 'history': messages_to_dict([*history, HumanMessage(content=text)]),
             'source': None,
             'read_roots': self.read_roots,
@@ -236,6 +238,10 @@ class ConversationRunner(TaskRunner):
         self.persist('work_initialized')
 
     def advance(self):
+        if not self.yield_boundary:
+            self.phase = {'chat': 'chat', 'web': 'web', 'read': 'assistant', 'run': 'assistant',
+                          'work': 'work'}.get(self.state.get('dispatch'),
+                                            'work' if self.state['status'] == 'executing' else 'decide')
         self.budget.check_request(0)
         approvals = self.state.get('desktop_approvals', {})
         if approvals:
@@ -354,7 +360,12 @@ class ConversationRunner(TaskRunner):
                 self.state.update(response_pending=None, status='needs_plan')
                 self.persist('workspace_required')
                 return
-            self.bootstrap_work()
+            try:
+                self.bootstrap_work()
+            except EnvironmentRequired as exc:
+                self.state.update(status='awaiting_user', reason=str(exc))
+                self.persist('environment_required')
+                return
         super().advance()
 
     def result(self):

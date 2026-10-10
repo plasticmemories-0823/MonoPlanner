@@ -7,7 +7,11 @@ from langchain_core.messages import HumanMessage
 
 from agent.task.budget import StepBudget
 from agent.settings import load_settings
-from agent.execution.native import NativeEnvironment
+from types import SimpleNamespace
+from pathlib import Path
+import uuid
+from agent.execution.projects import workspace_path
+from agent.storage.preferences import state_root
 from agent.cli.workspace import load_saved_repo, save_repo
 
 
@@ -45,17 +49,17 @@ def parse_args(argv=None):
     return args
 
 
-def open_workspace(path: str) -> NativeEnvironment:
+def open_workspace(path: str):
     """交互输入可以粘贴带引号、带空格的目录路径。"""
     path = path.strip()
     if len(path) >= 2 and path[0] == path[-1] and path[0] in ("'", '"'):
         path = path[1:-1]
     if not path.strip():
         raise ValueError("仓库路径不能为空")
-    return NativeEnvironment(path)
+    return SimpleNamespace(repo_root=Path(workspace_path(path)))
 
 
-def select_workspace(args) -> NativeEnvironment:
+def select_workspace(args):
     if args.repo is not None:
         return open_workspace(args.repo)
 
@@ -90,8 +94,9 @@ def load_model():
 
 
 def create_workspace_agent(model, environment):
-    from agent.task.runner import TaskRunner
-    return TaskRunner(model, environment, interactive=True)
+    from agent.server.runtime import ConversationRunner
+    return ConversationRunner(model, str(environment.repo_root), yield_boundary=False,
+                              state_dir=state_root()/'tasks'/uuid.uuid4().hex)
 
 
 def run_one_turn(agent, history, text, max_steps, verify_command=None, acceptance=None):
@@ -191,8 +196,7 @@ def run_session(
         try:
             if model is None:
                 model = load_model()
-            if agent is None:
-                agent = create_workspace_agent(model, environment)
+            agent = create_workspace_agent(model, environment)
             result = run_one_turn(
                 agent, messages, text, max_steps,
                 verify_command=current_command, acceptance=current_acceptance,

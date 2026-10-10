@@ -26,7 +26,7 @@ class SessionTests(unittest.TestCase):
     def run_cli(self, args, inputs):
         calls = []
         def turn(agent, history, text, max_steps, verify_command=None, acceptance=None):
-            calls.append((text, verify_command, acceptance, agent.environment.repo_root, list(history)))
+            calls.append((text, verify_command, acceptance, Path(agent.repo), list(history)))
             return {"status": "verified_success", "messages": [*history, HumanMessage(content=text), AIMessage(content="done")]}
         with patch.object(cli, "load_model", return_value=object()) as loader, patch.object(cli, "run_one_turn", side_effect=turn), \
                 patch("builtins.input", side_effect=inputs), redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:

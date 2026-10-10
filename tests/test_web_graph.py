@@ -11,6 +11,27 @@ from agent.server.graph import graph
 from agent.storage.conversations import ConversationStore
 from langgraph.checkpoint.memory import InMemorySaver
 from agent.server.graph import builder
+from agent.execution.local import LocalEnvironment
+from agent.execution.process import run_process
+
+
+class FixtureDocker(LocalEnvironment):
+    """Offline graph fixture; real Docker/isolation is validated separately."""
+    def __init__(self, repo, image, task_root, *, runtime=None, read_sources=()):
+        super().__init__(repo, artifact_root=Path(task_root).parent.parent/'execution'/Path(task_root).name)
+        self.image, self.runtime, self._container_id = image, runtime, 'f'*64
+
+    def start(self):
+        return self
+
+    def close(self):
+        pass
+
+    def run_process(self, command, *, stdout_path, stderr_path, timeout=None, shell=False, on_started=None):
+        import re
+        env = {k:v for k,v in os.environ.items() if not re.search(r'API_KEY|ACCESS_TOKEN|SECRET|PASSWORD',k,re.I)}
+        return run_process(command, cwd=self.repo_root, stdout_path=stdout_path, stderr_path=stderr_path,
+                           timeout=self.timeout if timeout is None else timeout, shell=shell, env=env, on_started=on_started)
 
 
 class BlockedModel:
@@ -84,6 +105,14 @@ class ConversationTests(unittest.TestCase):
         guard = patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root/'runs')})
         guard.start()
         self.addCleanup(guard.stop)
+        from agent.storage.preferences import atomic_write
+        import json
+        atomic_write(self.root/'runs/project-environments.json', json.dumps({str(self.repo): {
+            'backend': 'docker', 'image': 'sha256:'+'1'*64,
+            'runtime': {'python': '/opt/miniconda3/envs/testbed/bin/python', 'conda_env': 'testbed'}}}).encode())
+        execution = patch('agent.execution.task_docker.TaskDocker', FixtureDocker)
+        execution.start()
+        self.addCleanup(execution.stop)
 
     def invoke(self, model, text='你好', identity='user-one'):
         with patch('agent.server.graph.model_factory', return_value=model):

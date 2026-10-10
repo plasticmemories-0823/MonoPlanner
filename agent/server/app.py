@@ -21,6 +21,7 @@ from langgraph_sdk import get_client
 from agent.storage.purge import begin_purge, finish_purge
 from urllib.parse import urlsplit
 from agent.server.desktop import routes as desktop_routes
+from agent.execution.projects import ProjectEnvironments, local_images, workspace_binding
 
 
 LOADED_SERVICE = service_identity()
@@ -55,6 +56,33 @@ async def directories(request: Request):
         result = await asyncio.to_thread(directory_page, request.query_params.get('path', ''))
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})
     except (OSError, ValueError) as exc:
+        return JSONResponse({'error': str(exc)}, status_code=400)
+
+
+async def execution_images(request: Request):
+    try:
+        return JSONResponse(await asyncio.to_thread(local_images), headers={'Cache-Control': 'no-store'})
+    except (OSError, ValueError) as exc:
+        return JSONResponse({'error': str(exc)}, status_code=503)
+
+
+async def project_execution(request: Request):
+    try:
+        if request.method == 'POST':
+            origin = urlsplit(request.headers['origin']) if request.headers.get('origin') else None
+            if origin and (origin.scheme != 'http' or origin.hostname not in {'127.0.0.1', 'localhost', 'monoplanner.localhost'}
+                           or origin.port != int(os.getenv('MONOPLANER_UI_PORT', '3000'))):
+                return JSONResponse({'error': '仅允许本机前端配置执行环境'}, status_code=403)
+            if not request.headers.get('content-type', '').startswith('application/json'):
+                return JSONResponse({'error': '配置必须使用 JSON'}, status_code=415)
+            raw = await request.body()
+            if len(raw) > 8192:
+                raise ValueError('配置请求过大')
+            result = await asyncio.to_thread(lambda: ProjectEnvironments().save(json.loads(raw)))
+        else:
+            result = await asyncio.to_thread(workspace_binding, request.query_params.get('repo', ''))
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except (ValueError, OSError, KeyError, TypeError) as exc:
         return JSONResponse({'error': str(exc)}, status_code=400)
 
 
@@ -203,6 +231,8 @@ async def settings(request: Request):
 
 
 app = Starlette(routes=[*desktop_routes, Route('/service', service, methods=['GET']),
+                       Route('/execution/images', execution_images, methods=['GET']),
+                       Route('/workspace/execution', project_execution, methods=['GET', 'POST']),
                        Route('/workspace', workspace, methods=['GET', 'POST']),
                        Route('/workspace/directories', directories, methods=['GET']),
                        Route('/settings', settings, methods=['GET', 'POST']),

@@ -15,7 +15,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from agent.server.graph import builder
 from agent.storage.activity import projection, read_activity
 from agent.storage.conversations import ConversationStore
-from test_web_graph import ScriptedModel, text_reply, investigation
+from test_web_graph import FixtureDocker, ScriptedModel, text_reply, investigation
 
 
 class ActivityTests(unittest.TestCase):
@@ -32,6 +32,13 @@ class ActivityTests(unittest.TestCase):
         guard = patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.runs)})
         guard.start()
         self.addCleanup(guard.stop)
+        from agent.storage.preferences import atomic_write
+        atomic_write(self.runs/'project-environments.json', json.dumps({str(self.repo): {
+            'backend': 'docker', 'image': 'sha256:'+'1'*64,
+            'runtime': {'python': '/opt/miniconda3/envs/testbed/bin/python', 'conda_env': 'testbed'}}}).encode())
+        execution = patch('agent.execution.task_docker.TaskDocker', FixtureDocker)
+        execution.start()
+        self.addCleanup(execution.stop)
         self.graph = builder.compile(checkpointer=InMemorySaver())
 
     def run_model(self, model, identity='first'):

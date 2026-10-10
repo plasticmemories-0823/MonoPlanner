@@ -9,6 +9,7 @@ from agent.execution import existing
 from agent.execution.web import WEB_NAMES, WebProvider, WebUnknown, archive_file
 from agent.model.tools import ASSISTANT_SCHEMA
 from agent.storage.records import save
+from agent.execution.projects import EnvironmentRequired
 
 READ_NAMES = {'list_files', 'read_file', 'search_files', 'list_applications'}
 OPEN_NAMES = {'open_file', 'launch_application', 'request_file_operation'}
@@ -100,11 +101,14 @@ def execute_calls(loop, response, history=None):
                 loop.state.setdefault('desktop_approvals', {})[result['id']] = 'awaiting_approval'
             status = 'failed' if result.get('error') or (call['name'] == 'run_existing'
                 and (result['exit_code'] != 0 or result['timed_out'])) else 'succeeded'
+        except EnvironmentRequired as exc:
+            result, status = {'error': str(exc)}, 'failed'
+            pending['environment_required'] = str(exc)
         except WebUnknown:
             loop.state.update(status='execution_unknown', reason='已发出的网络请求结果不明，不自动重试')
             loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
             return
-        except (ValueError, OSError, KeyError) as exc:
+        except (ValueError, OSError, KeyError, RuntimeError) as exc:
             if call['name'] == 'run_existing' and loop.state.get('assistant_process'):
                 loop.state.update(status='execution_unknown', reason='已有任务执行结果不明，不自动重试')
                 loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
@@ -133,5 +137,8 @@ def execute_calls(loop, response, history=None):
     target = loop.state['history'] if history is None else history
     target.extend([response, *pending['results']])
     approval = bool(pending.get('approval_ids'))
-    loop.state.update(assistant_pending=None, response_pending=None, status='awaiting_user' if approval else 'needs_plan')
+    loop.state.update(assistant_pending=None, response_pending=None,
+                      status='awaiting_user' if approval or pending.get('environment_required') else 'needs_plan')
+    if pending.get('environment_required'):
+        loop.state['reason'] = pending['environment_required']
     loop.persist('assistant_completed')

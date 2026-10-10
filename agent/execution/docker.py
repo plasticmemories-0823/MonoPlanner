@@ -9,9 +9,32 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import subprocess
 import tempfile
 import uuid
+
+
+def docker_executable():
+    # Portable startup intentionally omits system language runtimes from PATH.
+    if shutil.which('docker'):
+        return 'docker'
+    installed = Path(os.environ.get('ProgramFiles', 'C:/Program Files'))/'Docker/Docker/resources/bin/docker.exe'
+    return str(installed) if os.name == 'nt' and installed.is_file() else 'docker'
+
+
+def runtime_profile(value=None):
+    value = dict(value or {'python': '/opt/miniconda3/envs/testbed/bin/python', 'conda_env': 'testbed'})
+    if set(value) != {'python', 'conda_env'}:
+        raise ValueError('运行环境仅接受 python 和 conda_env')
+    python, conda = value['python'], value['conda_env']
+    if (not isinstance(python, str) or not python.startswith('/') or '\\' in python
+            or '..' in python.split('/') or any(c in python for c in '\0\r\n')):
+        raise ValueError('python 必须是容器内的绝对路径')
+    if not isinstance(conda, str) or (conda and not re.fullmatch(r'[A-Za-z0-9_.-]+', conda)):
+        raise ValueError('conda_env 必须是环境名称或空字符串')
+    return value
 
 
 # Keep this script compatible with the older Python versions in benchmark images.
@@ -87,7 +110,7 @@ class DockerEnvironment:
     python_executable = "/opt/miniconda3/envs/testbed/bin/python"
 
     def __init__(self, repo_root, image, container_name, timeout=120,
-                 artifact_root=None):
+                 artifact_root=None, *, runtime=None, material_mounts=None):
         self.repo_root = Path(repo_root).expanduser().resolve()
         if not self.repo_root.exists():
             raise FileNotFoundError(f"工作区不存在：{self.repo_root}")
@@ -101,6 +124,11 @@ class DockerEnvironment:
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("命令超时必须大于 0。")
         self.image = image
+        self.runtime = runtime_profile(runtime)
+        self.python_executable = self.runtime['python']
+        self.material_mounts = dict(material_mounts or {})
+        self.runtime_facts = {'backend': 'Docker', 'python': self.python_executable,
+                              'conda_env': self.runtime['conda_env'], 'source': '/testbed', 'network': 'none'}
         self.container_name = container_name
         self.timeout = timeout
         self.artifact_root = (
@@ -114,13 +142,16 @@ class DockerEnvironment:
         self._container_id = None
         self._closed = False
 
+    def clone_options(self):
+        return {'runtime': self.runtime, 'material_mounts': self.material_mounts}
+
     @staticmethod
     def _process_options():
         return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
     def _docker(self, arguments, timeout=30, **kwargs):
         return subprocess.run(
-            ["docker", *arguments], timeout=timeout,
+            [docker_executable(), *arguments], timeout=timeout,
             **self._process_options(), **kwargs,
         )
 
@@ -143,6 +174,10 @@ class DockerEnvironment:
             # Docker defaults tmpfs to noexec. Compiler probes must be able to
             # run their temporary products inside this isolated filesystem.
             arguments[1:1] = ["--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=268435456"]
+        for index, source in enumerate(self.material_mounts.values()):
+            if ',' in str(source):
+                raise ValueError('资料挂载路径暂不支持逗号')
+            arguments[1:1] = ['--mount', f'type=bind,source={source},target=/agent-materials/{index},readonly']
         result = self._docker(arguments, capture_output=True, text=True,
                               encoding="utf-8", errors="replace")
         (self.artifact_root / "container-start.stdout.log").write_text(
@@ -164,6 +199,12 @@ class DockerEnvironment:
 
     def host_to_container(self, path):
         resolved = Path(path).expanduser().resolve()
+        for index, source in enumerate(self.material_mounts):
+            root = Path(source)
+            if resolved == root:
+                return f'/agent-materials/{index}'
+            if root.is_dir() and resolved.is_relative_to(root):
+                return f'/agent-materials/{index}/{resolved.relative_to(root).as_posix()}'
         for root, target in ((self.artifact_root, "/agent-artifacts"),
                              (self.repo_root, "/testbed")):
             try:
@@ -173,19 +214,20 @@ class DockerEnvironment:
             return target if relative == Path(".") else f"{target}/{relative.as_posix()}"
         raise ValueError(f"路径不在任务仓库或记录目录中：{resolved}")
 
-    @staticmethod
-    def _activated_argv(command, shell):
+    def _activated_argv(self, command, shell):
+        activation = ('source /opt/miniconda3/bin/activate ' + shlex.quote(self.runtime['conda_env']) + ' && '
+                      if self.runtime['conda_env'] else '')
         if shell:
             if not isinstance(command, str) or not command.strip():
                 raise ValueError("shell=True 时 command 必须是非空文本。")
             return ["/bin/bash", "-c",
-                    'source /opt/miniconda3/bin/activate testbed && exec /bin/bash -e -o pipefail -c "$1"',
+                    activation + 'exec /bin/bash -e -o pipefail -c "$1"',
                     "agent-command", command]
         if (not isinstance(command, (list, tuple)) or not command
                 or any(not isinstance(arg, str) for arg in command)):
             raise ValueError("shell=False 时 command 必须是非空字符串参数列表。")
         return ["/bin/bash", "-c",
-                'source /opt/miniconda3/bin/activate testbed && exec "$@"',
+                activation + 'exec "$@"',
                 "agent-command", *command]
 
     def _cleanup_process_group(self, status_path):
@@ -196,7 +238,7 @@ class DockerEnvironment:
         return result.returncode == 0
 
     def run_process(self, command, *, stdout_path, stderr_path, timeout=None,
-                    shell=False):
+                    shell=False, on_started=None):
         timeout = self.timeout if timeout is None else timeout
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("命令超时必须大于 0。")
@@ -207,6 +249,8 @@ class DockerEnvironment:
             path.resolve().relative_to(self.artifact_root)
             path.parent.mkdir(parents=True, exist_ok=True)
         self.start()
+        if on_started:
+            on_started(self._container_id)
         status_path = self.artifact_root / f"process-{uuid.uuid4().hex}.json"
         request = {"argv": argv, "timeout": timeout,
                    "status_path": self.host_to_container(status_path)}
@@ -216,6 +260,7 @@ class DockerEnvironment:
             "stdout_log": str(stdout_path.resolve()),
             "stderr_log": str(stderr_path.resolve()),
             "process_result": str(status_path),
+            'container_id': self._container_id,
         }
         with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
             try:
