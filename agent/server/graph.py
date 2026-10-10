@@ -1,5 +1,6 @@
 """Public LangGraph conversation references private, single-owner task checkpoints."""
 from pathlib import Path
+import logging
 import uuid
 from typing import Annotated, TypedDict
 
@@ -8,6 +9,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.errors import GraphBubbleUp
 from langgraph.types import Overwrite
 
 from agent.model.client import create_model
@@ -19,6 +21,8 @@ from agent.server.runtime import ConversationRunner
 from agent.storage.preferences import Preferences, state_root
 from agent.execution.assistant_files import authorized_roots
 from agent.storage.permissions import Permissions
+from agent.storage.records import save
+from agent.storage.usage import summarize
 
 ACTIVE = {'needs_plan', 'executing'}
 FINISHED = {'chat_complete', 'verified_success', 'task_blocked', 'settings_required'}
@@ -26,7 +30,9 @@ FINISHED = {'chat_complete', 'verified_success', 'task_blocked', 'settings_requi
 
 def finished(session, store):
     return session['status'] in FINISHED or (session['status'] == 'runtime_error'
-                                            and store.error_is_settled(session['task_id']))
+                                            and ((session.get('initialization_failed')
+                                                  and not (store.path.parent/'tasks'/session['task_id']).exists())
+                                                 or store.error_is_settled(session['task_id'])))
 
 
 class ConversationState(TypedDict, total=False):
@@ -122,29 +128,47 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
     if not session or session['task_id'] != state['task_id']:
         raise ValueError('Conversation/task association changed')
     writer = get_stream_writer()
-    permission = Permissions(state_root()).boundary(thread)
-    runner = ConversationRunner(LazyModel(session['runtime_settings']), session['repo'], phase=phase,
+    task_dir = state_root()/'tasks'/session['task_id']
+    runner = None
+    try:
+        permission = Permissions(state_root()).boundary(thread)
+        runner = ConversationRunner(LazyModel(session['runtime_settings']), session['repo'], phase=phase,
                         read_roots=session.get('read_roots', []),
                         access_mode=permission['effective'],
                         conversation_id=thread,
-                        state_dir=state_root()/'tasks'/session['task_id'], interactive=True,
+                        state_dir=task_dir, interactive=True,
                         event_sink=writer, runtime_settings=session['runtime_settings'],
                         control_source=lambda: store.pending(thread))
-    result = runner.run(messages_from_dict(session['history']), session['request'], StepBudget(max_steps=1000))
+        result = runner.run(messages_from_dict(session['history']), session['request'], StepBudget(max_steps=1000))
+    except GraphBubbleUp:
+        raise  # LangGraph interrupts must keep their own pause/checkpoint semantics.
+    except Exception as exc:
+        logging.getLogger(__name__).exception('Conversation task failed before returning a result')
+        runner_state = runner.state if runner else {}
+        # Only a failure before any task archive exists is definitely settled.
+        # Existing checkpoints and unknown operations remain protected.
+        session['initialization_failed'] = not runner_state and not task_dir.exists()
+        save(state_root()/'errors'/f"{session['task_id']}.json",
+             {'task_id': session['task_id'], 'phase': phase, 'error_type': type(exc).__name__,
+              'initialization_failed': session['initialization_failed']})
+        result = {'status': 'runtime_error', 'artifact_dir': str(task_dir),
+                  'fresh_verification': False, 'usage': summarize(runner_state)}
+    runner_state = runner.state if runner else {}
     status = result['status']
-    store.acknowledge(thread, runner.state.get('applied_inputs', []))
+    store.acknowledge(thread, runner_state.get('applied_inputs', []))
     updates = [(AIMessage if r['type'] == 'ai' else HumanMessage)(content=r['content'], id=r['id'])
-               for r in runner.state.get('public_events', [])]
+               for r in runner_state.get('public_events', [])]
     queued = store.pending(thread)
     # A message racing the final checkpoint starts the next turn, not a
     # second owner or an automatic retry of the just-completed task.
-    if finished({'status': status, 'task_id': session['task_id']}, store) and any(r['kind'] == 'message' for r in queued):
+    if finished({**session, 'status': status}, store) and any(r['kind'] == 'message' for r in queued):
         updates.extend(HumanMessage(content=r['text'], id=r['id']) for r in queued if r['kind'] == 'message')
         status = 'new_input'
     elif status in {'paused', 'awaiting_user'} and queued:
         status = 'needs_plan'
     if status not in ACTIVE and status != 'chat_complete' and result.get('turn_status') != 'chat_complete':
         text = ('实际验收通过。' if status == 'verified_success' else
+                '任务未能启动，已保存错误记录。请检查运行环境后重新提交。' if session.get('initialization_failed') else
                 '请先在设置中配置可用的 DeepSeek API Key，然后重新发送消息。' if status == 'settings_required' else
                 '已在安全位置暂停，可以补充要求或继续。' if status in {'paused', 'awaiting_user'} else
                 '任务尚未完成，已保留运行记录，供后续检查。')
@@ -152,7 +176,7 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
     # Presentation recovery never restores execution cursors. Those remain
     # solely in the task checkpoint, including unknown-operation protection.
     session.update(status=result['status'], result=public_result(result),
-                   workspace_bound=bool(runner.state.get('baseline')),
+                   workspace_bound=bool(runner_state.get('baseline')),
                    public_messages=messages_to_dict(add_messages(state.get('messages', []), updates)))
     store.save_session(thread, session)
     return {'messages': updates, 'status': status, 'result': public_result(result),

@@ -44,6 +44,13 @@ def copy_tree(source, destination):
     visit(source, destination, set())
 
 
+def copy_launcher_inputs(destination):
+    """Recovery reads these sources even when execution uses the compiled helper."""
+    (destination/'launcher').mkdir(parents=True, exist_ok=True)
+    for name in ('Sandbox.cs', 'Sandbox.exe.config'):
+        shutil.copy2(ROOT/'launcher'/name, destination/'launcher'/name)
+
+
 def build(destination, make_zip=True):
     destination = destination.resolve()
     if destination.parent != ROOT/'dist' or not destination.name.startswith('MonoPlanner'):
@@ -65,6 +72,7 @@ def build(destination, make_zip=True):
     if any(not (runtime/name).is_file() for name in required):
         raise ValueError('Prepare all fixed runtimes before packaging; no first-run installation')
     copy_tree(runtime, destination/'launcher/runtime')
+    copy_launcher_inputs(destination)
     standalone = ROOT/'web/.next/standalone'
     if not (standalone/'server.js').is_file():
         raise ValueError('Build the production standalone frontend first')
@@ -99,7 +107,9 @@ def build(destination, make_zip=True):
     (destination/'licenses/dependencies.json').write_text(json.dumps({'python': licenses, 'npm': list(npm.values())}, ensure_ascii=False, indent=2), encoding='utf-8')
     shutil.copy2(ROOT/'docs/third-party.md', destination/'licenses/README.md')
     from agent.storage.recovery import code_key
-    metadata['source_fingerprint'] = code_key()
+    metadata['source_fingerprint'] = code_key(destination)
+    if metadata['source_fingerprint'] != code_key():
+        raise ValueError('Packaged recovery inputs differ from the source; distribution not created')
     (destination/'portable.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
     def shipped(path):
         name = path.relative_to(destination).as_posix()

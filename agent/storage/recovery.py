@@ -18,7 +18,7 @@ def environment_key(environment):
         'python':environment.python_executable, 'runtime_files':sorted(getattr(environment,'runtime_files',()))}
 
 
-def code_key():
+def code_key(root=None):
     names = (
         'agent/task/runner.py', 'agent/task/dialogue.py', 'resources/prompts/conversation.txt', 'agent/task/operations.py',
         'agent/server/graph.py', 'agent/server/app.py', 'langgraph.json',
@@ -52,7 +52,9 @@ def code_key():
         'agent/storage/records.py', 'agent/acceptance/final.py',
         'resources/prompts/task.txt', 'resources/prompts/artifact_acceptance.txt',
     )
-    return hashlib.sha256(SCHEMA_PATH.read_bytes() + b"".join((PROJECT_ROOT / n).read_bytes() for n in names)).hexdigest()
+    schema = SCHEMA_PATH if root is None else Path(root)/SCHEMA_PATH.relative_to(PROJECT_ROOT)
+    root = PROJECT_ROOT if root is None else Path(root)
+    return hashlib.sha256(schema.read_bytes() + b"".join((root / n).read_bytes() for n in names)).hexdigest()
 
 
 def restore(loop, stored, identity):

@@ -98,6 +98,55 @@ class ConversationTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_REASONING', repr(result))
         self.assertEqual(len(list((self.root/'runs'/'tasks').glob('*/plans/*/plan.json'))), 0)
 
+    def test_startup_failure_is_public_and_persistent_without_a_model_call(self):
+        model = ScriptedModel([text_reply('新的普通聊天正常回答。')])
+        with patch('agent.server.runtime.recovery.code_key', side_effect=FileNotFoundError('PRIVATE_FILE_PATH')):
+            failed = self.invoke(model)
+        self.assertEqual(failed['status'], 'runtime_error')
+        self.assertEqual(len(model.calls), 0)
+        self.assertTrue(any('未能启动' in m.content for m in failed['messages'] if m.type == 'ai'))
+        self.assertNotIn('PRIVATE_FILE_PATH', repr(failed))
+        session = self.store.session(self.thread)
+        self.assertEqual(session['status'], 'runtime_error')
+        self.assertTrue(session['initialization_failed'])
+        self.assertEqual(session['result']['usage']['calls'], 0)
+        self.assertTrue((self.root/'runs'/'errors'/f"{failed['task_id']}.json").is_file())
+        with patch('agent.server.app.state_root', return_value=self.root/'runs'):
+            from agent.server.app import control_value
+            import json
+            restored = json.loads(control_value(self.thread).body)
+        self.assertEqual(restored['status'], 'runtime_error')
+        self.assertTrue(any('未能启动' in m['content'] for m in restored['messages'] if m['type'] == 'ai'))
+        chatted = self.invoke(model, '你好', 'after-startup-failure')
+        self.assertEqual(chatted['status'], 'chat_complete')
+        self.assertNotEqual(chatted['task_id'], failed['task_id'])
+        self.assertEqual(len(model.calls), 1)
+
+    def test_escaped_failure_does_not_settle_an_existing_task(self):
+        from agent.server.runtime import ConversationRunner
+        def interrupted(runner, *args, **kwargs):
+            runner.root = runner.explicit_state
+            runner.root.mkdir(parents=True)
+            runner.state = {'running_step': 'write', 'budget': {'unknown_usage_steps': 1}}
+            raise OSError('PRIVATE_EXECUTION_ERROR')
+
+        model = ScriptedModel([])
+        with patch.object(ConversationRunner, 'run', interrupted):
+            failed = self.invoke(model)
+        session = self.store.session(self.thread)
+        self.assertEqual(failed['status'], 'runtime_error')
+        self.assertFalse(session['initialization_failed'])
+        from agent.server.graph import finished
+        self.assertFalse(finished(session, self.store))
+        self.assertNotIn('PRIVATE_EXECUTION_ERROR', repr(failed))
+
+    def test_graph_interrupt_is_not_converted_to_a_runtime_error(self):
+        from langgraph.errors import GraphInterrupt
+        with patch('agent.server.runtime.ConversationRunner.run', side_effect=GraphInterrupt()):
+            result = self.invoke(ScriptedModel([]))
+        self.assertNotEqual(result.get('status'), 'runtime_error')
+        self.assertFalse(self.store.session(self.thread).get('initialization_failed'))
+
     def test_code_draft_is_public_chat_and_does_not_initialize_work(self):
         draft = '这是页面草稿，还未保存。\n```html\n<!doctype html>\n<h1>淘宝示例</h1>\n```\n是否按这个方案开始创建文件？'
         model = ScriptedModel([text_reply(draft)])
