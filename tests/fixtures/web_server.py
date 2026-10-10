@@ -43,6 +43,10 @@ class OfflineModel:
             pass
         if '慢速' in request:
             time.sleep(25)
+        if 'SDK消息样本' in request:
+            from agent.model.client import ConfiguredModel
+            from tests.test_public_model_stream import CallbackModel
+            return ConfiguredModel(CallbackModel(tags=['nostream'])).invoke_with_progress(messages, lambda text: None)
         if '操作批准样本' in request:
             return self.web('request_file_operation', operation='create',
                             path=os.environ['MONOPLANER_BROWSER_FILE'], destination='', content='离线批准样本')

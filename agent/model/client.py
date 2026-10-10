@@ -132,5 +132,5 @@ def create_model(settings, policy=None):
     client = DeepSeekClient(model=settings["model_name"], api_key=settings["api_key"],
                           base_url="https://api.deepseek.com/beta", temperature=settings.get("temperature", 0),
                           max_tokens=policy.max_output_tokens, timeout=policy.api_timeout,
-                          max_retries=0, **model_http_clients(policy.api_timeout))
+                          max_retries=0, tags=['nostream'], **model_http_clients(policy.api_timeout))
     return ConfiguredModel(client, policy)
