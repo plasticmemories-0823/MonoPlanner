@@ -101,16 +101,20 @@ def build(destination, make_zip=True):
     from agent.storage.recovery import code_key
     metadata['source_fingerprint'] = code_key()
     (destination/'portable.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
-    files = {str(p.relative_to(destination)).replace('\\', '/'): {'bytes': p.stat().st_size, 'sha256': hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()}
-             for p in destination.rglob('*') if p.is_file() and p.name != 'checksums.json'}
+    def shipped(path):
+        name = path.relative_to(destination).as_posix()
+        return (path.is_file() and path.name != 'checksums.json'
+                and not name.startswith(('web/.next/server/route-cache/', 'web/.next/cache/'))
+                and '__pycache__' not in path.parts and path.suffix != '.pyc')
+    files = {p.relative_to(destination).as_posix(): {'bytes': p.stat().st_size, 'sha256': hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()}
+             for p in destination.rglob('*') if shipped(p)}
     (destination/'checksums.json').write_text(json.dumps(files, indent=2), encoding='utf-8')
     print(json.dumps({'folder': str(destination), 'files': len(files), 'bytes': sum(p['bytes'] for p in files.values()), **metadata}), flush=True)
     if make_zip:
         target = destination.parent/'MonoPlanner-Windows11-x64.zip'
         with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-            for file in destination.rglob('*'):
-                if file.is_file():
-                    archive.write(file, 'MonoPlanner/'+file.relative_to(destination).as_posix())
+            for name in [*files, 'checksums.json']:
+                archive.write(destination/name, 'MonoPlanner/'+name)
         print(json.dumps({'zip': str(target), 'bytes': target.stat().st_size, 'sha256': hashlib.file_digest(target.open('rb'), 'sha256').hexdigest()}), flush=True)
 
 
