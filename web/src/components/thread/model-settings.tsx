@@ -1,7 +1,7 @@
 "use client";
 
 import { ReactNode, useEffect, useState } from "react";
-import { Brain, Globe, Settings } from "lucide-react";
+import { Brain, Globe, KeyRound, Settings } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../ui/button";
 import { PasswordInput } from "../ui/password-input";
@@ -40,17 +40,18 @@ export function ModelSettings({
   apiUrl,
   current,
   trailingControls,
-  desktopSettings,
+  menuItems,
 }: {
   apiUrl: string;
   current?: RuntimeSettings;
   trailingControls?: ReactNode;
-  desktopSettings?: ReactNode;
+  menuItems?: ReactNode;
 }) {
   const [value, setValue] = useState<Preferences>(defaults);
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [key, setKey] = useState("");
 
   useEffect(() => {
@@ -188,9 +189,13 @@ export function ModelSettings({
           type="button"
           variant="ghost"
           size="sm"
-          onClick={() => setOpen(true)}
-          aria-label="模型设置"
-          title={value.has_api_key ? "模型设置" : "设置 · 尚未配置 API Key"}
+          onClick={() => setMenuOpen(true)}
+          aria-label="工具与设置"
+          aria-haspopup="dialog"
+          aria-expanded={menuOpen}
+          title={
+            value.has_api_key ? "工具与设置" : "工具与设置 · 尚未配置 API Key"
+          }
           className="text-muted-foreground relative size-8 rounded-full p-0"
         >
           <Settings className="size-4" />
@@ -200,6 +205,41 @@ export function ModelSettings({
         </Button>
       </div>
       <Dialog
+        open={menuOpen}
+        onOpenChange={setMenuOpen}
+      >
+        <DialogContent
+          className="max-w-sm gap-2 p-4"
+          closeLabel="关闭功能菜单"
+        >
+          <DialogHeader className="mb-1 px-3 pt-1">
+            <DialogTitle className="text-base">工具与设置</DialogTitle>
+            <DialogDescription>
+              管理资料、文件、应用及模型密钥。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-1">
+            {menuItems}
+            <div className="my-1 border-t" />
+            <Button
+              type="button"
+              variant="ghost"
+              className="h-11 w-full justify-start gap-3 rounded-lg px-3 text-sm"
+              onClick={() => {
+                setMenuOpen(false);
+                setOpen(true);
+              }}
+            >
+              <KeyRound className="size-4" />
+              API Key 设置
+              <span className="text-muted-foreground ml-auto text-xs">
+                {value.has_api_key ? "已配置" : "未配置"}
+              </span>
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog
         open={open}
         onOpenChange={(next) => {
           setOpen(next);
@@ -208,7 +248,7 @@ export function ModelSettings({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>DeepSeek 设置</DialogTitle>
+            <DialogTitle>API Key 设置</DialogTitle>
             <DialogDescription>
               密钥由后端在本机加密保存；留空保存保留现有密钥。
             </DialogDescription>
@@ -253,7 +293,6 @@ export function ModelSettings({
             联网使用同一个 Key。网页搜索会增加 DeepSeek API 调用和 Token
             费用；读取网页不额外调用模型。
           </p>
-          {desktopSettings}
           <div className="flex justify-between gap-3">
             <Button
               type="button"

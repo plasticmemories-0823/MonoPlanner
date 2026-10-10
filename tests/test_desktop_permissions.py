@@ -35,6 +35,44 @@ class DesktopPermissionsTests(unittest.TestCase):
         permissions.request(self.thread, 'sandbox')
         self.assertEqual(permissions.boundary(self.thread)['effective'], 'sandbox')
 
+    def test_settings_before_first_message_do_not_initialize_a_task(self):
+        with TestClient(Starlette(routes=routes)) as client:
+            response = client.post(f'/threads/{self.thread}/permission', json={'mode': 'full'},
+                                   headers={'Origin': 'http://127.0.0.1:3000'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'requested': 'full', 'effective': 'sandbox'})
+        self.assertIsNone(self.store.store.session(self.thread))
+        self.assertFalse((self.root/'state/tasks').exists())
+        self.assertEqual(self.store.list(self.thread), [])
+
+    def test_file_selection_before_first_message_authorizes_only_selected_file(self):
+        from types import SimpleNamespace
+        selected = self.root/'selected.txt'; selected.write_text('only this file')
+        other = self.root/'other.txt'; other.write_text('not authorized')
+        with patch('agent.server.desktop.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout=str(selected))):
+            with TestClient(Starlette(routes=routes)) as client:
+                result = client.post(f'/threads/{self.thread}/choose-file', json={},
+                                    headers={'Origin': 'http://127.0.0.1:3000'})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()['path'], str(selected.resolve()))
+        self.assertIsNone(self.store.store.session(self.thread))
+        self.assertEqual(Permissions(self.root/'state').get(self.thread)['effective'], 'sandbox')
+        with self.assertRaises(ValueError):
+            self.store.preview(self.thread, str(other), '', [])
+
+    def test_cancelled_application_picker_does_not_register_or_start_application(self):
+        from types import SimpleNamespace
+        before = self.store.applications()
+        with patch('agent.server.desktop.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='')):
+            with patch('agent.execution.desktop.subprocess.Popen') as start:
+                with TestClient(Starlette(routes=routes)) as client:
+                    result = client.post(f'/threads/{self.thread}/choose-application', json={},
+                                        headers={'Origin': 'http://127.0.0.1:3000'})
+                start.assert_not_called()
+        self.assertEqual(result.json(), {'path': ''})
+        self.assertEqual(self.store.applications(), before)
+        self.assertIsNone(self.store.store.session(self.thread))
+
     def test_preview_is_saved_original_and_contains_no_implicit_model_input(self):
         result = self.store.preview(self.thread, str(self.file), str(self.repo), [])
         self.file.write_text('changed')

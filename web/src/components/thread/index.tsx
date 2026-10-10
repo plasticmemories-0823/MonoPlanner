@@ -36,11 +36,8 @@ import { useRunControls, statusLabel } from "./run-controls";
 import { ActivityRows, useActivity } from "./activity";
 import { ReadSources } from "./read-sources";
 import { ModelSettings } from "./model-settings";
-import {
-  DesktopControls,
-  DesktopCards,
-  DesktopApplicationSettings,
-} from "./desktop-controls";
+import { DesktopCards, DesktopActions } from "./desktop-controls";
+import { ExecutionPermissions } from "./execution-permissions";
 import {
   useArtifactOpen,
   ArtifactContent,
@@ -117,9 +114,24 @@ export function Thread() {
   const activity = useActivity(stream.apiUrl, threadId, isLoading);
   const [readRoots, setReadRoots] = useState<string[]>([]);
   const savedReadRoots = JSON.stringify(stream.values.read_roots || []);
+  const readRootsView = useRef({ threadId, saved: "" });
   useEffect(() => {
-    setReadRoots(JSON.parse(savedReadRoots));
-  }, [threadId, savedReadRoots]);
+    // Creating an empty conversation for settings keeps unsent directory choices.
+    const previous = readRootsView.current;
+    const changed =
+      previous.threadId !== threadId || previous.saved !== savedReadRoots;
+    if (
+      changed &&
+      !(
+        previous.threadId === null &&
+        threadId &&
+        stream.preparingThread &&
+        savedReadRoots === "[]"
+      )
+    )
+      setReadRoots(JSON.parse(savedReadRoots));
+    readRootsView.current = { threadId, saved: savedReadRoots };
+  }, [threadId, savedReadRoots, stream.preparingThread]);
   const messageIds = new Set(messages.map((message) => message.id));
   const anchors = activityAnchors(messages);
   const groupedActivity = new Map<string, typeof activity.items>();
@@ -184,7 +196,7 @@ export function Thread() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (input.trim().length === 0) return;
+    if (input.trim().length === 0 || stream.preparingThread) return;
     setFirstTokenReceived(false);
     // Chat needs no workspace. The backend validates it when work is requested.
     if (repo.trim()) localStorage.setItem("monoplaner.repo", repo.trim());
@@ -448,27 +460,30 @@ export function Thread() {
                               )
                             }
                           />
-                          <ReadSources
-                            apiUrl={stream.apiUrl}
-                            roots={readRoots}
-                            onChange={setReadRoots}
-                            disabled={isLoading}
-                          />
                           <ModelSettings
                             apiUrl={stream.apiUrl}
                             current={stream.values.runtime_settings}
                             trailingControls={
-                              <DesktopControls
+                              <ExecutionPermissions
                                 apiUrl={stream.apiUrl}
                                 threadId={threadId}
                                 running={isLoading}
+                                ensureThread={stream.ensureThread}
                               />
                             }
-                            desktopSettings={
-                              <DesktopApplicationSettings
-                                apiUrl={stream.apiUrl}
-                                threadId={threadId}
-                              />
+                            menuItems={
+                              <>
+                                <ReadSources
+                                  apiUrl={stream.apiUrl}
+                                  roots={readRoots}
+                                  onChange={setReadRoots}
+                                  disabled={isLoading}
+                                />
+                                <DesktopActions
+                                  apiUrl={stream.apiUrl}
+                                  ensureThread={stream.ensureThread}
+                                />
+                              </>
                             }
                           />
                         </div>
@@ -490,7 +505,7 @@ export function Thread() {
                             type="submit"
                             size="icon"
                             className="size-9 rounded-full shadow-none"
-                            disabled={!input.trim()}
+                            disabled={!input.trim() || stream.preparingThread}
                             aria-label={isLoading ? "发送补充" : "发送"}
                             title={isLoading ? "发送补充" : "发送"}
                           >

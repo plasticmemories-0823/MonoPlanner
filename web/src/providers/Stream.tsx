@@ -27,7 +27,8 @@ import { PasswordInput } from "@/components/ui/password-input";
 import { getApiKey, setApiKey as storeApiKey } from "@/lib/api-key";
 import { resolveApiUrl } from "@/lib/resolve-api-url";
 import { mergePublicMessages } from "@/lib/public-messages";
-import { useThreads } from "./Thread";
+import { getThreadSearchMetadata, useThreads } from "./Thread";
+import { createClient } from "./client";
 import { toast } from "sonner";
 import type { RuntimeSettings } from "@/components/thread/model-settings";
 
@@ -61,6 +62,8 @@ type StreamContextType = ReturnType<typeof useTypedStream> & {
   apiUrl: string;
   progress?: ProgressEvent;
   retainMessage: (message: Message) => void;
+  ensureThread: () => Promise<string>;
+  preparingThread: boolean;
 };
 const StreamContext = createContext<StreamContextType | undefined>(undefined);
 
@@ -113,6 +116,70 @@ const StreamSession = ({
   const recovered = recovery?.key === key ? recovery.value : undefined;
   const activeKey = useRef(key);
   activeKey.current = key;
+  const selectedThread = useRef(threadId);
+  selectedThread.current = threadId;
+  const setup = useRef<Promise<string> | null>(null);
+  const threadCommit = useRef<{
+    id: string;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  } | null>(null);
+  const [preparingThread, setPreparingThread] = useState(false);
+  useEffect(() => {
+    const waiting = threadCommit.current;
+    if (!waiting) return;
+    if (threadId === waiting.id) {
+      threadCommit.current = null;
+      waiting.resolve();
+    } else if (threadId) {
+      threadCommit.current = null;
+      waiting.reject(new Error("对话已切换，请在当前对话重新操作"));
+    }
+  }, [threadId]);
+  useEffect(
+    () => () => {
+      threadCommit.current?.reject(new Error("对话已关闭，设置未保存"));
+      threadCommit.current = null;
+    },
+    [],
+  );
+  const ensureThread = async () => {
+    if (setup.current) return setup.current;
+    if (selectedThread.current) return selectedThread.current;
+    const expectedKey = activeKey.current;
+    const pending = (async () => {
+      const client = createClient(apiUrl, apiKey ?? undefined, authScheme);
+      const created = await client.threads.create({
+        metadata: getThreadSearchMetadata(assistantId),
+      });
+      if (activeKey.current !== expectedKey)
+        throw new Error("对话已切换，请在当前对话重新操作");
+      // URL updates can resolve before React commits. Desktop controls must
+      // finish binding to this conversation before saving its permissions.
+      const committed = new Promise<void>((resolve, reject) => {
+        threadCommit.current = { id: created.thread_id, resolve, reject };
+      });
+      try {
+        await setThreadId(created.thread_id);
+        await committed;
+      } finally {
+        if (threadCommit.current?.id === created.thread_id)
+          threadCommit.current = null;
+      }
+      void getThreads().then(setThreads).catch(console.error);
+      return created.thread_id;
+    })();
+    setup.current = pending;
+    setPreparingThread(true);
+    try {
+      return await pending;
+    } finally {
+      if (setup.current === pending) {
+        setup.current = null;
+        setPreparingThread(false);
+      }
+    }
+  };
   const recoveryVersion = useRef(0);
   const [archive, setArchive] = useState<{ key: string; messages: Message[] }>({
     key: "",
@@ -255,6 +322,8 @@ const StreamSession = ({
         apiUrl,
         progress,
         retainMessage,
+        ensureThread,
+        preparingThread,
       }}
     >
       {children}

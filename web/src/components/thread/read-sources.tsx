@@ -31,15 +31,17 @@ export function ReadSources({
         variant="ghost"
         size="sm"
         disabled={disabled}
-        aria-label="额外可读目录"
+        aria-label="资料目录"
         title="管理额外可读目录，仅授权查询资料"
         onClick={() => setOpen(true)}
-        className="text-muted-foreground h-8 shrink-0 gap-1 rounded-full px-2 text-xs"
+        className="h-11 w-full justify-start gap-3 rounded-lg px-3 text-sm"
       >
         <FolderPlus className="size-4" />
-        资料
+        资料目录
         {roots.length > 0 && (
-          <span className="text-muted-foreground">{roots.length}</span>
+          <span className="text-muted-foreground ml-auto text-xs">
+            {roots.length} 个
+          </span>
         )}
       </Button>
       <Dialog
