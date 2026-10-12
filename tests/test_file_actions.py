@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from agent.execution.desktop import DesktopStore
 from agent.execution.assistant_files import AssistantFiles
-from agent.execution.native import NativeEnvironment
 from agent.storage.permissions import Permissions
 from agent.storage.read_sources import ReadSources
 from langchain_core.messages import HumanMessage
@@ -105,7 +104,7 @@ class FileActionsTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.store.request_open(self.thread, engine['id'], document)
             start.assert_not_called()
 
-    def test_single_file_query_preview_and_sandbox_mapping_do_not_grant_parent(self):
+    def test_single_file_query_and_preview_do_not_grant_parent(self):
         source = self.root/'material.txt'; source.write_text('permitted')
         sibling = self.root/'sibling.txt'; sibling.write_text('private')
         sources = ReadSources(self.root/'state'); sources.add(self.thread, source, 'file')
@@ -114,16 +113,6 @@ class FileActionsTests(unittest.TestCase):
         self.store.preview(self.thread, str(source), str(self.repo), [])
         with self.assertRaises(ValueError): files.read(str(sibling), 0, 20, [])
         with self.assertRaises(ValueError): files.list(str(source.parent), 0, 20)
-        backend = NativeEnvironment(str(self.repo), artifact_root=self.root/'execution',
-                                    read_sources=sources.get(self.thread), access_mode='ask')
-        copied = self.root/'copy.txt'; copied.write_text('permitted')
-        backend.material_paths = {str(source): copied}
-        box = backend.artifact_root/'box'; inputs, outputs = box/'inputs', box/'outputs'
-        _, mappings = backend._argv([backend.python_executable, str(source)], False,
-                                    box, self.repo, inputs, outputs)
-        self.assertEqual(mappings, [])
-        with self.assertRaises(ValueError):
-            backend._argv([backend.python_executable, str(sibling)], False, box, self.repo, inputs, outputs)
 
 
 class ApprovalGraphTests(unittest.TestCase):

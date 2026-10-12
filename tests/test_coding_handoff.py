@@ -18,10 +18,37 @@ class CodingHandoffTests(unittest.TestCase):
     setUp = fixtures.ConversationTests.setUp
     invoke = fixtures.ConversationTests.invoke
 
-    def test_original_four_schema_and_task_prompt_are_unchanged(self):
-        for name in ('plan.schema.json', 'repair.schema.json', 'acceptance-review.schema.json', 'prompts/task.txt'):
+    def test_original_four_schema_and_other_task_rules_are_unchanged(self):
+        for name in ('plan.schema.json', 'repair.schema.json', 'acceptance-review.schema.json'):
             original = subprocess.check_output(['git', 'show', '98b3851:resources/' + name], cwd=PROJECT_ROOT)
             self.assertEqual((PROJECT_ROOT/'resources'/name).read_bytes(), original)
+        original = subprocess.check_output(['git', 'show', '98b3851:resources/prompts/task.txt'], cwd=PROJECT_ROOT).decode()
+        rules = (PROJECT_ROOT/'resources/prompts/task.txt').read_text(encoding='utf-8')
+        allowed_prefixes = (
+            'Use the supplied work_materials first:',
+            'An inspect plan answers the current missing fact',
+            'An inspect plan answers a specific missing fact',
+            'Prefer the observed native runner, settings and existing fixtures',
+            "Reuse the repository's available environment",
+            'kind=inspect:', 'kind=candidate:',
+            'The first generated acceptance is trialled',
+            'When cumulative changes are ready for final delivery',
+            'Before first freezing, submit_work can explicitly replace',
+            'Write independent acceptance tests;', 'For final acceptance, the program saves',
+            'Candidate steps execute in order;',
+            'Do not put progress tests,', 'Use focused partial checks after incremental edits',
+            'Only final acceptance is run,', 'Final delivery requires complete frozen acceptance',
+        )
+        def protected(text):
+            return ''.join(line for line in text.splitlines(keepends=True)
+                           if not line.startswith(allowed_prefixes))
+        self.assertEqual(protected(rules), protected(original))
+        self.assertIn("test_code='' permits incremental source changes and partial tests immediately", rules)
+        self.assertIn('Full acceptance need not be designed before these edits', rules)
+        self.assertIn('retained ORIGINAL source even after incremental edits', rules)
+        self.assertIn('previous approval cannot release a replacement', rules)
+        self.assertIn('complete frozen acceptance and relevant regression', rules)
+        self.assertNotIn('BEFORE the first modification', rules)
         self.assertEqual(wire_input([], CODING_TOOLS)['tools'][:4], wire_input([], WORK_TOOLS)['tools'])
         self.assertEqual([t.name for t in CODING_TOOLS], [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch'])
         self.assertNotIn('submit_work', [t.name for t in CHAT_TOOLS])
@@ -30,14 +57,24 @@ class CodingHandoffTests(unittest.TestCase):
         (self.repo/'README.md').write_text('Public repository introduction.', encoding='utf-8')
         (self.repo/'pytest.ini').write_text('[pytest]\n', encoding='utf-8')
         model = fixtures.ScriptedModel([fixtures.start_reply(), fixtures.investigation(['first.py']), fixtures.text_reply()])
-        result = self.invoke(model, 'Explicitly inspect first.py without editing.')
+        facts = {'python': '3.9.20 (container)', 'python_executable': '/container/python',
+                 'checkers': {'pytest': False, 'flake8': True, 'ruff': None}}
+        class ProbedDocker(fixtures.FixtureDocker):
+            def start(self):
+                self.runtime_facts = facts
+                return self
+        with patch('agent.execution.task_docker.TaskDocker', ProbedDocker):
+            result = self.invoke(model, 'Explicitly inspect first.py without editing.')
         self.assertEqual(result['status'], 'awaiting_user')
         first = model.calls[1]
         initial = json.loads(first[1].content)
         self.assertEqual(initial['request'], 'Explicitly inspect first.py without editing.')
         self.assertIn('Public repository introduction.', repr(initial['initial_evidence']['readme']))
         self.assertIn('pytest.ini', initial['initial_evidence']['test_config_paths'])
-        self.assertIn('runtime_facts', initial['initial_evidence'])
+        self.assertEqual(initial['initial_evidence']['runtime_facts'], facts)
+        supplied = initial['initial_evidence']['work_materials']
+        self.assertTrue(any(page['path'] == 'first.py' for page in supplied['reads']))
+        self.assertEqual(supplied['source_locations'][0]['path'], 'first.py')
         self.assertTrue(first[0].content.startswith((PROJECT_ROOT/'resources/prompts/task.txt').read_text(encoding='utf-8')))
         self.assertNotIn('general assistant', first[0].content)
         self.assertNotIn('application_id', first[0].content)

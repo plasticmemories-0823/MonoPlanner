@@ -1,11 +1,11 @@
 import { v4 as uuidv4 } from "uuid";
-import { Fragment, ReactNode, useCallback, useEffect, useRef } from "react";
+import { Fragment, ReactNode, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext } from "@/providers/Stream";
 import { useState, FormEvent } from "react";
 import { Button } from "../ui/button";
-import { Checkpoint, Message } from "@langchain/langgraph-sdk";
+import { Message } from "@langchain/langgraph-sdk";
 import { AssistantMessage, AssistantMessageLoading } from "./messages/ai";
 import { HumanMessage } from "./messages/human";
 import {
@@ -20,7 +20,6 @@ import {
   PanelRightOpen,
   PanelRightClose,
   SquarePen,
-  XIcon,
   ArrowUp,
 } from "lucide-react";
 import { useQueryState, parseAsBoolean } from "nuqs";
@@ -38,12 +37,6 @@ import { ReadSources } from "./read-sources";
 import { ModelSettings } from "./model-settings";
 import { DesktopCards } from "./desktop-controls";
 import { ExecutionPermissions } from "./execution-permissions";
-import {
-  useArtifactOpen,
-  ArtifactContent,
-  ArtifactTitle,
-  useArtifactContext,
-} from "./artifact";
 
 function StickyToBottomContent(props: {
   content: ReactNode;
@@ -87,16 +80,9 @@ function ScrollToBottom(props: { className?: string }) {
 }
 
 export function Thread() {
-  const [artifactContext, setArtifactContext] = useArtifactContext();
-  const [artifactOpen, closeArtifact] = useArtifactOpen();
-
-  const [threadId, _setThreadId] = useQueryState("threadId");
+  const [threadId, setThreadId] = useQueryState("threadId");
   const [chatHistoryOpen, setChatHistoryOpen] = useQueryState(
     "chatHistoryOpen",
-    parseAsBoolean.withDefault(false),
-  );
-  const [hideToolCalls, setHideToolCalls] = useQueryState(
-    "hideToolCalls",
     parseAsBoolean.withDefault(false),
   );
   const [input, setInput] = useState("");
@@ -121,14 +107,6 @@ export function Thread() {
   }
 
   const lastError = useRef<string | undefined>(undefined);
-
-  const setThreadId = (id: string | null) => {
-    _setThreadId(id);
-
-    // close artifact and reset artifact context
-    closeArtifact();
-    setArtifactContext({});
-  };
 
   useEffect(() => {
     if (!stream.error) {
@@ -189,66 +167,55 @@ export function Thread() {
       if (await queueMessage(newHumanMessage)) setInput("");
       return;
     }
-    stream.retainMessage(newHumanMessage);
-
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
 
-    const context =
-      Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
-
-    stream.submit(
-      {
-        messages: [...toolMessages, newHumanMessage],
-        context,
-        repo: repo.trim(),
-      },
-      {
-        streamMode: ["values", "custom"],
-        streamSubgraphs: true,
-        streamResumable: true,
-        config: { recursion_limit: 10000 },
-        optimisticValues: (prev) => ({
-          ...prev,
-          context,
-          messages: [
-            ...(prev.messages ?? []),
-            ...toolMessages,
-            newHumanMessage,
-          ],
-        }),
-      },
-    );
+    let targetThread: string;
+    try {
+      targetThread = await stream.ensureThread(input);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "无法创建对话，消息尚未发送",
+      );
+      return;
+    }
+    stream.retainMessage(newHumanMessage, targetThread);
+    void stream
+      .submit(
+        {
+          messages: [...toolMessages, newHumanMessage],
+          repo: repo.trim(),
+        },
+        {
+          threadId: targetThread,
+          streamMode: ["values", "custom"],
+          streamSubgraphs: true,
+          streamResumable: true,
+          config: { recursion_limit: 10000 },
+          optimisticValues: (prev) => ({
+            ...prev,
+            messages: [
+              ...(prev.messages ?? []),
+              ...toolMessages,
+              newHumanMessage,
+            ],
+          }),
+        },
+      )
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "消息未能发送");
+      });
 
     setInput("");
   };
 
-  const handleRegenerate = useCallback(
-    (parentCheckpoint: Checkpoint | null | undefined) => {
-      // Do this so the loading state is correct
-      prevMessageLength.current = prevMessageLength.current - 1;
-      setFirstTokenReceived(false);
-      toast.info("请追加新要求；已执行操作不能通过回退聊天记录重跑。");
-    },
-    [],
-  );
-
   const chatStarted = !!threadId || !!messages.length;
-  const hasNoAIOrToolMessages = !messages.find(
-    (m) => m.type === "ai" || m.type === "tool",
-  );
-
   return (
     <div className="flex h-screen w-full overflow-hidden">
       <ResizableHistory open={chatHistoryOpen}>
         <ThreadHistory />
       </ResizableHistory>
 
-      <div
-        className={cn(
-          "grid min-w-0 flex-1 grid-cols-[1fr_0fr]",
-          artifactOpen && "grid-cols-[3fr_2fr]",
-        )}
-      >
+      <div className="flex min-w-0 flex-1">
         <motion.div
           className={cn(
             "relative flex min-w-0 flex-1 flex-col overflow-hidden",
@@ -323,7 +290,6 @@ export function Thread() {
                             key={message.id || `${message.type}-${index}`}
                             message={message}
                             isLoading={isLoading}
-                            handleRegenerate={handleRegenerate}
                           />
                         )}
                         <ActivityRows
@@ -344,18 +310,14 @@ export function Thread() {
                   {activity.error && (
                     <p className="text-muted-foreground text-sm">
                       {activity.error}
-                      <button type="button" className="ml-2 underline" onClick={activity.reconnect}>重新连接</button>
+                      <button
+                        type="button"
+                        className="ml-2 underline"
+                        onClick={activity.reconnect}
+                      >
+                        重新连接
+                      </button>
                     </p>
-                  )}
-                  {/* Special rendering case where there are no AI/tool messages, but there is an interrupt.
-                    We need to render it outside of the messages list, since there are no messages to render */}
-                  {hasNoAIOrToolMessages && !!stream.interrupt && (
-                    <AssistantMessage
-                      key="interrupt-msg"
-                      message={undefined}
-                      isLoading={isLoading}
-                      handleRegenerate={handleRegenerate}
-                    />
                   )}
                   {isLoading &&
                     !firstTokenReceived &&
@@ -457,7 +419,6 @@ export function Thread() {
                                   ensureThread={stream.ensureThread}
                                   disabled={isLoading}
                                 />
-
                               </>
                             }
                           />
@@ -562,20 +523,6 @@ export function Thread() {
             />
           </StickToBottom>
         </motion.div>
-        <div className="relative flex flex-col border-l">
-          <div className="absolute inset-0 flex min-w-[30vw] flex-col">
-            <div className="grid grid-cols-[1fr_auto] border-b p-4">
-              <ArtifactTitle className="truncate overflow-hidden" />
-              <button
-                onClick={closeArtifact}
-                className="cursor-pointer"
-              >
-                <XIcon className="size-5" />
-              </button>
-            </div>
-            <ArtifactContent className="relative flex-grow" />
-          </div>
-        </div>
       </div>
     </div>
   );

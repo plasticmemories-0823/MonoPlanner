@@ -14,6 +14,7 @@ if (@('WebView2Loader.dll','Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebV
 }
 & $taskCompiler /nologo /target:winexe /platform:x64 /optimize+ /codepage:65001 /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
     "/reference:$taskRuntime/Microsoft.Web.WebView2.Core.dll" "/reference:$taskRuntime/Microsoft.Web.WebView2.WinForms.dll" `
-    "/win32manifest:$taskProject/launcher/app.manifest" "/out:$taskOutput" $taskSource (Join-Path $taskProject 'launcher/DesktopWindow.cs')
+    "/win32manifest:$taskProject/launcher/app.manifest" "/win32icon:$taskProject/launcher/MonoPlanner.ico" `
+    "/out:$taskOutput" $taskSource (Join-Path $taskProject 'launcher/DesktopWindow.cs')
 if ($LASTEXITCODE -ne 0) { throw '启动器编译失败。' }
 Write-Output "已生成桌面 App $taskProject/MonoPlanner.exe"

@@ -15,7 +15,7 @@ from agent.acceptance.artifact_checks import load_artifact_checks, run_artifact_
 from agent.acceptance.contracts import VerificationSpec, tests_ready_for_candidate
 from agent.acceptance.drivers import _BOOTSTRAP, _REPOSITORY_BOOTSTRAP
 from agent.acceptance.behavior import declaration_only, run_behavior_contract
-from agent.execution.process import shell_arguments, stop_process
+from agent.execution.process import log_excerpt, shell_arguments, stop_process
 
 
 class AcceptanceRun:
@@ -87,11 +87,7 @@ class AcceptanceRun:
     @staticmethod
     def _summary(path: Path):
         # 完整输出已直接写入文件；只把尾部放回 Agent 上下文。
-        with path.open("rb") as stream:
-            size = path.stat().st_size
-            stream.seek(max(0, size - 6000))
-            text = stream.read().decode("utf-8", errors="replace")
-        return ("[前文已截断；完整内容见日志]\n" if size > 6000 else "") + text
+        return log_excerpt(path, notice="[前文已截断；完整内容见日志]\n")
 
     def run(self, phase: str) -> dict:
         started = time.monotonic()

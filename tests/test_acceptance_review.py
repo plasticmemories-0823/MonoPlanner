@@ -12,6 +12,7 @@ from agent.storage.history import LocalHistory
 from agent.model.payload import wire_input
 from agent.model.tools import WORK_TOOLS
 from agent.storage.recovery import code_key
+from support import interrupt_after_persist
 import test_task_runner as f
 
 
@@ -58,15 +59,7 @@ class AcceptanceReviewTests(unittest.TestCase):
             store.close()
 
     def crash(self, event):
-        class Interrupted(BaseException):
-            pass
-        original = TaskRunner.persist
-
-        def persist(engine, name, payload=None):
-            original(engine, name, payload)
-            if name == event:
-                raise Interrupted()
-        return patch.object(TaskRunner, "persist", persist), Interrupted
+        return interrupt_after_persist(event)
 
     def test_no_source_edit_or_freeze_before_explicit_confirmation(self):
         interrupt, error = self.crash("acceptance_trial_finished")

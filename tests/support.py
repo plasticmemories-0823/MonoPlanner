@@ -12,6 +12,24 @@ def python_command(code, executable=None):
     return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
 
+def interrupt_after_persist(event_name):
+    """Simulate power loss after the selected checkpoint is fully saved."""
+    from unittest.mock import patch
+    from agent.task.runner import TaskRunner
+
+    class Interrupted(BaseException):
+        pass
+
+    original = TaskRunner.persist
+
+    def persist(engine, event, payload=None):
+        original(engine, event, payload)
+        if event == event_name:
+            raise Interrupted()
+
+    return patch.object(TaskRunner, "persist", persist), Interrupted
+
+
 @tool
 def read_record(name: str) -> str:
     """Read an offline record by name."""

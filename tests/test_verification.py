@@ -11,7 +11,7 @@ from agent.acceptance.runner import AcceptanceRun
 from agent.acceptance.contracts import VerificationSpec
 
 
-def test_code(body="self.assertEqual(2 + 2, 4)", decorator=""):
+def acceptance_code(body="self.assertEqual(2 + 2, 4)", decorator=""):
     return (
         "import unittest\n\nclass AcceptanceTests(unittest.TestCase):\n"
         + (f"    {decorator}\n" if decorator else "")
@@ -31,7 +31,7 @@ class VerificationTests(unittest.TestCase):
 
     def runner(self, *, code=None, command=None, timeout=120):
         spec = VerificationSpec(("满足可验证的行为要求",), command=command,
-                                test_code=test_code() if code is None and command is None else code)
+                                test_code=acceptance_code() if code is None and command is None else code)
         return AcceptanceRun(self.repo, spec, self.artifacts, timeout)
 
     def test_generated_tests_pass_and_save_evidence(self):
@@ -59,7 +59,7 @@ class VerificationTests(unittest.TestCase):
     def test_same_frozen_tests_check_before_and_after_repository_change(self):
         module = self.repo / "sample_app.py"
         module.write_text("VALUE = 3\n", encoding="utf-8")
-        runner = self.runner(code=test_code("from sample_app import VALUE\nself.assertEqual(VALUE, 4)"))
+        runner = self.runner(code=acceptance_code("from sample_app import VALUE\nself.assertEqual(VALUE, 4)"))
         before = runner.run("baseline")
         module.write_text("VALUE = 4\n", encoding="utf-8")
         after = runner.run("final")
@@ -76,19 +76,19 @@ class VerificationTests(unittest.TestCase):
         module.write_text("VALUE = 4\n", encoding="utf-8")
         os.utime(module, (1700000000, 1700000000))
 
-        runner = self.runner(code=test_code("from cached_app import VALUE\nself.assertEqual(VALUE, 4)"))
+        runner = self.runner(code=acceptance_code("from cached_app import VALUE\nself.assertEqual(VALUE, 4)"))
         result = runner.run("final")
 
         self.assertEqual(result["status"], "passed", result["stderr"])
         self.assertEqual(cached_path.read_bytes(), cached_bytes)
 
     def test_generated_runtime_error_is_distinct_from_assertion_failure(self):
-        result = self.runner(code=test_code("import module_that_does_not_exist_for_test")).run("final")
+        result = self.runner(code=acceptance_code("import module_that_does_not_exist_for_test")).run("final")
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["errors"], 1)
 
     def test_import_error_is_not_a_successful_empty_test_run(self):
-        code = "import module_that_does_not_exist_for_test\n" + test_code()
+        code = "import module_that_does_not_exist_for_test\n" + acceptance_code()
         result = self.runner(code=code).run("final")
         self.assertEqual(result["status"], "error")
         self.assertIsNone(result["tests_run"])
@@ -100,7 +100,7 @@ class VerificationTests(unittest.TestCase):
             (("A",), {}),
             (("A",), {"command": ""}),
             (("A",), {"test_code": "def broken(:"}),
-            (("A",), {"command": "echo OK", "test_code": test_code()}),
+            (("A",), {"command": "echo OK", "test_code": acceptance_code()}),
         ]
         for criteria, kwargs in invalid_specs:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -113,9 +113,9 @@ class VerificationTests(unittest.TestCase):
         self.assertFalse(result["tests_ready"])
 
     def test_skips_expected_failures_and_zero_discovered_tests_never_pass(self):
-        codes = [test_code(decorator="@unittest.skip('not implemented')"),
-                 test_code("self.fail('TODO')", "@unittest.expectedFailure"),
-                 test_code() + "\ndef load_tests(loader, tests, pattern):\n    return unittest.TestSuite()\n"]
+        codes = [acceptance_code(decorator="@unittest.skip('not implemented')"),
+                 acceptance_code("self.fail('TODO')", "@unittest.expectedFailure"),
+                 acceptance_code() + "\ndef load_tests(loader, tests, pattern):\n    return unittest.TestSuite()\n"]
         for code in codes:
             with self.subTest(code=code):
                 result = self.runner(code=code).run("final")
@@ -135,7 +135,7 @@ class VerificationTests(unittest.TestCase):
                 self.assertIsNone(result["tests_run"])
 
     def test_timeout_is_an_error_and_keeps_partial_output(self):
-        code = test_code("import time\nprint('BEFORE_TIMEOUT', flush=True)\ntime.sleep(30)")
+        code = acceptance_code("import time\nprint('BEFORE_TIMEOUT', flush=True)\ntime.sleep(30)")
         result = self.runner(code=code, timeout=0.5).run("final")
         self.assertEqual(result["status"], "error")
         self.assertIn("超过", result["reason"])
@@ -152,7 +152,7 @@ class VerificationTests(unittest.TestCase):
                 self.assertIn("冻结", result["reason"])
 
     def test_test_file_modified_during_execution_invalidates_success(self):
-        code = test_code(
+        code = acceptance_code(
             "from pathlib import Path\n"
             "path = Path(__file__)\n"
             "path.write_text(path.read_text(encoding='utf-8') + '\\n# changed', encoding='utf-8')\n"
@@ -164,10 +164,12 @@ class VerificationTests(unittest.TestCase):
         self.assertIn("执行期间", result["reason"])
 
     def test_logs_are_full_on_disk_but_summaries_are_bounded(self):
-        result = self.runner(code=test_code("print('A' * 20000)\nself.assertTrue(True)")).run("final")
+        result = self.runner(code=acceptance_code("print('A' * 20000)\nself.assertTrue(True)")).run("final")
         self.assertEqual(result["status"], "passed")
         self.assertLess(len(result["stdout"]), 6100)
         self.assertGreater(Path(result["stdout_log"]).stat().st_size, 20000)
+        self.assertEqual(result["stdout"], "[前文已截断；完整内容见日志]\n" +
+                         Path(result["stdout_log"]).read_bytes()[-6000:].decode("utf-8", errors="replace"))
 
     def test_phase_names_cannot_escape_artifact_directory(self):
         runner = self.runner()

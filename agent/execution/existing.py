@@ -1,7 +1,6 @@
 """Run repository-owned entries as argv; never accept generated or inline code."""
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil

@@ -1,4 +1,4 @@
-"""Fixed evaluation bindings preserve native defaults and container identity."""
+"""Fixed evaluation bindings preserve runtime defaults and container identity."""
 import json
 import os
 from pathlib import Path
@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from agent.server.execution import ConversationDocker, workspace_binding
+from agent.execution.task_docker import TaskDocker
+from agent.execution.projects import workspace_binding
 from agent.storage.records import save
 from agent.storage.recovery import environment_key
 
@@ -44,7 +45,7 @@ class ConversationExecutionTests(unittest.TestCase):
                            {'Source': str(self.root/'execution'/'owned-task'), 'Destination': '/agent-artifacts'}]}
 
     def test_same_container_across_nodes_and_stopped_container_never_replays(self):
-        first = ConversationDocker(self.repo, self.image, self.task)
+        first = TaskDocker(self.repo, self.image, self.task)
         with patch.object(first, '_check_runtime'), patch.object(first, '_docker', return_value=subprocess.CompletedProcess([], 0, self.cid, '')) as launch:
             first.start()
             first.start()
@@ -52,8 +53,11 @@ class ConversationExecutionTests(unittest.TestCase):
         key = environment_key(first)
         for running in (True, False):
             response = subprocess.CompletedProcess([], 0, json.dumps([self.inspected(running)]), '')
-            with patch.object(ConversationDocker, '_docker', return_value=response) as inspect:
-                restored = ConversationDocker(self.repo, self.image, self.task)
+            # This fixture checks container identity; runtime record reuse is
+            # exercised with an actual probe in test_runtime_facts.
+            with patch.object(TaskDocker, '_check_runtime'), \
+                    patch.object(TaskDocker, '_docker', return_value=response) as inspect:
+                restored = TaskDocker(self.repo, self.image, self.task)
                 self.assertEqual(environment_key(restored), key)
                 if running:
                     restored.start()
@@ -63,7 +67,7 @@ class ConversationExecutionTests(unittest.TestCase):
                 self.assertEqual(inspect.call_count, 1)
 
     def test_tampered_binding_mount_or_network_fails_without_new_launch(self):
-        initial = ConversationDocker(self.repo, self.image, self.task)
+        initial = TaskDocker(self.repo, self.image, self.task)
         save(initial.binding_path, initial._binding(self.cid))
         for change in ('mount', 'network', 'missing'):
             with self.subTest(change=change):
@@ -73,9 +77,9 @@ class ConversationExecutionTests(unittest.TestCase):
                 elif change == 'network':
                     value['HostConfig']['NetworkMode'] = 'default'
                 response = subprocess.CompletedProcess([], int(change == 'missing'), json.dumps([value]), '')
-                with patch.object(ConversationDocker, '_docker', return_value=response) as inspect:
+                with patch.object(TaskDocker, '_docker', return_value=response) as inspect:
                     with self.assertRaises((ValueError, RuntimeError)):
-                        ConversationDocker(self.repo, self.image, self.task)
+                        TaskDocker(self.repo, self.image, self.task)
                     self.assertEqual(inspect.call_count, 1)
 
     def test_chat_binding_is_frozen_without_starting_execution(self):
@@ -84,7 +88,7 @@ class ConversationExecutionTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         with patch.dict(os.environ, {'MONOPLANER_EVALUATION_WORKSPACES': json.dumps({str(fixture.repo): self.image})}), \
-                patch.object(ConversationDocker, 'start') as start:
+                patch.object(TaskDocker, 'start') as start:
             model = ScriptedModel([text_reply()])
             result = fixture.invoke(model)
             self.assertEqual(result['status'], 'chat_complete')

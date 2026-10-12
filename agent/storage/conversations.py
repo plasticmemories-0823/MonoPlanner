@@ -22,6 +22,8 @@ class ConversationStore:
                     UNIQUE(thread, id));
                 CREATE TABLE IF NOT EXISTS presentation (
                     thread TEXT PRIMARY KEY, visibility TEXT NOT NULL DEFAULT 'active');
+                CREATE TABLE IF NOT EXISTS conversation_titles (
+                    thread TEXT PRIMARY KEY, data TEXT NOT NULL);
             ''')
 
     @contextmanager
@@ -59,12 +61,18 @@ class ConversationStore:
         except (OSError, ValueError, sqlite3.Error, KeyError):
             return False
 
-    def save_session(self, thread, value):
+    def save_session(self, thread, value, *, title_request=None):
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             self.require_available(db, self.thread(thread))
+            first = not db.execute('SELECT 1 FROM sessions WHERE thread=?', (self.thread(thread),)).fetchone()
             db.execute('INSERT INTO sessions VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET data=excluded.data',
                        (self.thread(thread), json.dumps(value, ensure_ascii=False)))
+            if first and title_request:
+                db.execute('INSERT OR IGNORE INTO conversation_titles VALUES (?,?)',
+                           (self.thread(thread), json.dumps(title_request, ensure_ascii=False)))
+                return True
+        return False
 
     def enqueue(self, thread, identity, kind, text=''):
         thread = self.thread(thread)

@@ -22,8 +22,14 @@ import {
 } from "@/components/ui/dialog";
 
 function HistoryList({ close }: { close?: () => void }) {
-  const { threads, threadsLoading, setVisibility, deletePermanently } =
-    useThreads();
+  const {
+    threads,
+    threadsLoading,
+    threadsError,
+    getThreads,
+    setVisibility,
+    deletePermanently,
+  } = useThreads();
   const [confirmDelete, setConfirmDelete] = useState<ManagedThread>();
   const [deleting, setDeleting] = useState(false);
   const [threadId, setThreadId] = useQueryState("threadId");
@@ -119,8 +125,25 @@ function HistoryList({ close }: { close?: () => void }) {
           </Button>
         ))}
       </div>
+      {threadsError && (
+        <div
+          role="status"
+          className="text-destructive px-4 text-xs"
+        >
+          {threadsError}
+          <button
+            type="button"
+            className="ml-2 underline"
+            onClick={() => {
+              void getThreads();
+            }}
+          >
+            重试
+          </button>
+        </div>
+      )}
       <div className="min-h-0 w-full flex-1 space-y-1 overflow-y-auto px-2 pb-3">
-        {threadsLoading ? (
+        {threadsLoading && !threads.length ? (
           Array.from({ length: 8 }, (_, i) => (
             <Skeleton
               key={i}
@@ -139,9 +162,11 @@ function HistoryList({ close }: { close?: () => void }) {
           visible.map((thread) => {
             const values = thread.values as
               { messages?: { content: any }[] } | undefined;
-            const title = values?.messages?.[0]
-              ? getContentString(values.messages[0].content)
-              : "新对话";
+            const title =
+              thread.title?.title ||
+              (values?.messages?.[0]
+                ? getContentString(values.messages[0].content)
+                : "新对话");
             return (
               <div
                 key={thread.thread_id}
@@ -297,24 +322,6 @@ export default function ThreadHistory() {
     "chatHistoryOpen",
     parseAsBoolean.withDefault(false),
   );
-  const { getThreads, setThreads, setThreadsLoading } = useThreads();
-  useEffect(() => {
-    let cancelled = false;
-    setThreadsLoading(true);
-    getThreads()
-      .then((threads) => {
-        if (!cancelled) setThreads(threads);
-      })
-      .catch(() => {
-        if (!cancelled) toast.error("无法读取对话记录，请检查服务连接");
-      })
-      .finally(() => {
-        if (!cancelled) setThreadsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [getThreads, setThreads, setThreadsLoading]);
   return (
     <>
       <div className="bg-muted/20 hidden h-screen w-full flex-col gap-3 lg:flex">

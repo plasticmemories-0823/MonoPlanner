@@ -265,7 +265,8 @@ class ConversationRunner(TaskRunner):
             return
         self.activate()
         self.env_key = recovery.environment_key(self.environment)
-        self.baseline = SourceSnapshot.capture(self.environment.repo_root, self.root/'baseline')
+        self.baseline = SourceSnapshot.capture(self.environment.repo_root, self.root/'baseline',
+            runtime_files=getattr(self.environment, 'runtime_files', ()))
         self.evidence = SourceVersions(self.environment, self.root/'source-records', baseline=self.baseline)
         self.executor = OperationExecutor(self.environment, self.evidence, self.root, versioned_reads=self.optimize_source)
         self.executor.archive = self.history_store

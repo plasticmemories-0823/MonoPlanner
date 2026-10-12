@@ -38,15 +38,18 @@ def runtime_inventory(repo):
             "sha256": hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()}
 
 
-def probe_runtime(environment, packages, directory):
-    """Run imports in the actual backend, not the host Python or a model call."""
+def probe_runtime(environment, packages, directory, *, metadata_only=False):
+    """Inspect the actual backend; chat bootstrap never imports project modules."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    modules = sorted({Path(p).name for p in packages})
+    modules = [] if metadata_only else sorted({Path(p).name for p in packages})
     # ASCII script / JSON works on the original Python 3.6 ASCII-locale images.
     code = '''import importlib, importlib.util, json, shutil, sys, os
-sys.path[:0] = [os.getcwd(), os.path.join(os.getcwd(), "src")]
+if not METADATA_ONLY:
+    sys.path[:0] = [os.getcwd(), os.path.join(os.getcwd(), "src")]
 report = {"python": sys.version, "imports": {}, "checkers": {}}
+if METADATA_ONLY:
+    report["checker_errors"] = {}
 for name in MODULES:
     try:
         module = importlib.import_module(name)
@@ -56,24 +59,41 @@ for name in MODULES:
     except Exception as exc:
         report["imports"][name] = {"ok": False, "error": type(exc).__name__ + ": " + str(exc)}
 for name in ("pytest", "flake8", "ruff"):
-    report["checkers"][name] = bool(shutil.which(name) or importlib.util.find_spec(name))
+    try:
+        report["checkers"][name] = bool(shutil.which(name) or importlib.util.find_spec(name))
+    except Exception as exc:
+        if not METADATA_ONLY:
+            raise
+        report["checkers"][name] = None
+        report["checker_errors"][name] = type(exc).__name__ + ": " + str(exc)
 print(json.dumps(report))
-'''.replace("MODULES", repr(modules))
+'''.replace("MODULES", repr(modules)).replace("METADATA_ONLY", repr(metadata_only))
     script = directory / "runtime_probe.py"
     script.write_text(code, encoding="ascii")
     path = environment.host_to_container(script) if hasattr(environment, "host_to_container") else str(script)
     stdout, stderr = directory / "stdout.log", directory / "stderr.log"
-    outcome = environment.run_process([environment.python_executable, "-B", path],
-        stdout_path=stdout, stderr_path=stderr, timeout=60)
+    flags = ["-I", "-B"] if metadata_only else ["-B"]
+    outcome = environment.run_process([environment.python_executable, *flags, path],
+        stdout_path=stdout, stderr_path=stderr, timeout=60,
+        **({"isolated_launcher": True} if metadata_only else {}))
     report = {"process": outcome}
     if outcome.get("exit_code") == 0 and not outcome.get("timed_out") and not outcome.get("error"):
         try:
             report.update(json.loads(stdout.read_text(encoding="utf-8").splitlines()[-1]))
         except (ValueError, IndexError):
             report["parse_error"] = "Runtime import probe did not return JSON."
-    report["ok"] = bool(report.get("imports")) and all(v["ok"] for v in report.get("imports", {}).values())
+    if metadata_only:
+        report["ok"] = (isinstance(report.get("python"), str) and bool(report["python"].strip())
+            and set(report.get("checkers", {})) == {"pytest", "flake8", "ruff"}
+            and all(value is None or isinstance(value, bool) for value in report["checkers"].values()))
+    else:
+        report["ok"] = bool(report.get("imports")) and all(v["ok"] for v in report.get("imports", {}).values())
     if report.get("python"):
-        environment.runtime_facts = {"python": report["python"], "checkers": report.get("checkers", {}),
+        facts = {"python": report["python"], "checkers": report.get("checkers", {}),
             "note": "来自任务执行后端的开工检查；代码与测试须兼容此版本，修改环境后需要重新查证。"}
+        if metadata_only:
+            facts = {**getattr(environment, "runtime_facts", {}), **facts,
+                     "checker_errors": report.get("checker_errors", {})}
+        environment.runtime_facts = facts
     (directory / "report.json").write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
     return report

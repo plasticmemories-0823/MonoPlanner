@@ -16,27 +16,30 @@ def environment_key(environment):
         'artifact_root':str(environment.artifact_root.resolve()),
         'image':getattr(environment,'image',None), 'container':getattr(environment,'_container_id',None),
         'python':environment.python_executable, 'runtime':getattr(environment, 'runtime', None),
-        'runtime_files':sorted(getattr(environment,'runtime_files',()))}
+        'runtime_files':sorted(getattr(environment,'runtime_files',())),
+        'runtime_materials_sha256':getattr(environment, 'runtime_materials_sha256', None)}
 
 
 def code_key(root=None):
     names = (
         'agent/execution/projects.py', 'agent/execution/task_docker.py',
+        'agent/execution/runtime_inventory.py',
         'agent/cli/interactive.py', 'agent/cli/tasks.py',
         'agent/server/interrupts.py', 'agent/model/streaming.py',
         'agent/task/runner.py', 'agent/task/dialogue.py', 'resources/prompts/conversation.txt', 'agent/task/operations.py',
         'agent/server/graph.py', 'agent/server/app.py', 'langgraph.json',
+        'agent/server/titles.py', 'agent/storage/titles.py', 'resources/prompts/title.txt',
         'agent/server/runtime.py', 'agent/storage/preferences.py', 'agent/settings.py',
-        'agent/server/execution.py', 'agent/execution/docker.py',
+        'agent/execution/docker.py',
         'agent/server/workspaces.py',
         'agent/execution/web.py', 'resources/web.schema.json',
         'agent/server/assistant.py', 'agent/execution/assistant_files.py', 'agent/execution/existing.py',
         'agent/execution/process.py', 'resources/assistant.schema.json', 'agent/storage/usage.py',
-        'agent/execution/native.py', 'launcher/Sandbox.cs', 'agent/storage/permissions.py',
+        'agent/storage/permissions.py',
         'agent/execution/desktop.py', 'agent/server/desktop.py',
         'agent/execution/applications.py', 'launcher/Applications.cs', 'launcher/FilePicker.cs',
         'agent/execution/file_actions.py', 'agent/storage/read_sources.py',
-        'agent/server/portable.py', 'launcher/Sandbox.exe.config',
+        'agent/server/portable.py',
         'resources/drivers/sitecustomize.py',
         'agent/source/syntax.py', 'agent/source/excerpts.py', 'agent/acceptance/results.py', 'agent/execution/executor.py',
         'agent/task/contracts.py', 'agent/model/tools.py',
@@ -49,6 +52,7 @@ def code_key(root=None):
         'agent/model/compaction.py', 'agent/model/client.py', 'agent/model/errors.py',
         'resources/context.json', 'resources/prompts/compaction.txt',
         'agent/source/paging.py', 'agent/execution/probe.py',
+        'agent/source/work_materials.py',
         'agent/source/exploration.py',
         'agent/storage/recovery.py', 'agent/storage/history.py', 'agent/storage/conversations.py', 'agent/storage/activity.py',
         'agent/storage/live_reasoning.py',

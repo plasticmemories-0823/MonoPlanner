@@ -1,5 +1,6 @@
 """Trial generated acceptance on original source; retain every reviewed version."""
 import ast
+from copy import deepcopy
 from dataclasses import asdict
 import hashlib
 import json
@@ -15,7 +16,7 @@ from agent.acceptance.artifact_checks import required_consumer, requested_calls
 from agent.execution.local import LocalEnvironment
 from agent.model.errors import ModelRequestNotSent
 from agent.source.snapshots import SourceSnapshot, _safe_file
-from agent.storage.records import save
+from agent.storage.records import digest, save
 
 
 class Review(BaseModel):
@@ -37,6 +38,41 @@ def checked(root, ref):
 def reference(root, path):
     return {"record": path.relative_to(root).as_posix(),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def candidate_record(loop, plan, response):
+    data = {"plan": plan.model_dump(), "response": response, "source": loop.evidence.current}
+    data["work_sha256"] = digest(data["plan"]["steps"])
+    path = loop.root / "acceptance" / "candidates" / (digest(data) + ".json")
+    if path.exists():
+        if json.loads(path.read_text(encoding="utf-8")) != data:
+            raise ModelRequestNotSent("state_conflict", "Pending candidate record changed")
+    else:
+        save(path, data)
+    return reference(loop.root, path)
+
+
+def candidate_summary(loop, ref):
+    if not ref:
+        return None
+    data = checked(loop.root, ref)
+    return {**ref, "record": "$record/" + ref["record"], "source": data["source"],
+            "work_sha256": data["work_sha256"],
+            "call_id": data["response"]["data"]["tool_calls"][0]["id"]}
+
+
+def released_plan(candidate, proposal):
+    plan = deepcopy(candidate["plan"])
+    plan.update(test_code=proposal["spec"]["test_code"], regression_command=proposal["regression"],
+                test_driver=list(proposal["spec"].get("test_driver", ())))
+    return plan
+
+
+def baseline_conditions(loop, spec, regression):
+    from agent.storage.recovery import environment_key
+    return digest({"environment": environment_key(loop.environment), "timeout": loop.environment.timeout,
+                   "original_source": loop.baseline.digest, "workspace_source": loop.evidence.current,
+                   "spec": asdict(spec), "regression": regression})
 
 
 def append_result(loop, response, result):
@@ -80,28 +116,50 @@ def run_report(loop, snapshot, spec, directory, phase, repository_baseline=None)
 
 
 def validate(loop):
+    def proposal(ref):
+        data = checked(loop.root, ref)
+        if data.get("candidate"):
+            checked(loop.root, data["candidate"])
+        return data
+
     for ref in loop.state.get("acceptance_trials", []):
         data = checked(loop.root, ref)
         if data.get("proposal"):
-            checked(loop.root, data["proposal"])
+            proposal(data["proposal"])
+        elif data.get("candidate"):
+            checked(loop.root, data["candidate"])
         if data.get("result"):
             checked(loop.root, data["result"])
     for ref in loop.state.get("acceptance_versions", []):
-        data = checked(loop.root, ref)
+        data = proposal(ref)
         if data.get("baseline_result"):
             checked(loop.root, data["baseline_result"])
     trial = loop.state.get("acceptance_trial")
     if trial:
-        checked(loop.root, trial["ref"])
+        data = proposal(trial["ref"])
+        if trial.get("candidate") != data.get("candidate"):
+            raise ModelRequestNotSent("state_conflict", "Pending candidate selection changed")
         if trial.get("baseline_result"):
             checked(loop.root, trial["baseline_result"])
+    release = loop.state.get("acceptance_release")
+    if release:
+        approval = proposal(release["approval_ref"])
+        candidate = checked(loop.root, release["candidate_ref"])
+        if (release["approval_ref"] != loop.state.get("active_acceptance")
+                or release["candidate_ref"] != approval.get("candidate")
+                or release["plan"] != released_plan(candidate, approval)
+                or release["origin_response"] != candidate["response"]
+                or release["response"] != approval["review_response"]):
+            raise ModelRequestNotSent("state_conflict", "Released candidate differs from its reviewed original")
 
 
-def trial(loop, code, regression, response, *, driver=(), candidate=None, parent=None, reason=""):
+def trial(loop, code, regression, response, *, driver=(), candidate=None, parent=None, reason="",
+          reuse=None, superseded=None):
     spec = spec_for(loop, code, driver)
     proposal = {"spec": asdict(spec), "regression": regression, "parent": parent,
                 "reason": reason, "original_source": loop.baseline.digest,
-                "workspace_source": loop.evidence.current}
+                "workspace_source": loop.evidence.current, "candidate": candidate,
+                "baseline_conditions": baseline_conditions(loop, spec, regression)}
     identifier = hashlib.sha256(json.dumps(proposal, sort_keys=True).encode()).hexdigest()
     folder = loop.root / "acceptance" / identifier
     folder.mkdir(parents=True, exist_ok=True)
@@ -114,12 +172,16 @@ def trial(loop, code, regression, response, *, driver=(), candidate=None, parent
     loop.state.update(acceptance_trial={"ref": ref, "candidate": candidate},
                       acceptance_running=True, response_pending=None)
     loop.persist("acceptance_trial_started", {"trial_id": identifier})
-    report = run_report(loop, loop.baseline, spec, folder / "baseline", "baseline")
+    report = checked(loop.root, reuse) if reuse else run_report(
+        loop, loop.baseline, spec, folder / "baseline", "baseline")
     if not loop.baseline.verify_integrity()["valid"]:
         raise ModelRequestNotSent("state_conflict", "Retained original source changed during acceptance trial")
-    result_path = folder / "baseline-result.json"
-    save(result_path, report)
-    result_ref = reference(loop.root, result_path)
+    if reuse:
+        result_ref = reuse
+    else:
+        result_path = folder / "baseline-result.json"
+        save(result_path, report)
+        result_ref = reference(loop.root, result_path)
     completion = folder / "trial.json"
     save(completion, {"proposal": ref, "result": result_ref})
     loop.state["acceptance_trials"][-1] = reference(loop.root, completion)
@@ -129,18 +191,55 @@ def trial(loop, code, regression, response, *, driver=(), candidate=None, parent
         "source": "original, before task edits", "workspace_modified": False,
         "baseline": report, "proposal_record": "$record/" + ref["record"],
         "result_record": "$record/" + result_ref["record"],
+        "selected_candidate": candidate_summary(loop, candidate),
+        "superseded_candidate": candidate_summary(loop, superseded), "baseline_reused": bool(reuse),
         "next": "Inspect the real evidence, then freeze_acceptance or revise_acceptance. "
                 "A runnable assertion failure may reproduce the defect; it is not proof that the expectation is correct. "
-                "No proposed modification has run."})
+                "This trial ran no pending edits; earlier incremental work remains. freeze_acceptance releases only the selected_candidate above. "
+                "revise_acceptance changes tests only and keeps that candidate; to replace its edits before the first "
+                "freeze, submit a complete candidate with submit_work and review the new trial_id."})
     loop.persist("acceptance_trial_finished", {"trial_id": identifier, "status": report["status"]})
 
 
+def supersede_trial(loop):
+    """Incremental edits invalidate pending approval, retaining all trial originals."""
+    validate(loop)
+    current = loop.state.get("acceptance_trial")
+    if not current:
+        return
+    if loop.state.get("acceptance_running") or not current.get("baseline_result"):
+        raise ModelRequestNotSent("execution_unknown", "Pending acceptance trial has no completed result")
+    proposal = checked(loop.root, current["ref"])
+    if proposal["workspace_source"] != loop.evidence.current:
+        raise ModelRequestNotSent("state_conflict", "Workspace changed while acceptance was under review")
+    loop.state["acceptance_trial"] = None
+    loop.persist("acceptance_trial_superseded", {"trial_id": current["ref"]["id"],
+                 "reason": "Incremental work replaces pending final delivery; old approval cannot release edits"})
+
+
 def stage_candidate(loop, plan, response):
-    if loop.state.get("acceptance_trial"):
-        raise ValueError("Review the current acceptance trial with freeze_acceptance or revise_acceptance first")
+    if loop.state.get("verification_spec") or loop.state.get("verify_command"):
+        raise ValueError("Pending replacement cannot change frozen acceptance")
+    validate(loop)
+    current = loop.state.get("acceptance_trial")
+    reuse = None
+    if current:
+        if loop.state.get("acceptance_running") or not current.get("baseline_result"):
+            raise ModelRequestNotSent("execution_unknown", "Pending acceptance trial has no completed result")
+        proposal = checked(loop.root, current["ref"])
+        if proposal["workspace_source"] != loop.evidence.current:
+            raise ModelRequestNotSent("state_conflict", "Workspace changed while acceptance was under review")
+        report = checked(loop.root, current["baseline_result"])
+        conditions = baseline_conditions(loop, spec_for(loop, plan.test_code, plan.test_driver), plan.regression_command)
+        remaining = loop.budget.remaining_time()
+        if (proposal["baseline_conditions"] == conditions and tests_ready_for_candidate(report)
+                and (remaining is None or remaining >= loop.environment.timeout)):
+            reuse = current["baseline_result"]
     trial(loop, plan.test_code, plan.regression_command, response,
-          driver=plan.test_driver,
-          candidate={"plan": plan.model_dump(), "response": response})
+          driver=plan.test_driver, candidate=candidate_record(loop, plan, response), reuse=reuse,
+          parent=current["ref"]["id"] if current else None,
+          superseded=current.get("candidate") if current else None,
+          reason="Explicit pending candidate replacement" if current else "")
 
 
 def review(loop, decision, response):
@@ -177,7 +276,7 @@ def review(loop, decision, response):
     if not tests_ready_for_candidate(report):
         raise ValueError("Acceptance is not runnable; inspect its baseline errors and revise it before freezing")
     version = {**proposal, "baseline_result": current_trial["baseline_result"],
-               "review_reason": decision.reason}
+               "review_reason": decision.reason, "review_response": response}
     version_path = loop.root / "acceptance" / current_ref["id"] / "frozen.json"
     save(version_path, version)
     ref = {**reference(loop.root, version_path), "id": current_ref["id"]}
@@ -185,12 +284,12 @@ def review(loop, decision, response):
     loop.state.update(active_acceptance=ref, verification_spec=proposal["spec"],
                       regression_command=proposal["regression"], acceptance_trial=None)
     save(loop.root / "frozen-acceptance.json", {"spec": proposal["spec"], "regression": proposal["regression"]})
-    candidate = current_trial.get("candidate")
-    if candidate:
-        candidate["plan"].update(test_code=proposal["spec"]["test_code"], regression_command=proposal["regression"])
-        candidate["plan"]["test_driver"] = list(proposal["spec"].get("test_driver", ()))
-        loop.state["acceptance_release"] = {"plan": candidate["plan"], "response": response,
-                                            "origin_response": candidate["response"]}
+    candidate_ref = current_trial.get("candidate")
+    if candidate_ref:
+        candidate = checked(loop.root, candidate_ref)
+        loop.state["acceptance_release"] = {"plan": released_plan(candidate, proposal), "response": response,
+                                            "origin_response": candidate["response"],
+                                            "candidate_ref": candidate_ref, "approval_ref": ref}
     else:
         append_result(loop, response, {"outcome": "acceptance_frozen", "trial_id": ref["id"],
             "next": "Submit source repair using this acceptance; previous versions remain recorded."})

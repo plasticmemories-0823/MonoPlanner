@@ -18,7 +18,6 @@ from agent.execution.executor import OperationExecutor
 from agent.storage.records import clip, digest, save
 from agent.task.contracts import WorkRequest
 from agent.task.instructions import TASK_RULES
-from agent.model.tools import WORK_TOOLS
 from agent.task import dialogue, operations, repair
 from agent.model.context import admit, CONTEXT_WINDOW_TOKENS
 from agent.model import compaction
@@ -26,12 +25,6 @@ from agent.source import lifecycle as source_runtime
 from agent.acceptance import revisions
 
 ENGINE = "MonoPlaner V0.9"
-
-
-def load_snapshot(path):
-    path = Path(path)
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return SourceSnapshot(Path(data["root"]), data["files"], data["digest"], path, data.get("excluded_files", {}))
 
 
 class TaskRunner:
@@ -71,6 +64,7 @@ class TaskRunner:
                 pass  # A disconnected presentation stream cannot invalidate saved execution.
 
     def initial_material(self):
+        from agent.source.work_materials import work_materials
         files = self.executor.inventory()
         names = sorted(files)
         docs = [n for n in names if "/" not in n and n.lower().startswith(("readme", "contributing"))][:2]
@@ -78,6 +72,7 @@ class TaskRunner:
                 "readme": [self.executor.read(n, 0, 150) for n in docs],
                 "test_config_paths": [n for n in names if n in {"bin/test", "pytest.ini", "tox.ini", "pyproject.toml", "setup.cfg", "runtests.py"}],
                 "runtime_facts": getattr(self.environment, "runtime_facts", {}),
+                "work_materials": work_materials(self.executor, self.state.get('request', '')),
                 "source": self.evidence.current}
 
     def planner_messages(self):
@@ -202,6 +197,7 @@ class TaskRunner:
 
     def decode_plan(self, raw):
         self.rejected_input = None
+        self.rejected_response = raw
         self.reviewing = False
         response = messages_from_dict([raw])[0]
         finish = response.response_metadata.get("finish_reason")
@@ -247,7 +243,10 @@ class TaskRunner:
                         errors.append((["/" + name], ValueError("Fixed " + name + " cannot be replaced during source repair")))
             elif not self.state.get("verify_command") and isinstance(value.get("test_code", ""), str):
                 try:
-                    revisions.spec_for(self, value.get("test_code", ""), value.get("test_driver", ()))
+                    if value.get("test_code", "").strip():
+                        revisions.spec_for(self, value["test_code"], value.get("test_driver", ()))
+                    elif value.get("test_driver"):
+                        raise ValueError("Partial work uses step commands for local checks; test_driver requires complete test_code")
                 except ValueError as exc:
                     errors.append((repair.fields(exc, value), exc))
         elif isinstance(value, dict) and value.get("decision") == "revise" and isinstance(value.get("test_code", ""), str):
@@ -284,9 +283,12 @@ class TaskRunner:
     def accept_plan(self, plan, response):
         if plan.kind == "candidate":
             if not self.state.get("verification_spec") and not self.state.get("verify_command"):
-                revisions.stage_candidate(self, plan, response)
-                return
-            self.freeze_contract(plan)
+                if plan.test_code.strip():
+                    revisions.stage_candidate(self, plan, response)
+                    return
+                revisions.supersede_trial(self)
+            else:
+                self.freeze_contract(plan)
         fingerprint = digest([plan.model_dump(), self.evidence.current])
         if fingerprint in self.state["seen_plans"]:
             self.state.update(status="stalled", reason="Identical plan for identical source repeated; no new decision")
@@ -296,6 +298,10 @@ class TaskRunner:
         name = "p%04d" % number
         value = {"id": name, "parent": self.state.get("last_plan"), "plan": plan.model_dump(),
                  "response": response, "base_source": self.evidence.current, "cursor": 0, "rows": []}
+        if response["data"]["tool_calls"][0]["name"] == "repair_work":
+            ref = self.state["repair_draft"]
+            value["correction_source"] = {"draft_id": ref["id"], "record": "$record/" + ref["record"],
+                "plan_context": repair.read(self, ref)["plan_context"]}
         if self.state.get("acceptance_release"):
             value["origin_response"] = self.state["acceptance_release"]["origin_response"]
         save(self.root / "plans" / name / "plan.json", value)

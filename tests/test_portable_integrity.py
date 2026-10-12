@@ -23,7 +23,7 @@ class PortableIntegrityTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(PROJECT_ROOT/relative, target)
             self.assertEqual(code_key(root), code_key())
-            (root/'launcher/Sandbox.cs').unlink()
+            (root/'launcher/Applications.cs').unlink()
             with self.assertRaises(FileNotFoundError):
                 code_key(root)
 
@@ -33,6 +33,22 @@ class PortableIntegrityTests(unittest.TestCase):
         spec.loader.exec_module(module)
         with tempfile.TemporaryDirectory() as folder:
             module.copy_launcher_inputs(Path(folder))
-            for name in ('Sandbox.cs', 'Sandbox.exe.config'):
+            for name in ('Applications.cs', 'FilePicker.cs'):
                 self.assertEqual((Path(folder)/'launcher'/name).read_bytes(),
                                  (PROJECT_ROOT/'launcher'/name).read_bytes())
+            self.assertFalse((Path(folder)/'launcher/Sandbox.cs').exists())
+
+    def test_runtime_copy_omits_retired_helper_but_keeps_active_helpers(self):
+        spec = spec_from_file_location('portable_build', PROJECT_ROOT/'scripts/build-portable.py')
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as folder:
+            source, target = Path(folder)/'source', Path(folder)/'package'
+            source.mkdir()
+            for name in ('MonoPlanner.Sandbox.exe', 'MonoPlanner.Sandbox.exe.config',
+                         'MonoPlanner.FilePicker.exe', 'MonoPlanner.Applications.exe'):
+                (source/name).write_bytes(b'helper')
+            module.copy_tree(source, target,
+                             exclude={'MonoPlanner.Sandbox.exe', 'MonoPlanner.Sandbox.exe.config'})
+            self.assertEqual({p.name for p in target.iterdir()},
+                             {'MonoPlanner.FilePicker.exe', 'MonoPlanner.Applications.exe'})

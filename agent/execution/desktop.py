@@ -56,9 +56,23 @@ class DesktopStore:
         with self.store.connection() as db:
             for row in db.execute('SELECT data FROM desktop_applications'):
                 item = json.loads(row['data'])
-                if Path(item['path']).is_file():
+                if installed.available(item):
                     found[item['id']] = item
         return list(found.values())
+
+    def find_applications(self, query):
+        if Path(query).is_absolute():
+            app = installed.describe_executable(query)
+            with self.store.connection() as db:
+                db.execute('INSERT OR REPLACE INTO desktop_applications VALUES (?,?)',
+                           (app['id'], json.dumps(app, ensure_ascii=False)))
+            return [app]
+        matches = [a for a in self.applications() if query.casefold() in a['name'].casefold()]
+        if not matches:
+            # A missing/stale catalog entry is not proof that the app is absent.
+            matches = [a for a in self.applications(refresh=True) if query.casefold() in a['name'].casefold()]
+        exact = [a for a in matches if a['name'].casefold() == query.casefold()]
+        return exact or matches
 
     def authorize_file(self, thread, path):
         ReadSources(self.root).add(thread, path, 'file')
@@ -181,7 +195,7 @@ class DesktopStore:
                 data['backup'] = str(backup)
         except subprocess.TimeoutExpired:
             data['error'], status = '启动结果不明，不自动重试', 'unknown'
-        except OSError as error:
+        except (OSError, ValueError) as error:
             data['error'], status = str(error), 'failed'
         with self.store.connection() as db:
             db.execute('UPDATE desktop_requests SET status=?,data=? WHERE id=?',
@@ -195,7 +209,7 @@ def invoke(loop, name, args):
     if not thread:
         raise ValueError('应用打开需要已保存的对话')
     if name == 'list_applications':
-        return {'applications': [a for a in store.applications() if args['query'].casefold() in a['name'].casefold()]}
+        return {'applications': store.find_applications(args['query'])}
     if name == 'request_file_operation':
         result = store.request_file_operation(thread, args, loop.repo)
     elif name == 'open_file':

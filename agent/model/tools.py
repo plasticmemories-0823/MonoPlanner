@@ -94,7 +94,8 @@ def run_existing(**kwargs) -> dict:
 
 @tool(args_schema=ASSISTANT_SCHEMA['list_applications'])
 def list_applications(**kwargs) -> dict:
-    """Discover installed applications and their IDs; query='' lists all. Ask if multiple candidates match."""
+    """Discover applications and IDs by name; query='' lists all. An exact local EXE path
+    locates an uncatalogued application without launching it. Ask if multiple candidates match."""
     return kwargs
 
 

@@ -1,5 +1,22 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
+/** The SDK resets stream/history in effects, after a thread selection renders. */
+export function messagesForThread(
+  incoming: Message[],
+  selectedKey: string,
+  settledKey: string,
+  threadId: string | null,
+  historyThreadId?: string,
+) {
+  if (
+    !threadId ||
+    selectedKey !== settledKey ||
+    (historyThreadId && historyThreadId !== threadId)
+  )
+    return [];
+  return incoming;
+}
+
 /** Published messages survive older recovery snapshots and empty stream views. */
 export function mergePublicMessages(
   base: Message[],

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import stat
 from threading import RLock
 import time
 from agent.settings import PROJECT_ROOT
@@ -11,11 +12,24 @@ from agent.settings import PROJECT_ROOT
 _cache, _updated, _lock = [], 0, RLock()
 
 
+def executable_path(value):
+    """Use a real local executable, never a link or a launch command."""
+    path = Path(value)
+    if (not path.is_absolute() or path.suffix.lower() != '.exe' or '..' in path.parts
+            or str(path).startswith(('\\\\', '//')) or ':' in str(path)[2:] or not path.is_file()):
+        raise ValueError('应用入口必须是已有的本机 EXE 文件')
+    for parent in (path, *path.parents):
+        info = parent.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+            raise ValueError('应用入口不能经过链接或 Windows 重解析点')
+    return path.resolve()
+
+
 def discover(refresh=False):
     global _cache, _updated
     with _lock:
         if _cache and not refresh and time.monotonic() - _updated < 300:
-            return [dict(a) for a in _cache]
+            return [dict(a) for a in _cache if available(a)]
         found = []
         if os.name == 'nt':
             import winreg
@@ -46,6 +60,8 @@ def discover(refresh=False):
                 found.append({'name': '记事本', 'path': str(notepad), 'kind': 'exe'})
         items = {}
         for item in found:
+            if not available(item):
+                continue
             target = item.get('aumid') if item['kind'] == 'packaged' else item['path']
             identity = hashlib.sha256((item['kind']+':'+target.casefold()).encode()).hexdigest()[:24]
             items[identity] = {**item, 'id': identity}
@@ -53,23 +69,49 @@ def discover(refresh=False):
         return [dict(a) for a in _cache]
 
 
+def available(app):
+    if app.get('kind') == 'packaged':
+        return bool(app.get('aumid') and '!' in app['aumid'])
+    try:
+        executable_path(app['path'])
+        return app.get('kind', 'exe') == 'exe'
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+
+
+def describe_executable(value):
+    path = executable_path(value)
+    target = str(path)
+    identity = hashlib.sha256(('exe:'+target.casefold()).encode()).hexdigest()[:24]
+    return {'name': path.stem, 'path': target, 'kind': 'exe', 'id': identity}
+
+
 def identity(app):
     if app.get('kind', 'exe') == 'exe':
-        with Path(app['path']).open('rb') as stream:
+        with executable_path(app['path']).open('rb') as stream:
             return hashlib.file_digest(stream, 'sha256').hexdigest()
     return hashlib.sha256(json.dumps(app, sort_keys=True).encode()).hexdigest()
 
 
+def _launch_environment():
+    """External applications never inherit the assistant's credentials."""
+    names = ('SystemRoot', 'WINDIR', 'COMSPEC', 'SystemDrive', 'USERPROFILE',
+             'LOCALAPPDATA', 'APPDATA', 'HOMEDRIVE', 'HOMEPATH')
+    values = {k: os.environ[k] for k in names if k in os.environ}
+    values.update(PYTHONUTF8='1', PYTHONUNBUFFERED='1', PYTHONDONTWRITEBYTECODE='1')
+    return values
+
+
 def start(app, path=None):
-    from agent.execution.native import clean_environment
     if app.get('kind', 'exe') == 'exe':
-        process = subprocess.Popen([app['path']] + ([str(path)] if path else []), close_fds=True,
-                                   env=clean_environment())
+        entry = executable_path(app['path'])
+        process = subprocess.Popen([str(entry)] + ([str(path)] if path else []), close_fds=True,
+                                   env=_launch_environment())
         return process.pid
     helper = PROJECT_ROOT/'launcher/runtime/MonoPlanner.Applications.exe'
     result = subprocess.run([str(helper), 'activate', app['aumid'], str(path or '')],
                             capture_output=True, encoding='utf-8', timeout=15,
-                            creationflags=subprocess.CREATE_NO_WINDOW, env=clean_environment())
+                            creationflags=subprocess.CREATE_NO_WINDOW, env=_launch_environment())
     if result.returncode:
         raise OSError('Windows 未能启动此应用：'+result.stderr.strip())
     return int(result.stdout.strip())

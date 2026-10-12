@@ -70,10 +70,10 @@ def run_process(command, *, cwd, stdout_path, stderr_path, timeout, shell=False,
     return result
 
 
-def log_excerpt(path, limit=6000):
+def log_excerpt(path, limit=6000, *, notice="[前文已节选，完整输出见日志]\n"):
     path = Path(path)
     with path.open("rb") as stream:
         size = path.stat().st_size
         stream.seek(max(0, size - limit))
         value = stream.read().decode("utf-8", errors="replace")
-    return ("[前文已节选，完整输出见日志]\n" if size > limit else "") + value
+    return (notice if size > limit else "") + value

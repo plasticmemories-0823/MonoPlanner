@@ -9,13 +9,6 @@ import React, {
 } from "react";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import { type Message } from "@langchain/langgraph-sdk";
-import {
-  uiMessageReducer,
-  isUIMessage,
-  isRemoveUIMessage,
-  type UIMessage,
-  type RemoveUIMessage,
-} from "@langchain/langgraph-sdk/react-ui";
 import { useQueryState } from "nuqs";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -26,7 +19,7 @@ import { ArrowRight } from "lucide-react";
 import { PasswordInput } from "@/components/ui/password-input";
 import { getApiKey, setApiKey as storeApiKey } from "@/lib/api-key";
 import { resolveApiUrl } from "@/lib/resolve-api-url";
-import { mergePublicMessages } from "@/lib/public-messages";
+import { mergePublicMessages, messagesForThread } from "@/lib/public-messages";
 import { getThreadSearchMetadata, useThreads } from "./Thread";
 import { createClient } from "./client";
 import { toast } from "sonner";
@@ -35,7 +28,6 @@ import type { RuntimeSettings } from "@/components/thread/model-settings";
 export type ProgressEvent = { type: "progress"; phase: string; text: string };
 export type StateType = {
   messages: Message[];
-  ui?: UIMessage[];
   repo?: string;
   status?: string;
   runtime_settings?: RuntimeSettings;
@@ -49,27 +41,21 @@ const useTypedStream = useStream<
   {
     UpdateType: {
       messages?: Message[] | Message | string;
-      ui?: (UIMessage | RemoveUIMessage)[] | UIMessage | RemoveUIMessage;
-      context?: Record<string, unknown>;
       repo?: string;
       read_roots?: string[];
     };
-    CustomEventType: UIMessage | RemoveUIMessage | ProgressEvent;
+    CustomEventType: ProgressEvent;
   }
 >;
 
 type StreamContextType = ReturnType<typeof useTypedStream> & {
   apiUrl: string;
   progress?: ProgressEvent;
-  retainMessage: (message: Message) => void;
-  ensureThread: () => Promise<string>;
+  retainMessage: (message: Message, forThreadId?: string) => void;
+  ensureThread: (firstMessage?: string) => Promise<string>;
   preparingThread: boolean;
 };
 const StreamContext = createContext<StreamContextType | undefined>(undefined);
-
-async function sleep(ms = 4000) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 async function checkGraphStatus(
   apiUrl: string,
@@ -106,7 +92,7 @@ const StreamSession = ({
   authScheme?: string;
 }) => {
   const [threadId, setThreadId] = useQueryState("threadId");
-  const { getThreads, setThreads } = useThreads();
+  const { getThreads, upsertThread, waitForTitle } = useThreads();
   const [progress, setProgress] = useState<ProgressEvent>();
   const [recovery, setRecovered] = useState<{
     key: string;
@@ -143,15 +129,20 @@ const StreamSession = ({
     },
     [],
   );
-  const ensureThread = async () => {
+  const ensureThread = async (firstMessage?: string) => {
     if (setup.current) return setup.current;
-    if (selectedThread.current) return selectedThread.current;
+    if (selectedThread.current) {
+      if (firstMessage) waitForTitle(selectedThread.current, firstMessage);
+      return selectedThread.current;
+    }
     const expectedKey = activeKey.current;
     const pending = (async () => {
       const client = createClient(apiUrl, apiKey ?? undefined, authScheme);
       const created = await client.threads.create({
         metadata: getThreadSearchMetadata(assistantId),
       });
+      upsertThread(created, firstMessage);
+      if (firstMessage) waitForTitle(created.thread_id, firstMessage);
       if (activeKey.current !== expectedKey)
         throw new Error("对话已切换，请在当前对话重新操作");
       // URL updates can resolve before React commits. Desktop controls must
@@ -166,7 +157,7 @@ const StreamSession = ({
         if (threadCommit.current?.id === created.thread_id)
           threadCommit.current = null;
       }
-      void getThreads().then(setThreads).catch(console.error);
+      void getThreads();
       return created.thread_id;
     })();
     setup.current = pending;
@@ -185,13 +176,15 @@ const StreamSession = ({
     key: "",
     messages: [],
   });
-  const retainMessage = (message: Message) =>
+  const retainMessage = (message: Message, forThreadId?: string) => {
+    const targetKey = forThreadId ? `${apiUrl}\0${forThreadId}` : key;
     setArchive((old) => ({
-      key,
-      messages: mergePublicMessages(old.key === key ? old.messages : [], [
+      key: targetKey,
+      messages: mergePublicMessages(old.key === targetKey ? old.messages : [], [
         message,
       ]),
     }));
+  };
   const streamValue = useTypedStream({
     apiUrl,
     apiKey: apiKey ?? undefined,
@@ -208,6 +201,7 @@ const StreamSession = ({
     throttle: 50,
     fetchStateHistory: { limit: 1 },
     onFinish: async (_state, metadata) => {
+      void getThreads();
       const finishedThread = metadata?.thread_id || threadId;
       if (!finishedThread) return;
       const expectedKey = `${apiUrl}\0${finishedThread}`;
@@ -228,16 +222,11 @@ const StreamSession = ({
         console.error("Public message recovery failed", error);
       }
     },
-    onCustomEvent: (event, options) => {
+    onCustomEvent: (event) => {
+      if (activeKey.current !== key) return;
       if ("type" in event && event.type === "progress") {
         setProgress(event);
         return;
-      }
-      if (isUIMessage(event) || isRemoveUIMessage(event)) {
-        options.mutate((prev) => {
-          const ui = uiMessageReducer(prev.ui ?? [], event);
-          return { ...prev, ui };
-        });
       }
     },
     onThreadId: (id) => {
@@ -246,11 +235,24 @@ const StreamSession = ({
           old.key === key ? { ...old, key: `${apiUrl}\0${id}` } : old,
         );
       setThreadId(id);
-      // Refetch threads list when thread ID changes.
-      // Wait for some seconds before fetching so we're able to get the new thread that was created.
-      sleep().then(() => getThreads().then(setThreads).catch(console.error));
+      void getThreads();
     },
   });
+  const [settledStreamKey, setSettledStreamKey] = useState(key);
+  useEffect(() => {
+    // Runs after the SDK has reset its stream and started history loading.
+    // Until then its public messages still belong to the previous selection.
+    setSettledStreamKey(key);
+  }, [key]);
+  const latestStream = useRef(streamValue);
+  latestStream.current = streamValue;
+  // ensureThread waits for the URL and React commit. The caller still holds
+  // its earlier render, so submit through the latest SDK closure explicitly.
+  const submit: typeof streamValue.submit = (values, options) => {
+    if (options?.threadId && options.threadId !== selectedThread.current)
+      return Promise.reject(new Error("对话已切换，消息尚未发送"));
+    return latestStream.current.submit(values, options);
+  };
 
   useEffect(() => setProgress(undefined), [threadId]);
   useEffect(() => {
@@ -281,10 +283,13 @@ const StreamSession = ({
   // The SDK clears a previous thread in an effect. Do not archive its last
   // render under the newly selected thread while that reset is pending.
   const loadedThread = streamValue.history[0]?.checkpoint.thread_id;
-  const liveMessages =
-    loadedThread && loadedThread !== threadId && !streamValue.isLoading
-      ? []
-      : streamValue.messages;
+  const liveMessages = messagesForThread(
+    streamValue.messages,
+    key,
+    settledStreamKey,
+    threadId,
+    loadedThread,
+  );
   const messages = mergePublicMessages(
     archive.key === key ? archive.messages : [],
     mergePublicMessages(recovered?.messages || [], liveMessages),
@@ -303,6 +308,7 @@ const StreamSession = ({
 
   useEffect(() => {
     checkGraphStatus(apiUrl, apiKey, authScheme).then((ok) => {
+      if (ok) void getThreads();
       if (!ok) {
         toast.error("无法连接 MonoPlanner 服务", {
           description: () => (
@@ -316,12 +322,13 @@ const StreamSession = ({
         });
       }
     });
-  }, [apiKey, apiUrl, authScheme]);
+  }, [apiKey, apiUrl, authScheme, getThreads]);
 
   return (
     <StreamContext.Provider
       value={{
         ...streamValue,
+        submit,
         ...(publicFallback
           ? {
               values: { ...streamValue.values, ...recovered },

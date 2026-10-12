@@ -84,6 +84,12 @@ class OfflineModel:
 
 application.model_factory = lambda settings=None: OfflineModel()
 
+# This server also starts the production title worker. Keep its model separate
+# from main responses and never allow the offline fixture to read real keys.
+from agent.server import titles
+from tests.fixtures.title_model import OfflineTitle
+titles.model_factory = OfflineTitle
+
 
 class OfflineWeb:
     def search(self, query, loop, folder):

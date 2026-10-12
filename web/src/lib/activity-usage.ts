@@ -8,6 +8,7 @@ export type ActivityUsage = {
   calls: number;
   unknown_calls: number;
   model_seconds: number;
+  purpose?: string;
   context?: {
     used_tokens: number;
     window_tokens: number;
@@ -44,7 +45,7 @@ export function combineUsage(rows: ActivityUsage[]) {
     ] as const) {
       totals[key] += value[key] || 0;
     }
-    totals.context = value.context || null;
+    if (value.purpose !== "title") totals.context = value.context || null;
   }
   return {
     ...totals,

@@ -19,7 +19,6 @@ export const HumanMessage = memo(function HumanMessage({
       <div className="opacity-0 group-focus-within:opacity-100 group-hover:opacity-100">
         <CommandBar
           content={content}
-          isHumanMessage
           isLoading={isLoading}
         />
       </div>

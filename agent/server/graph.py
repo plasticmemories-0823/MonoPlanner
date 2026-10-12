@@ -25,7 +25,7 @@ from agent.storage.read_sources import ReadSources
 from agent.storage.records import save
 from agent.storage.usage import summarize
 from agent.server import interrupts
-from agent.server.execution import workspace_binding
+from agent.execution.projects import workspace_binding
 
 ACTIVE = {'needs_plan', 'executing'}
 FINISHED = {'chat_complete', 'verified_success', 'task_blocked', 'settings_required'}
@@ -87,6 +87,7 @@ def thread_id(config):
 def intake(state: ConversationState, config: RunnableConfig):
     store, thread = ConversationStore(state_root()), thread_id(config)
     session = store.session(thread)
+    new_conversation = session is None
     saved = messages_from_dict((session or {}).get('public_messages', []))
     incoming = state.get('messages') or []
     public = add_messages(saved, incoming)
@@ -126,7 +127,15 @@ def intake(state: ConversationState, config: RunnableConfig):
         session['read_roots'] = roots
         session['read_sources'] = sources
         session['activity_tasks'] = previous + [{'id': session['task_id'], 'input_id': latest.id}]
-    store.save_session(thread, session)
+    from agent.server.titles import reservation, schedule
+    first_message = next((m for m in public if isinstance(m, HumanMessage)), latest)
+    title_created = store.save_session(thread, session,
+        title_request=reservation(first_message.id, first_message.text) if new_conversation else None)
+    if title_created:
+        try:
+            schedule(store.path.parent, thread)
+        except Exception:
+            logging.getLogger(__name__).exception('Title scheduling failed; main conversation continues')
     return {**presentation, 'task_id': session['task_id'], 'status': 'needs_plan',
             'runtime_settings': session['runtime_settings'], 'dispatch': None, 'turn_status': None}
 

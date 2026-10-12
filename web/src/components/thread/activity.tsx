@@ -3,6 +3,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { combineUsage, type ActivityUsage } from "@/lib/activity-usage";
 import { mergeActivity } from "@/lib/activity-fragments";
+import { useThreads } from "@/providers/Thread";
 import {
   Brain,
   Check,
@@ -37,6 +38,7 @@ export function useActivity(
   threadId: string | null,
   running: boolean,
 ) {
+  const { updateTitle } = useThreads();
   const [items, setItems] = useState<Activity[]>([]);
   const [error, setError] = useState("");
   const [usage, setUsage] = useState<Usage | null>(null);
@@ -78,6 +80,7 @@ export function useActivity(
         if (!response.ok)
           throw new Error(result.error || "无法读取本地活动记录");
         if (cancelled) return;
+        if (result.title) updateTitle(threadId, result.title);
         archive.current.cursors = result.cursors;
         let changed = false;
         for (const row of [
@@ -100,7 +103,7 @@ export function useActivity(
         );
         if (changed) setItems([...archive.current.rows.values()]);
         setError(result.display_warning || "");
-        if (result.more || running)
+        if (result.more || running || result.title_pending)
           timer = setTimeout(poll, result.more ? 20 : 400);
       } catch (e) {
         if (!cancelled)
@@ -113,8 +116,16 @@ export function useActivity(
       controller.abort();
       clearTimeout(timer);
     };
-  }, [apiUrl, threadId, running, retry]);
-  return { items, error, usage, reconnect: () => { archive.current.cursors = {}; setRetry(v => v + 1); } };
+  }, [apiUrl, threadId, running, retry, updateTitle]);
+  return {
+    items,
+    error,
+    usage,
+    reconnect: () => {
+      archive.current.cursors = {};
+      setRetry((v) => v + 1);
+    },
+  };
 }
 
 const ActivityRow = memo(function ActivityRow({ row }: { row: Activity }) {

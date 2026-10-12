@@ -46,8 +46,10 @@ export function DesktopCards({ apiUrl, threadId, running }: {
       const version = revision.current;
       try {
         const result = await jsonRequest(`${apiUrl}/threads/${threadId}/opens`, undefined, controller.signal);
-        if (!controller.signal.aborted && current.current === scope && revision.current === version)
+        if (!controller.signal.aborted && current.current === scope && revision.current === version) {
           setView({ scope, items: result.items });
+          setError("");
+        }
       } catch (e) {
         if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "无法读取操作记录");
       } finally {

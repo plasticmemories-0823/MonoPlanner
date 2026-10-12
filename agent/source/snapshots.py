@@ -260,7 +260,6 @@ class SourceSnapshot:
     @contextmanager
     def environment_like(self, environment, artifact_root, *, read_only=False):
         """Preserve the execution backend; own and close only the new container."""
-        from agent.execution.native import NativeEnvironment
         if isinstance(environment, DockerEnvironment):
             child = DockerEnvironment(
                 self.root, environment.image, f"agent-snapshot-{uuid.uuid4().hex}",
@@ -274,11 +273,6 @@ class SourceSnapshot:
                 yield child
             finally:
                 child.close()
-        elif isinstance(environment, NativeEnvironment):
-            child = NativeEnvironment(self.root, timeout=environment.timeout, artifact_root=artifact_root,
-                                      access_mode=environment.access_mode, read_only=read_only,
-                                      read_roots=environment.read_roots)
-            yield child
         elif isinstance(environment, LocalEnvironment):
             child = LocalEnvironment(self.root, timeout=environment.timeout, artifact_root=artifact_root)
             child.python_executable = environment.python_executable

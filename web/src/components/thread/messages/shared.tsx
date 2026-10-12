@@ -60,7 +60,7 @@ function ContentCopyable({
 }
 
 export function CommandBar({ content, isLoading }: {
-  content: string; isLoading: boolean; isHumanMessage?: boolean; isAiMessage?: boolean;
+  content: string; isLoading: boolean;
 }) {
   return <ContentCopyable content={content} disabled={isLoading} />;
 }

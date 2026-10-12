@@ -10,7 +10,7 @@
 | `agent/task/` | 任务调度、操作契约与预算 |
 | `agent/model/` | DeepSeek 请求、严格工具定义、前缀检查与压缩 |
 | `agent/source/` | 源码快照、索引、区间原文与增量地图 |
-| `agent/execution/` | 原生 LPAC／显式完全访问／Docker 执行及文件打开 |
+| `agent/execution/` | Docker 执行、调查隔离及受控文件打开 |
 | `agent/acceptance/` | 验收试跑、冻结、修订与最终结果 |
 | `agent/storage/` | 原始记录、检查点、会话与恢复 |
 | `resources/` | Schema、提示词与运行驱动 |
@@ -55,16 +55,35 @@ pnpm --dir web build
 - 浏览器另有 `web_search` 和 `web_fetch`。联网开关不改变工具定义；网络执行由程序根据当前任务快照检查。
 - 浏览器固定增加 `list_files`、`read_file`、`search_files`、`run_existing`。工具参数存于 `resources/assistant.schema.json`，查询和已有任务运行不初始化编码环境。
 - `run_existing` 仅接收已有入口和 argv。记录保存在任务目录 `assistant/`；子任务可提供本次生成的四项 Token JSON，来源、哈希及未知用量单独保存，不混入助手用量。
-- 先在原始源码上试跑验收，再冻结并释放修改。冻结的代码、驱动、回归命令及用户固定验收不能被普通聊天改写。
+- 完整验收尚未生成时允许 `candidate` 留空 `test_code`，执行增量修改和局部检查，仅记录阶段结果。最终验收仍在保留的原始源码上试跑，冻结后核验累计修改与回归。冻结的代码、驱动、回归命令及用户固定验收不能被普通聊天改写。
 - 零用例、新增跳过、加载失败、不完整结果、超时和真实失败不能算通过。验收修订继续走证据与源码版本对照。
 - 完整历史只追加，压缩只替换请求视图；摘要不批准执行或覆盖真实失败。当前压缩阈值约 80 万输入 Token。
-- 日常执行默认使用原生 LPAC 和 Job Object；隔离调查强制只读、无网。Docker 后端保留给正式评测。完全访问仅由用户按对话开启，不改变工具表。
+- 编码、验收、调查程序和已有任务运行统一使用 Docker；调查强制只读、无网。完全权限只影响本机文件操作和外部打开，由用户按对话开启，不改变工具表。
 - `list_applications`、`open_file`、`launch_application` 属于聊天工具；外部打开的精确目标需要一次性用户授权，不能当成代码执行绕过沙盒。
 
 ## 回退与记录
 
 变更前保留 Git 回退点和验证记录。旧任务按各自源码指纹使用冻结版本恢复，不迁移检查点，不重放已完成操作；结果不明的请求或写入不自动重试。
 
-历史基线和验证数据保留在 `validation/`。设置与自动分流记录为 `monoplaner-settings-20261009-01`，本次界面整理记录为 `monoplaner-ui-20261009-01`。产品 README 不承担实验日志或成绩汇总。
+历史基线、验证数据和停止现场保留在 `validation/`，每次验证使用独立目录。产品 README 不承担实验日志或成绩汇总。
+
+## 面试时优先掌握的代码
+
+先沿着“一条用户消息怎样走到真实验收结果”阅读，不需要逐行背下界面组件、打包脚本或全部回归测试。以下 12 个文件合计 2,669 行，含注释和正常空行；这是主链路阅读范围，并非全部功能的实现行数。
+
+| 阅读顺序 | 文件 | 需要能解释的问题 | 行数 |
+|---|---|---|---:|
+| 会话与开工 | `agent/server/graph.py`、`agent/server/runtime.py` | 如何区分聊天与工作，如何接入暂停和补充要求 | 715 |
+| 编码循环 | `agent/task/runner.py`、`operations.py`、`contracts.py` | 如何接收计划、逐步执行、保存游标和返工 | 648 |
+| 模型接口 | `agent/model/client.py`、`tools.py`、`payload.py` | 工具 Schema 如何固定，代码与思考续接如何原样保存 | 353 |
+| 操作执行 | `agent/execution/executor.py` | 读取、搜索和执行怎样按明确参数路由 | 207 |
+| 验收 | `agent/acceptance/runner.py`、`revisions.py` | 如何冻结验收，为什么真实失败不能被文字判断覆盖 | 558 |
+| 恢复 | `agent/storage/recovery.py` | 怎样校验原件和版本，为什么结果不明时不重放 | 188 |
+
+再阅读 `agent/model/compaction.py`、`agent/storage/history.py`、`agent/execution/docker.py` 和 `agent/source/snapshots.py`，补齐压缩、历史完整性、容器隔离和源码快照原理。这两轮合计约 3,900 行。前端能解释消息合并、实时活动、会话列表和后端通信即可；无需掌握每个 UI 组件的细节。
+
+回归测试保留在 `tests/`，产品运行不加载。面试准备时按主题挑选示例：工具参数拒收、真实验收失败、暂停恢复、消息不消失；不需要逐行阅读整套测试。
 
 桌面入口为 `launcher/Program.cs`，嵌入式工作窗口为 `launcher/DesktopWindow.cs`，重新生成使用 `scripts/build-launcher.ps1`。WebView2 SDK 固定为 1.0.4258.31，下载校验与本地准备在 `scripts/prepare-desktop.ps1`；运行依赖及其许可位于 `launcher/runtime/`。SDK 首次准备需要网络，之后可离线构建。启动与关闭不发起模型调用；活动或未知任务会阻止关闭服务。前端来源与许可保留在 `web/UPSTREAM.md` 和 `web/LICENSE`。
+
+文件选择和应用识别组件由 `scripts/build-helpers.ps1` 构建。当前产品不使用 Windows LPAC 执行后端，打包也不要求其组件；编码、调查、验收及已有脚本运行统一使用 Docker。

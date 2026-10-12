@@ -5,6 +5,8 @@ from langchain_core.outputs import ChatGenerationChunk
 from agent.model.client import ConfiguredModel
 from agent.server import graph as application
 from agent.server.app import app
+from agent.server import titles
+from tests.fixtures.title_model import OfflineTitle
 from tests.test_public_model_stream import CallbackModel
 
 
@@ -24,4 +26,5 @@ class BurstModel(CallbackModel):
 
 application.create_model = lambda settings: ConfiguredModel(BurstModel(tags=['nostream']))
 application.load_settings = lambda settings=None: settings or {}
+titles.model_factory = OfflineTitle
 graph = application.builder.compile()

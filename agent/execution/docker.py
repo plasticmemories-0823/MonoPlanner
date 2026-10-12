@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from agent.execution.process import log_excerpt
 
 
 def docker_executable():
@@ -127,7 +128,7 @@ class DockerEnvironment:
         self.runtime = runtime_profile(runtime)
         self.python_executable = self.runtime['python']
         self.material_mounts = dict(material_mounts or {})
-        self.runtime_facts = {'backend': 'Docker', 'python': self.python_executable,
+        self.runtime_facts = {'backend': 'Docker', 'python_executable': self.python_executable,
                               'conda_env': self.runtime['conda_env'], 'source': '/testbed', 'network': 'none'}
         self.container_name = container_name
         self.timeout = timeout
@@ -238,7 +239,7 @@ class DockerEnvironment:
         return result.returncode == 0
 
     def run_process(self, command, *, stdout_path, stderr_path, timeout=None,
-                    shell=False, on_started=None):
+                    shell=False, on_started=None, isolated_launcher=False):
         timeout = self.timeout if timeout is None else timeout
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("命令超时必须大于 0。")
@@ -266,6 +267,7 @@ class DockerEnvironment:
             try:
                 completed = self._docker([
                     "exec", self._container_id, self.python_executable,
+                    *(['-I'] if isolated_launcher else []),
                     "-c", _PROCESS_RUNNER, payload.decode("ascii"),
                 ], timeout=timeout + 15, stdout=stdout, stderr=stderr)
                 result["exit_code"] = completed.returncode
@@ -296,12 +298,7 @@ class DockerEnvironment:
 
     @staticmethod
     def _summary(path):
-        path = Path(path)
-        with path.open("rb") as stream:
-            size = path.stat().st_size
-            stream.seek(max(0, size - 6000))
-            tail = stream.read().decode("utf-8", errors="replace")
-        return ("[前文已截断；完整内容见日志]\n" if size > 6000 else "") + tail
+        return log_excerpt(path, notice="[前文已截断；完整内容见日志]\n")
 
     def execute(self, command):
         stem = f"command-{uuid.uuid4().hex}"

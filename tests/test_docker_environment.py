@@ -152,6 +152,8 @@ class DockerEnvironmentTests(unittest.TestCase):
         self.assertTrue(summary.endswith("LAST"))
         self.assertLess(len(summary), 6100)
         self.assertEqual(path.stat().st_size, 20_004)
+        self.assertEqual(summary, "[前文已截断；完整内容见日志]\n" +
+                         path.read_bytes()[-6000:].decode("utf-8", errors="replace"))
 
 
 if __name__ == "__main__":

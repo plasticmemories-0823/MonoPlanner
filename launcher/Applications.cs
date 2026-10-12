@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -46,7 +47,9 @@ internal static class Applications
         object scripting=Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));
         try {
             foreach(string root in new [] {Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
-                                           Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu)}) {
+                                           Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu),
+                                           Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                                           Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory)}) {
                 if(!Directory.Exists(root)) continue;
                 foreach(string path in Shortcuts(root)) {
                     object link=null;
@@ -67,14 +70,31 @@ internal static class Applications
                     object item=Call(items,"Item",i);
                     try {
                         string id=Convert.ToString(Get(item,"Path"));
-                        if(!id.Contains("!")) continue;
+                        if(!id.Contains("!")) {
+                            // Win32 entries are executable targets, not store activation IDs.
+                            string target=Convert.ToString(Call(item,"ExtendedProperty","System.Link.TargetParsingPath"));
+                            if(Path.IsPathRooted(target) && File.Exists(target) && Path.GetExtension(target).Equals(".exe",StringComparison.OrdinalIgnoreCase))
+                                rows.Add(new Dictionary<string,string>{{"name",Convert.ToString(Get(item,"Name"))},
+                                    {"path",Path.GetFullPath(target)},{"kind","exe"}});
+                            continue;
+                        }
                         string package=Convert.ToString(Call(item,"ExtendedProperty","System.AppUserModel.PackageFullName"));
                         rows.Add(new Dictionary<string,string>{{"name",Convert.ToString(Get(item,"Name"))},
                             {"aumid",id},{"package",package},{"kind","packaged"}});
-                    } finally {Marshal.FinalReleaseComObject(item);}
+                    } catch(COMException) { } catch(TargetInvocationException) { }
+                      finally {Marshal.FinalReleaseComObject(item);}
                 }
             } finally {Marshal.FinalReleaseComObject(items);Marshal.FinalReleaseComObject(folder);}
         } finally {Marshal.FinalReleaseComObject(shell);Marshal.FinalReleaseComObject(scripting);}
+        foreach(Process process in Process.GetProcesses()) {
+            try {
+                string target=process.MainModule.FileName;
+                if(Path.IsPathRooted(target) && File.Exists(target) && Path.GetExtension(target).Equals(".exe",StringComparison.OrdinalIgnoreCase))
+                    rows.Add(new Dictionary<string,string>{{"name",process.ProcessName},
+                        {"path",Path.GetFullPath(target)},{"kind","exe"}});
+            } catch(System.ComponentModel.Win32Exception) { } catch(InvalidOperationException) { }
+              catch(NotSupportedException) { } finally {process.Dispose();}
+        }
         return rows;
     }
     [STAThread] public static int Main(string[] args) {

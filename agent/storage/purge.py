@@ -117,7 +117,7 @@ def finish_purge(store, thread, identities):
                 for path in files:
                     path.unlink()
                 folder.rmdir()
-        for table in ('desktop_requests', 'desktop_files', 'permissions', 'read_sources'):
+        for table in ('desktop_requests', 'desktop_files', 'permissions', 'read_sources', 'conversation_titles'):
             if table in tables:
                 db.execute('DELETE FROM '+table+' WHERE thread=?', (thread,))
         for path in paths:

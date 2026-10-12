@@ -35,16 +35,7 @@ internal sealed class DesktopWindow : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                                "MonoPlanner", "WebView2", key);
-        string logo = Path.Combine(Program.Root, "web", "public", "brand", "monoplanner.png");
-        if (File.Exists(logo))
-        {
-            using (var bitmap = new Bitmap(logo))
-            {
-                IntPtr handle = bitmap.GetHicon();
-                Icon = (Icon)Icon.FromHandle(handle).Clone();
-                DestroyIcon(handle);
-            }
-        }
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         var menu = new MenuStrip { BackColor = Color.White, Padding = new Padding(8, 3, 8, 3) };
         var app = new ToolStripMenuItem("MonoPlanner");
         var exit = new ToolStripMenuItem("退出并停止服务");
@@ -98,9 +89,6 @@ internal sealed class DesktopWindow : Form
         };
         focusTimer.Start();
     }
-
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern bool DestroyIcon(IntPtr handle);
 
     private void SetBusy(bool value)
     {

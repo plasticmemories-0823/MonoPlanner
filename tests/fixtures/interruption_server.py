@@ -21,4 +21,7 @@ class OfflineClient:
 
 
 application.model_factory = lambda settings: ConfiguredModel(OfflineClient())
+from tests.fixtures.title_model import OfflineTitle
+from agent.server import titles
+titles.model_factory = OfflineTitle
 graph = application.graph

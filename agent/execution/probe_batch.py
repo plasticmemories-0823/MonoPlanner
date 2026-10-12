@@ -74,29 +74,6 @@ class ProbeBatch:
         from agent.execution.probe import _PROBE_RUNNER, MAX_OUTPUT_BYTES, MAX_PROBE_SECONDS
         if self.closed:
             raise RuntimeError('A closed probe batch cannot be reused')
-        from agent.execution.native import NativeEnvironment
-        if isinstance(self.environment, NativeEnvironment):
-            if timeout <= 0:
-                raise ValueError('Probe timeout must be positive')
-            directory = Path(directory)
-            directory.mkdir(parents=True, exist_ok=True)
-            with SourceSnapshot.capture(self.environment.repo_root, directory/'source',
-                    excluded_roots=(self.environment.artifact_root,)).environment_like(
-                    self.environment, directory/'runtime', read_only=True) as child:
-                child.access_mode = 'sandbox'  # Investigations stay isolated in full mode too.
-                result = child.run_process(command, stdout_path=directory/'stdout.log',
-                                          stderr_path=directory/'stderr.log',
-                                          timeout=min(timeout, MAX_PROBE_SECONDS), shell=True,
-                                          max_output_bytes=MAX_OUTPUT_BYTES)
-            for name in ('stdout', 'stderr'):
-                with (directory/(name+'.log')).open('rb') as log:
-                    raw = log.read(MAX_OUTPUT_BYTES+1)
-                result[name] = raw[:MAX_OUTPUT_BYTES].decode('utf-8', errors='replace')
-                if len(raw) > MAX_OUTPUT_BYTES:
-                    result.update(exit_code=None, error_kind='probe_output_limit', output_limited=True)
-            result.update(mode='isolated_probe', executed=True, source_read_only=True,
-                          acceptance=False, network='none' if child.access_mode == 'sandbox' else 'unrestricted')
-            return result
         if not isinstance(self.environment, DockerEnvironment):
             return {'exit_code': None, 'timed_out': False, 'executed': False,
                     'mode': 'isolated_probe', 'error_kind': 'probe_backend_unavailable',

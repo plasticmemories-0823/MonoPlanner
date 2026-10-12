@@ -22,6 +22,8 @@ from agent.storage.purge import begin_purge, finish_purge
 from urllib.parse import urlsplit
 from agent.server.desktop import routes as desktop_routes
 from agent.execution.projects import ProjectEnvironments, local_images, workspace_binding
+from agent.storage.titles import Titles
+from agent.server.titles import lifespan
 
 
 LOADED_SERVICE = service_identity()
@@ -123,10 +125,12 @@ async def controls(request: Request):
 def activity_value(thread, cursors):
     store = ConversationStore(state_root())
     session = store.session(thread)
-    if not session:
-        return JSONResponse({'items': [], 'cursors': {}, 'more': False})
-    tasks = session.get('activity_tasks') or [{'id': session['task_id'], 'input_id': session['last_input']}]
-    return JSONResponse(read_activity(state_root(), tasks, cursors))
+    tasks = (session.get('activity_tasks') or [{'id': session['task_id'], 'input_id': session['last_input']}]) if session else []
+    result = read_activity(state_root(), tasks, cursors)
+    auxiliary = Titles(state_root()).activity(thread)
+    result['usage'].update(auxiliary.pop('usage'))
+    result.update(auxiliary)
+    return JSONResponse(result)
 
 
 async def activity(request: Request):
@@ -142,7 +146,8 @@ async def activity(request: Request):
 async def conversations(request: Request):
     def read():
         store = ConversationStore(state_root())
-        return {'visibility': store.visibility(), 'pending_deletions': store.pending_deletions()}
+        return {'visibility': store.visibility(), 'pending_deletions': store.pending_deletions(),
+                'titles': Titles(state_root()).public()}
     return JSONResponse(await asyncio.to_thread(read),
                         headers={'Cache-Control': 'no-store'})
 
@@ -230,7 +235,7 @@ async def settings(request: Request):
         return JSONResponse({'error': str(exc)}, status_code=400, headers={'Cache-Control': 'no-store'})
 
 
-app = Starlette(routes=[*desktop_routes, Route('/service', service, methods=['GET']),
+app = Starlette(lifespan=lifespan, routes=[*desktop_routes, Route('/service', service, methods=['GET']),
                        Route('/execution/images', execution_images, methods=['GET']),
                        Route('/workspace/execution', project_execution, methods=['GET', 'POST']),
                        Route('/workspace', workspace, methods=['GET', 'POST']),

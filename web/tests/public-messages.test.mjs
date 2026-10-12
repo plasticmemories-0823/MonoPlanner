@@ -1,10 +1,54 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergePublicMessages } from "../src/lib/public-messages.ts";
+import {
+  mergePublicMessages,
+  messagesForThread,
+} from "../src/lib/public-messages.ts";
 import { activityAnchors } from "../src/lib/activity-groups.ts";
 import { combineUsage } from "../src/lib/activity-usage.ts";
 
 const message = (id, content, type = "ai") => ({ id, content, type });
+
+test("switching a running stream never archives its messages into another thread", () => {
+  const running = [message("new-user", "第二条正在等待", "human")];
+  const oldThread = [message("old-user", "第一条", "human")];
+  const beforeReset = messagesForThread(
+    running,
+    "api\0old",
+    "api\0new",
+    "old",
+    "new",
+  );
+  assert.deepEqual(beforeReset, []);
+  const historyStillStale = messagesForThread(
+    running,
+    "api\0old",
+    "api\0old",
+    "old",
+    "new",
+  );
+  assert.deepEqual(historyStillStale, []);
+  assert.strictEqual(
+    mergePublicMessages(oldThread, historyStillStale),
+    oldThread,
+  );
+  assert.strictEqual(
+    messagesForThread(oldThread, "api\0old", "api\0old", "old", "old"),
+    oldThread,
+  );
+});
+
+test("new-thread optimistic messages and interrupted commentary stay visible under their owner", () => {
+  const first = [message("first", "开始讨论", "human")];
+  assert.strictEqual(
+    messagesForThread(first, "api\0new", "api\0new", "new"),
+    first,
+  );
+  const published = [...first, message("progress", "我已经找到入口")];
+  const stopped = messagesForThread([], "api\0new", "api\0new", "new", "new");
+  assert.strictEqual(mergePublicMessages(published, stopped), published);
+  assert.deepEqual(messagesForThread(published, "api\0", "api\0new", null), []);
+});
 
 test("usage combines cache weights but uses only the latest context", () => {
   const row = (input, cached, used) => ({

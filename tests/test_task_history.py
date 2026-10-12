@@ -12,6 +12,7 @@ from agent.model.payload import wire_input
 from agent.task.runner import TaskRunner
 from agent.storage.history import LocalHistory
 from agent.model.tools import submit_work
+from support import interrupt_after_persist
 import test_task_runner as f
 
 
@@ -57,14 +58,8 @@ class TaskHistoryTests(unittest.TestCase):
         self.assertIn('99',(self.repo/'sample.py').read_text())
 
     def test_received_response_is_consumed_without_resending(self):
-        class Interrupted(BaseException):
-            pass
-        original=TaskRunner.persist
-        def crash(engine,event,payload=None):
-            original(engine,event,payload)
-            if event=='model_response_received':
-                raise Interrupted()
-        with patch.object(TaskRunner,'persist',crash), self.assertRaises(Interrupted):
+        interrupt, Interrupted = interrupt_after_persist('model_response_received')
+        with interrupt, self.assertRaises(Interrupted):
             self.run_plans([self.candidate()])
         result=self.run_plans([])
         self.assertEqual(result['status'],'verified_success',result)
@@ -72,14 +67,8 @@ class TaskHistoryTests(unittest.TestCase):
         self.assertEqual(result['planner_calls'],2)
 
     def test_unfinished_operation_is_not_repeated(self):
-        class Interrupted(BaseException):
-            pass
-        original=TaskRunner.persist
-        def crash(engine,event,payload=None):
-            original(engine,event,payload)
-            if event=='step_started':
-                raise Interrupted()
-        with patch.object(TaskRunner,'persist',crash), self.assertRaises(Interrupted):
+        interrupt, Interrupted = interrupt_after_persist('step_started')
+        with interrupt, self.assertRaises(Interrupted):
             self.run_plans([self.candidate()])
         result=self.run_plans([])
         self.assertEqual(result['status'],'execution_unknown')
@@ -151,14 +140,8 @@ class TaskHistoryTests(unittest.TestCase):
             first.close();second.close()
 
     def test_interrupted_request_keeps_unknown_usage_without_resend(self):
-        class Interrupted(BaseException):
-            pass
-        original=TaskRunner.persist
-        def crash(engine,event,payload=None):
-            original(engine,event,payload)
-            if event=='model_request_started':
-                raise Interrupted()
-        with patch.object(TaskRunner,'persist',crash),self.assertRaises(Interrupted):
+        interrupt, Interrupted = interrupt_after_persist('model_request_started')
+        with interrupt, self.assertRaises(Interrupted):
             self.run_plans([self.candidate()])
         result=self.run_plans([])
         self.assertEqual(result['status'],'model_request_unknown')

@@ -1,4 +1,4 @@
-import { Checkpoint, Message } from "@langchain/langgraph-sdk";
+import { Message } from "@langchain/langgraph-sdk";
 import { getContentString } from "../utils";
 import { CommandBar } from "./shared";
 import { MarkdownText } from "../markdown-text";
@@ -11,7 +11,6 @@ export const AssistantMessage = memo(function AssistantMessage({
 }: {
   message: Message | undefined;
   isLoading: boolean;
-  handleRegenerate: (parent: Checkpoint | null | undefined) => void;
 }) {
   if (message?.type !== "ai") return null;
   const content = getContentString(message.content);
@@ -24,7 +23,6 @@ export const AssistantMessage = memo(function AssistantMessage({
         <CommandBar
           content={content}
           isLoading={isLoading}
-          isAiMessage
         />
       </div>
     </div>
