@@ -82,13 +82,11 @@ def _execute_pending(self):
             self.persist("paused")
             return
     if plan.kind == "candidate":
-        return self.final_acceptance() if self.state.get("verification_spec") else self.finish_plan("partial_work_executed")
+        return self.final_acceptance()
     return self.finish_plan("evidence_ready")
 
 
 def final_acceptance(self):
-    if not self.state.get("verification_spec"):
-        raise ValueError("Complete frozen acceptance is required for final delivery; partial work cannot establish success")
     if len(self.state["rounds"]) >= self.max_rounds:
         self.state.update(status="stalled", reason="Final candidate attempt limit reached")
         return
@@ -120,10 +118,6 @@ def final_acceptance(self):
 def finish_plan(self, outcome):
     pending = self.state["pending"]
     result = {"outcome": outcome, "plan": pending["id"], "steps": [{k:v for k,v in r.items() if k != "cache_key"} for r in pending["rows"]]}
-    if outcome == "partial_work_executed":
-        result["next"] = ("Partial edits and local checks are recorded, not task success. Continue focused work or "
-                          "submit complete test_code and regression_command for original-source trial, explicit "
-                          "freeze and final acceptance of the cumulative changes. Completed edits must not be replayed.")
     if pending.get("correction_source"):
         result["correction_source"] = pending["correction_source"]
     if outcome.startswith("verification") or outcome == "verified_success":

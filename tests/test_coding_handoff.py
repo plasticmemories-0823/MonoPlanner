@@ -24,31 +24,27 @@ class CodingHandoffTests(unittest.TestCase):
             self.assertEqual((PROJECT_ROOT/'resources'/name).read_bytes(), original)
         original = subprocess.check_output(['git', 'show', '98b3851:resources/prompts/task.txt'], cwd=PROJECT_ROOT).decode()
         rules = (PROJECT_ROOT/'resources/prompts/task.txt').read_text(encoding='utf-8')
-        allowed_prefixes = (
+        additions = [line for line in rules.splitlines(keepends=True)
+                     if line.startswith('Before the first freeze, if the proposed source edits')]
+        self.assertEqual(len(additions), 1)
+        self.assertIn('complete kind=candidate', additions[0])
+        self.assertIn('previous approval cannot release the replacement', additions[0])
+        comparable = rules.replace(additions[0], '', 1)
+        diagnostic_prefixes = (
             'Use the supplied work_materials first:',
             'An inspect plan answers the current missing fact',
-            'An inspect plan answers a specific missing fact',
             'Prefer the observed native runner, settings and existing fixtures',
-            "Reuse the repository's available environment",
-            'kind=inspect:', 'kind=candidate:',
-            'The first generated acceptance is trialled',
-            'When cumulative changes are ready for final delivery',
-            'Before first freezing, submit_work can explicitly replace',
-            'Write independent acceptance tests;', 'For final acceptance, the program saves',
-            'Candidate steps execute in order;',
-            'Do not put progress tests,', 'Use focused partial checks after incremental edits',
-            'Only final acceptance is run,', 'Final delivery requires complete frozen acceptance',
         )
-        def protected(text):
-            return ''.join(line for line in text.splitlines(keepends=True)
-                           if not line.startswith(allowed_prefixes))
-        self.assertEqual(protected(rules), protected(original))
-        self.assertIn("test_code='' permits incremental source changes and partial tests immediately", rules)
-        self.assertIn('Full acceptance need not be designed before these edits', rules)
-        self.assertIn('retained ORIGINAL source even after incremental edits', rules)
-        self.assertIn('previous approval cannot release a replacement', rules)
-        self.assertIn('complete frozen acceptance and relevant regression', rules)
-        self.assertNotIn('BEFORE the first modification', rules)
+        for prefix in diagnostic_prefixes:
+            permitted = [line for line in comparable.splitlines(keepends=True) if line.startswith(prefix)]
+            self.assertEqual(len(permitted), 1)
+            comparable = comparable.replace(permitted[0], '', 1)
+        clarified = [line for line in comparable.splitlines(keepends=True)
+                     if line.startswith('Do not put repeated optional lint checks')]
+        self.assertEqual(len(clarified), 1)
+        comparable = comparable.replace(clarified[0],
+            'Do not put progress tests, repeated optional lint checks, test polling or a final summary request into steps.\n', 1)
+        self.assertEqual(comparable, original)
         self.assertEqual(wire_input([], CODING_TOOLS)['tools'][:4], wire_input([], WORK_TOOLS)['tools'])
         self.assertEqual([t.name for t in CODING_TOOLS], [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch'])
         self.assertNotIn('submit_work', [t.name for t in CHAT_TOOLS])

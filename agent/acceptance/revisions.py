@@ -195,26 +195,10 @@ def trial(loop, code, regression, response, *, driver=(), candidate=None, parent
         "superseded_candidate": candidate_summary(loop, superseded), "baseline_reused": bool(reuse),
         "next": "Inspect the real evidence, then freeze_acceptance or revise_acceptance. "
                 "A runnable assertion failure may reproduce the defect; it is not proof that the expectation is correct. "
-                "This trial ran no pending edits; earlier incremental work remains. freeze_acceptance releases only the selected_candidate above. "
+                "No proposed modification has run. freeze_acceptance releases only the selected_candidate above. "
                 "revise_acceptance changes tests only and keeps that candidate; to replace its edits before the first "
                 "freeze, submit a complete candidate with submit_work and review the new trial_id."})
     loop.persist("acceptance_trial_finished", {"trial_id": identifier, "status": report["status"]})
-
-
-def supersede_trial(loop):
-    """Incremental edits invalidate pending approval, retaining all trial originals."""
-    validate(loop)
-    current = loop.state.get("acceptance_trial")
-    if not current:
-        return
-    if loop.state.get("acceptance_running") or not current.get("baseline_result"):
-        raise ModelRequestNotSent("execution_unknown", "Pending acceptance trial has no completed result")
-    proposal = checked(loop.root, current["ref"])
-    if proposal["workspace_source"] != loop.evidence.current:
-        raise ModelRequestNotSent("state_conflict", "Workspace changed while acceptance was under review")
-    loop.state["acceptance_trial"] = None
-    loop.persist("acceptance_trial_superseded", {"trial_id": current["ref"]["id"],
-                 "reason": "Incremental work replaces pending final delivery; old approval cannot release edits"})
 
 
 def stage_candidate(loop, plan, response):

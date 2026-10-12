@@ -243,10 +243,7 @@ class TaskRunner:
                         errors.append((["/" + name], ValueError("Fixed " + name + " cannot be replaced during source repair")))
             elif not self.state.get("verify_command") and isinstance(value.get("test_code", ""), str):
                 try:
-                    if value.get("test_code", "").strip():
-                        revisions.spec_for(self, value["test_code"], value.get("test_driver", ()))
-                    elif value.get("test_driver"):
-                        raise ValueError("Partial work uses step commands for local checks; test_driver requires complete test_code")
+                    revisions.spec_for(self, value.get("test_code", ""), value.get("test_driver", ()))
                 except ValueError as exc:
                     errors.append((repair.fields(exc, value), exc))
         elif isinstance(value, dict) and value.get("decision") == "revise" and isinstance(value.get("test_code", ""), str):
@@ -283,12 +280,9 @@ class TaskRunner:
     def accept_plan(self, plan, response):
         if plan.kind == "candidate":
             if not self.state.get("verification_spec") and not self.state.get("verify_command"):
-                if plan.test_code.strip():
-                    revisions.stage_candidate(self, plan, response)
-                    return
-                revisions.supersede_trial(self)
-            else:
-                self.freeze_contract(plan)
+                revisions.stage_candidate(self, plan, response)
+                return
+            self.freeze_contract(plan)
         fingerprint = digest([plan.model_dump(), self.evidence.current])
         if fingerprint in self.state["seen_plans"]:
             self.state.update(status="stalled", reason="Identical plan for identical source repeated; no new decision")
