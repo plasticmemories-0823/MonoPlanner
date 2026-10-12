@@ -294,6 +294,7 @@ class ConversationRunner(TaskRunner):
         initial['initial_evidence'] = self.initial_material()
         self.state.update(rules=self.rules, history=[message_to_dict(HumanMessage(content=json.dumps(initial, ensure_ascii=False)))],
                           response_pending=None)
+        self.state.pop('coding_preparation_pending', None)
         self.persist('work_initialized')
 
     def advance(self):
@@ -341,6 +342,22 @@ class ConversationRunner(TaskRunner):
             return
         self.start_turn()
         turn = self.state.get('conversation_turn')
+        if self.state.get('coding_preparation_pending') and not turn:
+            # The model already approved work. Resume preparation directly;
+            # asking the chat model again can lose the saved handoff.
+            self.state.pop('dispatch', None)
+            if not self.repo or not Path(self.repo).is_dir():
+                self.state.update(status='awaiting_user', reason='请先选择已有工作目录；编码尚未开始。')
+                self.persist('workspace_required')
+                return
+            try:
+                self.bootstrap_work()
+            except EnvironmentRequired as exc:
+                self.state.update(status='awaiting_user', reason=str(exc))
+                self.persist('environment_required')
+            else:
+                self.state['dispatch'] = 'work'
+            return
         if turn and self.phase == 'work' and not turn.get('response'):
             self.state.pop('dispatch', None)
             self.phase = 'decide'
@@ -364,7 +381,7 @@ class ConversationRunner(TaskRunner):
                 status = turn['return_status']
                 if not self.state.get('baseline') and status != 'paused':
                     dialogue.discard_unexecuted_response(self)
-                    status = 'chat_complete'
+                    status = 'awaiting_user' if self.state.get('coding_preparation_pending') else 'chat_complete'
                 elif status == 'needs_plan' and turn.get('work_response') and not self.state.get('pending'):
                     status = 'awaiting_user'
                 self.state.update(status=status, conversation_turn=None, turn_status='chat_complete')
@@ -404,20 +421,12 @@ class ConversationRunner(TaskRunner):
                     self.state.setdefault('user_updates', []).append({'id': turn['id'], 'text': turn['text']})
                 else:
                     self.state['history'] = list(turn['messages'])
-            self.state.update(response_pending=None, conversation_turn=None, status='needs_plan')
+            self.state.update(response_pending=None, conversation_turn=None, status='needs_plan',
+                              coding_preparation_pending=not bool(self.state.get('baseline')), dispatch='work')
             self.state.pop('turn_status', None)
             self.state.pop('repair_draft', None)
             self.state.pop('acceptance_release', None)
             self.persist('coding_handoff_saved')
-            if not self.repo or not Path(self.repo).is_dir():
-                self.state.update(status='awaiting_user', reason='请先选择已有工作目录；编码尚未开始。')
-                self.persist('workspace_required')
-                return
-            try:
-                self.bootstrap_work()
-            except EnvironmentRequired as exc:
-                self.state.update(status='awaiting_user', reason=str(exc))
-                self.persist('environment_required')
             return
         turn_id = turn['id'] if turn else 'initial'
         if self.state.get('assistant_run_turn') == turn_id and raw:

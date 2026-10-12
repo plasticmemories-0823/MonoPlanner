@@ -28,7 +28,7 @@ MonoPlanner 是面向 Windows 本机使用的 AI 助手，可讨论需求、查�
 
 ## 下载与启动
 
-1. 在 [Releases](https://github.com/plasticmemories-0823/MonoPlanner/releases) 下载 `MonoPlanner-1.0.0-Windows11-x64.zip` 和 `SHA256SUMS.txt`。私有仓库需要访问权限。
+1. 在 [Releases](https://github.com/plasticmemories-0823/MonoPlanner/releases) 下载 `MonoPlanner-1.0.1-Windows11-x64.zip` 和 `SHA256SUMS.txt`。私有仓库需要访问权限。
 2. 使用 PowerShell 的 `Get-FileHash`，选择 SHA256 核对下载文件。
 3. 解压到新的目录，双击 **MonoPlanner.exe**。保持包内文件完整，不与旧版本覆盖混合。
 4. 在输入框工具栏选择 **齿轮 → API Key 设置**，填写密钥。
@@ -57,7 +57,7 @@ MonoPlanner 是面向 Windows 本机使用的 AI 助手，可讨论需求、查�
 
 ### Docker 执行环境
 
-在工作目录窗口展开 **执行环境 · Docker**，选择已有镜像，填写容器内 Python 路径及可选 Conda 环境。默认 `/opt/miniconda3/envs/testbed/bin/python`、环境 `testbed` 用于相应项目镜像；其他项目填写实际路径，不用 Conda 时留空。
+在工作目录窗口展开 **执行环境 · Docker**，选择已有镜像，填写容器内 Python 路径及可选 Conda 环境，点击 **保存执行环境**。默认 `/opt/miniconda3/envs/testbed/bin/python`、环境 `testbed` 用于相应项目镜像；其他项目填写实际路径，不用 Conda 时留空。若开工因缺少配置停下，保存配置后点击 **继续任务**，会接回已保存的开工交接；无需再次发送原需求。
 
 仅支持兼容的 Linux amd64/Bash 镜像，不自动拉取、安装依赖或使用宿主机解释器。首次执行绑定镜像 ID、容器和挂载；已有执行记录不能更换环境。Docker 不可用、容器丢失或依赖缺失时停止。
 

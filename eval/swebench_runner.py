@@ -39,10 +39,12 @@ def archive_source(directory):
     files.extend(PROJECT_ROOT.glob("requirements*.txt"))
     files.extend(path for path in (PROJECT_ROOT / 'scripts').glob('*.ps1'))
     files.extend((PROJECT_ROOT / 'launcher').glob('*.cs'))
-    files.extend(path for path in (PROJECT_ROOT / 'web').rglob('*')
-                 if path.is_file() and not {'node_modules', '.next', '.git'}.intersection(path.relative_to(PROJECT_ROOT / 'web').parts)
-                 and path.suffix in {'.ts', '.tsx', '.js', '.json', '.css', '.md', '.yaml', '.yml', '.svg'}
-                 and not path.name.endswith('.tsbuildinfo'))
+    for folder, directories, names in os.walk(PROJECT_ROOT / 'web', followlinks=False):
+        directories[:] = [name for name in directories if name not in {'node_modules', '.next', '.git'}
+                          and not Path(folder, name).is_symlink() and not Path(folder, name).is_junction()]
+        files.extend(path for name in names if (path := Path(folder, name)).is_file()
+                     and path.suffix in {'.ts', '.tsx', '.js', '.json', '.css', '.md', '.yaml', '.yml', '.svg'}
+                     and not path.name.endswith('.tsbuildinfo'))
     files.extend(PROJECT_ROOT / name for name in ('langgraph.json', 'README.md', 'web/LICENSE', 'web/.env.example'))
     for folder in ("agent", "tests", "resources"):
         files.extend(path for path in (PROJECT_ROOT / folder).rglob("*")

@@ -265,10 +265,11 @@ def build(destination, make_zip=True):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--no-zip', action='store_true')
-    parser.add_argument('--destination', default=str(ROOT/'dist/MonoPlanner-1.0.0'))
-    args = parser.parse_args()
     import sys
     sys.path.insert(0, str(ROOT))
+    from agent.version import VERSION
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--no-zip', action='store_true')
+    parser.add_argument('--destination', default=str(ROOT/f'dist/MonoPlanner-{VERSION}'))
+    args = parser.parse_args()
     build(Path(args.destination), not args.no_zip)
