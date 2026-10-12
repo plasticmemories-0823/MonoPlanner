@@ -1,2 +1,9 @@
+-c requirements.lock
 -r requirements.txt
-langgraph-cli[inmem]>=0.4,<0.5
+langgraph==1.2.14
+langgraph-sdk==0.4.6
+langgraph-api==0.15.4
+langgraph-cli==0.4.33
+langgraph-runtime-inmem==0.35.4
+starlette==1.7.0
+uvicorn==0.54.0

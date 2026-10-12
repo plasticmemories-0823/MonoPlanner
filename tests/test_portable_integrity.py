@@ -1,10 +1,12 @@
 """The distributed tree must contain every input required to start a task."""
 import ast
+import json
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.settings import PROJECT_ROOT
 from agent.storage.recovery import code_key
@@ -52,3 +54,56 @@ class PortableIntegrityTests(unittest.TestCase):
                              exclude={'MonoPlanner.Sandbox.exe', 'MonoPlanner.Sandbox.exe.config'})
             self.assertEqual({p.name for p in target.iterdir()},
                              {'MonoPlanner.FilePicker.exe', 'MonoPlanner.Applications.exe'})
+
+    def test_python_runtime_only_ships_locked_dependencies(self):
+        spec = spec_from_file_location('portable_build', PROJECT_ROOT/'scripts/build-portable.py')
+        module = module_from_spec(spec); spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root/'requirements.lock').write_text('product==1.0\n')
+            driver = root/'resources/drivers/sitecustomize.py'
+            driver.parent.mkdir(parents=True); driver.write_text('# fixed driver\n')
+            source, output = root/'runtime', root/'package'
+            packages = source/'Lib/site-packages'
+            packages.mkdir(parents=True)
+            (source/'python.exe').write_bytes(b'fixed interpreter')
+            for name in ('product', 'pytest'):
+                metadata = packages/(name+'-1.0.dist-info'); metadata.mkdir()
+                (metadata/'METADATA').write_text('Name: '+name+'\nVersion: 1.0\n')
+                (packages/(name+'.py')).write_text('# '+name+'\n')
+                (metadata/'RECORD').write_text(name+'.py,,\n'+metadata.name+'/METADATA,,\n'+metadata.name+'/RECORD,,\n')
+            with patch.object(module, 'ROOT', root):
+                self.assertEqual(module.copy_python_runtime(source, output), {'product'})
+                self.assertTrue((output/'Lib/site-packages/product.py').is_file())
+                self.assertFalse((output/'Lib/site-packages/pytest.py').exists())
+                self.assertFalse((output/'Lib/site-packages/pytest-1.0.dist-info').exists())
+                self.assertEqual((output/'Lib/site-packages/sitecustomize.py').read_bytes(), driver.read_bytes())
+                (root/'requirements.lock').write_text('product==2.0\n')
+                with self.assertRaisesRegex(ValueError, 'differs from lock'):
+                    module.copy_python_runtime(source, root/'stale')
+
+    def test_existing_package_directory_is_never_reused(self):
+        spec = spec_from_file_location('portable_build', PROJECT_ROOT/'scripts/build-portable.py')
+        module = module_from_spec(spec); spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            target = root/'dist/MonoPlanner-old'; target.mkdir(parents=True)
+            sentinel = target/'old.txt'; sentinel.write_text('preserve')
+            with patch.object(module, 'ROOT', root), self.assertRaisesRegex(ValueError, 'never reused'):
+                module.build(target)
+            self.assertEqual(sentinel.read_text(), 'preserve')
+
+    def test_generated_frontend_metadata_does_not_disclose_build_paths(self):
+        spec = spec_from_file_location('portable_build', PROJECT_ROOT/'scripts/build-portable.py')
+        module = module_from_spec(spec); spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); (root/'.next').mkdir()
+            config = {'repoRoot': 'private-build-path', 'outputFileTracingRoot': 'private-build-path',
+                      'turbopack': {'root': 'private-build-path'}, 'poweredByHeader': False}
+            (root/'server.js').write_text("const hostname = process.env.HOSTNAME || '0.0.0.0'\nconst nextConfig = "+json.dumps(config)+"\nprocess.env.__NEXT_PRIVATE_STANDALONE_CONFIG = JSON.stringify(nextConfig)\n")
+            (root/'.next/required-server-files.json').write_text(json.dumps({'config': config, 'appDir': 'private-build-path', 'relativeAppDir': '.'}))
+            module.sanitize_frontend_metadata(root)
+            self.assertNotIn('private-build-path', (root/'server.js').read_text())
+            self.assertNotIn('private-build-path', (root/'.next/required-server-files.json').read_text())
+            self.assertIn("const hostname = '127.0.0.1'", (root/'server.js').read_text())
+            self.assertIn('nextConfig.turbopack.root = dir', (root/'server.js').read_text())

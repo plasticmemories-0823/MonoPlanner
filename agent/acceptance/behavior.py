@@ -20,7 +20,6 @@ def declaration_only(code):
 
 def run_behavior_contract(owner, phase, report, started):
     """Only real compiler/consumer results can mark this contract as passed."""
-    from agent.execution.local import LocalEnvironment
     directory = owner.artifact_dir / (phase + '.artifacts')
     try:
         if not owner._unchanged():
@@ -28,7 +27,7 @@ def run_behavior_contract(owner, phase, report, started):
         remaining = owner.timeout - (time.monotonic() - started)
         if remaining <= 0 or not owner.artifact_checks:
             raise RuntimeError('No time or no declared behavior checks remain')
-        backend = owner.environment or LocalEnvironment(owner.repo_root, artifact_root=owner.artifact_dir)
+        backend = owner.environment
         rows = run_artifact_checks(owner.artifact_checks, backend, directory, remaining)
         ids = tuple(sorted(row['id'] for row in rows))
         if owner._test_ids is not None and ids != owner._test_ids:

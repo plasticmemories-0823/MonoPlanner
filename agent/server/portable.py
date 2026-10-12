@@ -1,4 +1,4 @@
-"""Start the bundled server with all mutable storage outside the application."""
+"""Start the local server with all mutable storage outside the application."""
 import json
 import os
 import sys

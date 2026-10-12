@@ -1,5 +1,3 @@
-$ErrorActionPreference = 'Stop'
-$taskProject = Split-Path -Parent $PSScriptRoot
-Set-Location -LiteralPath "$taskProject/web"
-& pnpm dev --hostname 127.0.0.1 --port 3000
+# Start the authenticated local frontend/backend pair together.
+& (Join-Path $PSScriptRoot 'start-app.ps1') -NoBrowser @args
 exit $LASTEXITCODE

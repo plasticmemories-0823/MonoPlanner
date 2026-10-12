@@ -52,7 +52,7 @@ def discover(refresh=False):
             helper = PROJECT_ROOT/'launcher/runtime/MonoPlanner.Applications.exe'
             if helper.is_file():
                 response = subprocess.run([str(helper), 'list'], capture_output=True, encoding='utf-8',
-                                          timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+                                          timeout=15, creationflags=subprocess.CREATE_NO_WINDOW, env=_launch_environment())
                 if response.returncode == 0:
                     found.extend(json.loads(response.stdout))
             notepad = Path(os.environ['SystemRoot'])/'System32/notepad.exe'

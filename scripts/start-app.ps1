@@ -34,7 +34,10 @@ function Test-ProjectProcess([int]$ProcessId) {
 }
 
 function Get-ServiceText([int]$Port, [string]$Suffix) {
-    $taskResponse = $taskClient.GetAsync("http://127.0.0.1:$Port$Suffix").GetAwaiter().GetResult()
+    $taskRequest = New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Get, "http://127.0.0.1:$Port$Suffix")
+    if ($Port -eq $BackendPort) { $null = $taskRequest.Headers.TryAddWithoutValidation('X-MonoPlanner-Service', $env:MONOPLANER_SERVICE_TOKEN) }
+    try { $taskResponse = $taskClient.SendAsync($taskRequest).GetAwaiter().GetResult() }
+    finally { $taskRequest.Dispose() }
     try {
         if (-not $taskResponse.IsSuccessStatusCode) { throw "HTTP $([int]$taskResponse.StatusCode): $Suffix" }
         return $taskResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
@@ -45,11 +48,11 @@ function Test-Ready([string]$Kind, [int]$Port) {
     try {
         if ($Kind -eq 'backend') {
             $taskValue = (Get-ServiceText $Port '/service') | ConvertFrom-Json
-            return $taskValue.product -eq 'MonoPlanner' -and $taskValue.project -eq $taskExpected.project -and
+            return $taskValue.product -eq 'MonoPlanner' -and  $taskValue.project_id -eq $taskExpected.project_id -and $taskValue.version -eq $taskExpected.version -and
                    $taskValue.source_hash -eq $taskExpected.source_hash
         }
         $taskBody = Get-ServiceText $Port '/'
-        if ($taskBody -notmatch '<title>MonoPlan[n]?er(?: V0.9)?</title>') { return $false }
+        if ($taskBody -notmatch '<title>MonoPlanner 1\.0</title>') { return $false }
         $taskScriptPattern = '<script[^>]+src="(/_next/static/[^"?]+(?:\?[^" ]*)?)"'
         $taskScripts = @([regex]::Matches($taskBody, $taskScriptPattern) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
         if ($taskScripts.Count -eq 0) { return $false }
@@ -66,7 +69,7 @@ function Test-Ready([string]$Kind, [int]$Port) {
 function Assert-BackendIdle {
     if (@(Get-Listener $BackendPort).Count -eq 0) { return }
     try {
-        $taskQueue = ((Get-ServiceText $BackendPort '/metrics?format=json') | ConvertFrom-Json).queue
+        $taskQueue = ((Get-ServiceText $BackendPort '/service/status') | ConvertFrom-Json).queue
         if ($null -eq $taskQueue -or $null -eq $taskQueue.n_running -or $null -eq $taskQueue.n_pending) { throw '任务状态不完整' }
     } catch { throw '无法确认任务是否已停止；未关闭服务。请先在工作界面中暂停任务，再尝试重启或退出。' }
     if ($taskQueue.n_running -gt 0 -or $taskQueue.n_pending -gt 0) {
@@ -130,7 +133,7 @@ try {
     if (-not $taskLockHeld) { throw '另一个启动器仍在启动服务，请稍后再试。' }
     $taskRunLogs = Join-Path $taskLogs ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
     New-Item -ItemType Directory -Path $taskRunLogs | Out-Null
-    $taskBackend = Join-Path $taskProject '.venv-web/Scripts/langgraph.exe'
+    $taskBackend = Join-Path $taskProject '.venv-web/Scripts/python.exe'
     $taskNext = Join-Path $taskProject 'web/node_modules/next/dist/bin/next'
     $taskNode = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($taskPortable) {
@@ -139,12 +142,41 @@ try {
         $taskBackend = Join-Path $taskProject 'launcher/runtime/python/python.exe'
         $taskNext = Join-Path $taskProject 'web/server.js'
         $taskNode = @{Source=(Join-Path $taskProject 'launcher/runtime/node/node.exe')}
-        $env:MONOPLANER_STATE_DIR = Join-Path $taskData 'state'
+        if (-not $env:MONOPLANER_STATE_DIR) { $env:MONOPLANER_STATE_DIR = Join-Path $taskData 'state' }
         $env:MONOPLANER_BACKEND_PORT = "$BackendPort"
         $env:MONOPLANER_UI_PORT = "$FrontendPort"
         $env:PATH = (Join-Path $taskProject 'launcher/runtime/git/cmd')+';'+(Join-Path $taskProject 'launcher/runtime/node')+$taskDockerPath+';'+(Join-Path $env:WINDIR 'System32')
         $env:PORT = "$FrontendPort"
         $env:HOSTNAME = '127.0.0.1'
+    }
+    # Current-user encrypted instance credential; never pass it in a command line or URL.
+    Add-Type -AssemblyName System.Security
+    $taskAccessDirectory = Join-Path $taskData 'service-access'
+    New-Item -ItemType Directory -Path $taskAccessDirectory -Force | Out-Null
+    $taskAccessFile = Join-Path $taskAccessDirectory "$taskKey-$BackendPort-$FrontendPort.dpapi"
+    if (Test-Path -LiteralPath $taskAccessFile) {
+        $taskPlain = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($taskAccessFile), $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)
+        $env:MONOPLANER_SERVICE_TOKEN = [Text.Encoding]::UTF8.GetString($taskPlain)
+        [Array]::Clear($taskPlain, 0, $taskPlain.Length)
+    } else {
+        $taskRandom = New-Object byte[] 32
+        $taskGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $taskGenerator.GetBytes($taskRandom) } finally { $taskGenerator.Dispose() }
+        $env:MONOPLANER_SERVICE_TOKEN = [Convert]::ToBase64String($taskRandom)
+        $taskProtected = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($env:MONOPLANER_SERVICE_TOKEN), $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)
+        [IO.File]::WriteAllBytes($taskAccessFile, $taskProtected)
+        [Array]::Clear($taskRandom, 0, $taskRandom.Length)
+    }
+    $env:MONOPLANER_BACKEND_PORT = "$BackendPort"
+    $env:MONOPLANER_UI_PORT = "$FrontendPort"
+    $env:LANGGRAPH_CLI_NO_ANALYTICS = '1'
+    $env:LANGGRAPH_NO_VERSION_CHECK = '1'
+    $env:NEXT_TELEMETRY_DISABLED = '1'
+    $env:OTEL_SDK_DISABLED = 'true'
+    $env:LANGCHAIN_TRACING_V2 = 'false'
+    $env:LANGSMITH_TRACING = 'false'
+    foreach ($taskCloudVariable in @('LANGSMITH_API_KEY','LANGCHAIN_API_KEY','LANGSMITH_ENDPOINT','LANGCHAIN_ENDPOINT')) {
+        [Environment]::SetEnvironmentVariable($taskCloudVariable, $null, 'Process')
     }
     Add-Type -AssemblyName System.Net.Http
     $taskHandler = New-Object Net.Http.HttpClientHandler
@@ -166,7 +198,7 @@ try {
         $taskFrontendPids = @()
         $taskBackendPids = @()
     }
-    if (-not (Test-Path -LiteralPath $taskBackend)) { throw '未找到 .venv-web/Scripts/langgraph.exe；请按 README 安装后端依赖。' }
+    if (-not (Test-Path -LiteralPath $taskBackend)) { throw '未找到后端 Python 运行时；请按 README 安装后端依赖。' }
     if (-not $taskNode -or -not (Test-Path -LiteralPath $taskNext)) { throw '未找到 Node.js 或前端依赖；请按 README 完成安装。' }
     $taskPython = if ($taskPortable) { $taskBackend } else { Join-Path $taskProject '.venv-web/Scripts/python.exe' }
     $taskExpected = (& $taskPython -B -X utf8 (Join-Path $taskProject 'agent/server/service.py')) | ConvertFrom-Json
@@ -184,14 +216,30 @@ try {
     $taskBackendProcess = $null
     $taskFrontendProcess = $null
     if ($taskBackendPids.Count -eq 0) {
-        $taskArguments = if ($taskPortable) { @('-B','-X','utf8','-m','agent.server.portable') } else { @('dev','--host','127.0.0.1','--port',"$BackendPort",'--no-browser','--no-reload') }
+        # Both distributions keep framework storage in their selected state directory.
+        $taskArguments = @('-B','-X','utf8','-m','agent.server.portable')
         $taskBackendProcess = Start-ServiceProcess $taskBackend $taskArguments $taskProject 'backend'
     }
     Wait-Service 'backend' $BackendPort $taskBackendProcess
     $taskMode = if ($taskPortable) { 'portable' } elseif (Test-Path -LiteralPath (Join-Path $taskProject 'web/.next/BUILD_ID')) { 'start' } else { 'dev' }
     if ($taskFrontendPids.Count -eq 0) {
         $taskArguments = if ($taskPortable) { @($taskNext) } else { @($taskNext,$taskMode,'--hostname','127.0.0.1','--port',"$FrontendPort") }
-        $taskFrontendProcess = Start-ServiceProcess $taskNode.Source $taskArguments (Join-Path $taskProject 'web') 'frontend'
+        # The frontend receives neither model credentials nor ambient proxy/Node flags.
+        # Its authenticated backend requests must stay on the fixed loopback connection.
+        $taskFrontendVariables = @('DEEPSEEK_API_KEY','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY',
+                                   'NODE_USE_ENV_PROXY','NODE_OPTIONS')
+        $taskFrontendEnvironment = @{}
+        try {
+            foreach ($taskVariable in $taskFrontendVariables) {
+                $taskFrontendEnvironment[$taskVariable] = [Environment]::GetEnvironmentVariable($taskVariable, 'Process')
+                [Environment]::SetEnvironmentVariable($taskVariable, $null, 'Process')
+            }
+            $taskFrontendProcess = Start-ServiceProcess $taskNode.Source $taskArguments (Join-Path $taskProject 'web') 'frontend'
+        } finally {
+            foreach ($taskVariable in $taskFrontendVariables) {
+                [Environment]::SetEnvironmentVariable($taskVariable, $taskFrontendEnvironment[$taskVariable], 'Process')
+            }
+        }
     }
     Wait-Service 'frontend' $FrontendPort $taskFrontendProcess
     $taskResult = @{ project = $taskProject; url = "http://127.0.0.1:$FrontendPort/"; frontend_mode = $taskMode;

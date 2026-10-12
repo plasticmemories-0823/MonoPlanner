@@ -1,4 +1,6 @@
 """Small local workspace endpoint mounted by the official Agent Server."""
+from starlette.middleware import Middleware
+from agent.server.access import InstanceAccess, service_headers
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -31,6 +33,19 @@ LOADED_SERVICE = service_identity()
 
 async def service(request: Request):
     return JSONResponse(LOADED_SERVICE, headers={'Cache-Control': 'no-store'})
+
+
+async def service_status(request: Request):
+    # Minimal lifecycle state; metrics and internal diagnostics stay disabled.
+    try:
+        from langgraph_runtime.database import connect
+        from langgraph_runtime.ops import Runs
+        async with connect() as connection:
+            queue = await Runs.stats(connection)
+        return JSONResponse({'queue': {k: queue[k] for k in ('n_running', 'n_pending')}},
+                            headers={'Cache-Control': 'no-store'})
+    except Exception:
+        return JSONResponse({'error': 'Cannot confirm whether tasks are idle'}, status_code=503)
 
 
 def workspace_value(value=None):
@@ -183,7 +198,11 @@ async def purge(request: Request):
         thread = ConversationStore.thread(request.path_params['thread'])
         if value != {'confirm_thread_id': thread}:
             raise ValueError('彻底删除须明确确认当前对话编号。')
-        client = get_client(url=None, api_key=None)
+        # The in-process SDK still passes through the instance access gate.
+        # Preserve authentication without opening a network connection.
+        client = get_client(url=None, api_key=None, headers={
+            **service_headers(), 'Host': '127.0.0.1:' + os.getenv('MONOPLANER_BACKEND_PORT', '2024'),
+        })
         try:
             try:
                 record = await client.threads.get(thread)
@@ -235,7 +254,7 @@ async def settings(request: Request):
         return JSONResponse({'error': str(exc)}, status_code=400, headers={'Cache-Control': 'no-store'})
 
 
-app = Starlette(lifespan=lifespan, routes=[*desktop_routes, Route('/service', service, methods=['GET']),
+app = Starlette(lifespan=lifespan, middleware=[Middleware(InstanceAccess)], routes=[*desktop_routes, Route('/service', service, methods=['GET']), Route('/service/status', service_status, methods=['GET']),
                        Route('/execution/images', execution_images, methods=['GET']),
                        Route('/workspace/execution', project_execution, methods=['GET', 'POST']),
                        Route('/workspace', workspace, methods=['GET', 'POST']),

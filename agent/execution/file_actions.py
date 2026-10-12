@@ -8,7 +8,7 @@ import shutil
 
 from agent.settings import PROJECT_ROOT
 from agent.source.snapshots import _link, _reason, _inspect_file
-from agent.storage.preferences import state_root
+from agent.storage.preferences import state_root, private_path
 
 
 def target_path(value, *, missing=False, readonly=False):
@@ -20,6 +20,8 @@ def target_path(value, *, missing=False, readonly=False):
         if part.exists() and _link(part):
             raise ValueError('目标不能经过链接或 Windows 重解析点')
     path = path.resolve()
+    if private_path(path):
+        raise ValueError('不能操作助手私有记录或凭据')
     protected = [state_root()] + ([] if readonly else [PROJECT_ROOT])
     protected.extend(Path(os.environ[n]) for n in ('SystemRoot', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramData') if n in os.environ)
     if any(path.is_relative_to(p.resolve()) for p in protected):

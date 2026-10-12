@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import httpx
 from langchain_core.messages import HumanMessage
-from starlette.testclient import TestClient
+from tests.http_client import TestClient
 
 from agent.storage.preferences import DEFAULTS, Preferences, protect
 from agent.model.client import create_model

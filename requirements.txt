@@ -1,5 +1,6 @@
-langchain-core
-langgraph>=1.2,<2
-langchain-deepseek
-python-dotenv
-httpx[socks]>=0.28,<0.29
+-c requirements.lock
+langchain-deepseek==1.1.1
+langchain-core==1.6.9
+python-dotenv==1.2.4
+httpx==0.28.1
+socksio==1.0.0

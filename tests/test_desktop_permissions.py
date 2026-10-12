@@ -5,7 +5,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from starlette.testclient import TestClient
+from tests.http_client import TestClient
 from agent.execution.desktop import DesktopStore, applications
 from agent.server.desktop import routes
 from agent.storage.permissions import Permissions

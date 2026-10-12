@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import httpx
 
 from langchain_core.messages import AIMessage, HumanMessage
-from starlette.testclient import TestClient
+from tests.http_client import TestClient
 
 from agent.model.client import ConfiguredModel
 from agent.server import titles

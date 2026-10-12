@@ -31,8 +31,8 @@ def authorized_sources(values):
                 or item['kind'] not in {'file', 'directory'} or not isinstance(item['path'], str)):
             raise ValueError('资料须包含 path 和 kind（file 或 directory）')
         path = Path(item['path']).expanduser()
-        from agent.storage.preferences import state_root
-        if path.resolve().is_relative_to(state_root().resolve()):
+        from agent.storage.preferences import private_path
+        if private_path(path):
             raise ValueError('不能授权助手私有记录目录')
         if not path.is_absolute() or '..' in path.parts or ':' in str(path)[2:]:
             raise ValueError('资料必须使用明确的已有绝对路径')
@@ -71,8 +71,8 @@ class AssistantFiles:
             path = self.workspace / path
         if '..' in path.parts:
             raise ValueError('路径不能包含 ..')
-        from agent.storage.preferences import state_root
-        if path.resolve().is_relative_to(state_root().resolve()):
+        from agent.storage.preferences import private_path
+        if private_path(path):
             raise ValueError('不读取助手私有记录')
         if ':' in str(path)[2:]:
             raise ValueError('不读取备用数据流或特殊设备路径')

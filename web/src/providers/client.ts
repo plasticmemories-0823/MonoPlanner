@@ -1,17 +1,7 @@
 import { Client } from "@langchain/langgraph-sdk";
+import { localApiUrl } from "@/lib/local-service";
 
-export function createClient(
-  apiUrl: string,
-  apiKey: string | undefined,
-  authScheme: string | undefined,
-) {
-  return new Client({
-    apiKey,
-    apiUrl,
-    ...(authScheme && {
-      defaultHeaders: {
-        "X-Auth-Scheme": authScheme,
-      },
-    }),
-  });
+export function createClient(apiUrl = localApiUrl()) {
+  if (apiUrl !== localApiUrl()) throw new Error("Only the local MonoPlanner service is supported");
+  return new Client({ apiUrl });
 }

@@ -1,3 +1,4 @@
+from agent.execution.local import LocalEnvironment
 import json
 import os
 from pathlib import Path
@@ -32,7 +33,7 @@ class VerificationTests(unittest.TestCase):
     def runner(self, *, code=None, command=None, timeout=120):
         spec = VerificationSpec(("满足可验证的行为要求",), command=command,
                                 test_code=acceptance_code() if code is None and command is None else code)
-        return AcceptanceRun(self.repo, spec, self.artifacts, timeout)
+        return AcceptanceRun(self.repo, spec, self.artifacts, timeout, environment=LocalEnvironment(self.repo, artifact_root=self.artifacts))
 
     def test_generated_tests_pass_and_save_evidence(self):
         runner = self.runner()

@@ -105,6 +105,15 @@ class ProjectDockerTests(unittest.TestCase):
         self.assertNotIn('cmd.exe', model.calls[0][0].content)
         self.assertNotIn('Unix commands and heredocs are not available', model.calls[0][0].content)
 
+    def test_private_launcher_credentials_cannot_be_mounted_even_with_custom_state(self):
+        data = self.root/'local/MonoPlanner'
+        data.mkdir(parents=True)
+        with patch.dict(os.environ, {'LOCALAPPDATA': str(data.parent)}):
+            for repo in (data, data.parent, data/'inside'):
+                repo.mkdir(exist_ok=True)
+                with self.subTest(repo=repo), self.assertRaises(ValueError):
+                    TaskDocker(repo, self.image, self.root/'state/tasks/private', runtime=self.runtime)
+
     def test_missing_image_preserves_first_work_response_and_waits(self):
         from test_web_graph import ConversationTests, ScriptedModel, start_reply, investigation
         fixture = ConversationTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
@@ -133,7 +142,7 @@ class ProjectDockerTests(unittest.TestCase):
                     fixture.doCleanups()
 
     def test_environment_routes_do_not_start_containers_or_accept_foreign_origin(self):
-        from starlette.testclient import TestClient
+        from tests.http_client import TestClient
         from agent.server.app import app
         with TestClient(app) as client, patch('agent.server.app.local_images', return_value={'images': []}), \
                 patch.object(TaskDocker, 'start', side_effect=AssertionError('settings cannot execute')):

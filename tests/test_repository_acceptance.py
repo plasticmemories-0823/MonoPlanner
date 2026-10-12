@@ -1,3 +1,4 @@
+from agent.execution.local import LocalEnvironment
 """Repository setup and native result classes survive generated acceptance."""
 import importlib.util
 import json
@@ -44,7 +45,7 @@ class RepositoryAcceptanceTests(unittest.TestCase):
     def runner(self, code=None, driver=None):
         spec = VerificationSpec(("public behavior",), test_code=self.code if code is None else code,
                                 test_driver=["run_selected.py", "{test_module}"] if driver is None else driver)
-        return AcceptanceRun(self.repo, spec, self.root / "runs")
+        return AcceptanceRun(self.repo, spec, self.root / "runs", environment=LocalEnvironment(self.repo, artifact_root=self.root / "runs"))
 
     def test_native_database_configuration_and_result_class_are_used(self):
         runner = self.runner()

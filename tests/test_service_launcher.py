@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 
-from starlette.testclient import TestClient
+from tests.http_client import TestClient
 from unittest.mock import patch
 from agent.server.app import app
 from agent.server.service import service_identity
@@ -32,7 +32,7 @@ class ServiceIdentityTests(unittest.TestCase):
             value = client.get('/service')
             self.assertEqual(value.status_code, 200)
             self.assertEqual(value.headers['cache-control'], 'no-store')
-            self.assertEqual(set(value.json()), {'product', 'project', 'source_hash'})
+            self.assertEqual(set(value.json()), {'product', 'project_id', 'version', 'source_hash'})
             self.assertEqual(value.json()['product'], 'MonoPlanner')
             self.assertEqual(len(value.json()['source_hash']), 64)
         with tempfile.TemporaryDirectory() as folder:

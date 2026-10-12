@@ -5,6 +5,10 @@ from pathlib import Path
 
 
 PROJECT = Path(__file__).resolve().parents[2]
+import sys
+if not __package__:
+    sys.path.insert(0, str(PROJECT))
+from agent.version import VERSION
 
 
 def service_identity(root=PROJECT):
@@ -17,7 +21,7 @@ def service_identity(root=PROJECT):
         if '__pycache__' not in file.parts and file.is_file():
             digest.update(file.relative_to(root).as_posix().encode())
             digest.update(b'\0' + file.read_bytes() + b'\0')
-    return {'product': 'MonoPlanner', 'project': str(root),
+    return {'product': 'MonoPlanner', 'version': VERSION, 'project_id': hashlib.sha256(str(root).lower().encode()).hexdigest(),
             'source_hash': digest.hexdigest()}
 
 

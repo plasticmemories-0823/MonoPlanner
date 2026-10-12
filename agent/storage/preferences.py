@@ -14,6 +14,14 @@ def state_root():
     return Path(os.getenv('MONOPLANER_STATE_DIR', Path.home()/'.local/state/monoplaner')).resolve()
 
 
+def private_path(path):
+    """Application state and launcher credentials never become model materials."""
+    roots = [state_root()]
+    if os.getenv('LOCALAPPDATA'):
+        roots.append(Path(os.environ['LOCALAPPDATA'])/'MonoPlanner')
+    return any(Path(path).resolve().is_relative_to(root.resolve()) for root in roots)
+
+
 def protect(value, *, decrypt=False):
     if os.name != 'nt':
         raise ValueError('持久保存密钥需要 Windows DPAPI；其他系统请使用环境变量')

@@ -22,9 +22,9 @@
 
 ## 开发启动
 
-从项目根目录运行 `scripts/start-server.ps1` 和 `scripts/start-web.ps1`。后端默认不热重载；改动后正常停止并重新启动。前端可在 `web/` 中运行 `pnpm dev` 使用开发模式。
+从项目根目录运行 `scripts/start-app.ps1 -NoBrowser`。启动器同时启动受认证保护的前后端；后端不热重载。使用 `-BackendPort` 与 `-FrontendPort` 设置独立验证端口。不要替换正在运行的任务源码。
 
-默认后端地址为 `http://127.0.0.1:2024`，图 ID 为 `monoplaner`。自定义前端连接设置见 `web/.env.example`；改端口时同步后端 CORS。不要将 DeepSeek 密钥放入 `NEXT_PUBLIC_*` 环境变量。
+浏览器固定通过同源 `/api` 访问后端，图 ID `monoplaner` 为兼容保留。后端凭证由启动器生成并用 DPAPI 保存；不设置 `NEXT_PUBLIC_API_URL` 或浏览器服务密钥。开发独立服务必须设置相同的实例凭证及端口，并使用本机代理入口；不要在 URL 或日志中放置凭证。
 
 ## CLI 与独立任务
 
@@ -41,7 +41,7 @@
 ## 验证与评测
 
 ```powershell
-.\.venv-web\Scripts\python.exe -B -X utf8 -m unittest discover -s tests -v
+.\.venv-web\Scripts\python.exe -B -X utf8 -m pytest tests -q
 pnpm --dir web build
 .\.venv-web\Scripts\python.exe -B -X utf8 -m eval.swebench_runner --help
 .\.venv-web\Scripts\python.exe -B -X utf8 -m eval.analysis.summary --help
@@ -59,31 +59,18 @@ pnpm --dir web build
 - 零用例、新增跳过、加载失败、不完整结果、超时和真实失败不能算通过。验收修订继续走证据与源码版本对照。
 - 完整历史只追加，压缩只替换请求视图；摘要不批准执行或覆盖真实失败。当前压缩阈值约 80 万输入 Token。
 - 编码、验收、调查程序和已有任务运行统一使用 Docker；调查强制只读、无网。完全权限只影响本机文件操作和外部打开，由用户按对话开启，不改变工具表。
-- `list_applications`、`open_file`、`launch_application` 属于聊天工具；外部打开的精确目标需要一次性用户授权，不能当成代码执行绕过沙盒。
+- `list_applications`、`open_file`、`launch_application` 属于聊天工具；风险询问模式的外部打开需一次性批准，沙盒模式禁止外部启动。不能把打开文档当成代码执行来绕过沙盒。
+
+## 便携打包
+
+先构建前端与 EXE，在 `launcher/runtime/` 准备第三方说明中的固定运行时。Python 分发必须与 `requirements.lock` 一致，打包只复制生产依赖；开发环境中的 pytest、pip 等不会进入分发。
+
+从 Git for Windows 的官方 `v2.53.0.windows.2` Release 下载 `mingw-w64-git-2.52.0.1-1.src.tar.gz`，并从同一 Git 标签下载 ZIP 源码，命名为 `git-v2.53.0.windows.2.zip`，放入 `launcher/runtime/sources/`。脚本核对固定哈希并将其与许可一起分发。
+
+运行 `scripts/build-portable.py` 生成新目录及 ZIP。已有目录或同版本 ZIP 会被拒绝，不能覆盖混合。最终核对清单、源码指纹、依赖许可和新解压目录启动结果；不要把应用测试现场、个人资料或密钥复制进包。
 
 ## 回退与记录
 
 变更前保留 Git 回退点和验证记录。旧任务按各自源码指纹使用冻结版本恢复，不迁移检查点，不重放已完成操作；结果不明的请求或写入不自动重试。
 
 历史基线、验证数据和停止现场保留在 `validation/`，每次验证使用独立目录。产品 README 不承担实验日志或成绩汇总。
-
-## 面试时优先掌握的代码
-
-先沿着“一条用户消息怎样走到真实验收结果”阅读，不需要逐行背下界面组件、打包脚本或全部回归测试。以下 12 个文件合计 2,669 行，含注释和正常空行；这是主链路阅读范围，并非全部功能的实现行数。
-
-| 阅读顺序 | 文件 | 需要能解释的问题 | 行数 |
-|---|---|---|---:|
-| 会话与开工 | `agent/server/graph.py`、`agent/server/runtime.py` | 如何区分聊天与工作，如何接入暂停和补充要求 | 715 |
-| 编码循环 | `agent/task/runner.py`、`operations.py`、`contracts.py` | 如何接收计划、逐步执行、保存游标和返工 | 648 |
-| 模型接口 | `agent/model/client.py`、`tools.py`、`payload.py` | 工具 Schema 如何固定，代码与思考续接如何原样保存 | 353 |
-| 操作执行 | `agent/execution/executor.py` | 读取、搜索和执行怎样按明确参数路由 | 207 |
-| 验收 | `agent/acceptance/runner.py`、`revisions.py` | 如何冻结验收，为什么真实失败不能被文字判断覆盖 | 558 |
-| 恢复 | `agent/storage/recovery.py` | 怎样校验原件和版本，为什么结果不明时不重放 | 188 |
-
-再阅读 `agent/model/compaction.py`、`agent/storage/history.py`、`agent/execution/docker.py` 和 `agent/source/snapshots.py`，补齐压缩、历史完整性、容器隔离和源码快照原理。这两轮合计约 3,900 行。前端能解释消息合并、实时活动、会话列表和后端通信即可；无需掌握每个 UI 组件的细节。
-
-回归测试保留在 `tests/`，产品运行不加载。面试准备时按主题挑选示例：工具参数拒收、真实验收失败、暂停恢复、消息不消失；不需要逐行阅读整套测试。
-
-桌面入口为 `launcher/Program.cs`，嵌入式工作窗口为 `launcher/DesktopWindow.cs`，重新生成使用 `scripts/build-launcher.ps1`。WebView2 SDK 固定为 1.0.4258.31，下载校验与本地准备在 `scripts/prepare-desktop.ps1`；运行依赖及其许可位于 `launcher/runtime/`。SDK 首次准备需要网络，之后可离线构建。启动与关闭不发起模型调用；活动或未知任务会阻止关闭服务。前端来源与许可保留在 `web/UPSTREAM.md` 和 `web/LICENSE`。
-
-文件选择和应用识别组件由 `scripts/build-helpers.ps1` 构建。当前产品不使用 Windows LPAC 执行后端，打包也不要求其组件；编码、调查、验收及已有脚本运行统一使用 Docker。

@@ -63,7 +63,7 @@ def _reason(relative):
     if name == ".env" or name.startswith(".env."):
         return "environment_credentials"
     if (name in {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
-            or relative.suffix.lower() in {".pem", ".key", ".p12", ".pfx"}):
+            or relative.suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".dpapi"}):
         return "possible_private_key"
     if any(part in _DERIVED_DIRS for part in parts[:-1]):
         return "generated_directory"

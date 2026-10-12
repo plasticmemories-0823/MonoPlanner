@@ -130,7 +130,7 @@ export function useActivity(
 
 const ActivityRow = memo(function ActivityRow({ row }: { row: Activity }) {
   const [open, setOpen] = useState(false);
-  const [now, setNow] = useState(Date.now() / 1000);
+  const [now, setNow] = useState(() => Date.now() / 1000);
   const hasRunning = row.status === "running";
   useEffect(() => {
     if (!hasRunning) return;

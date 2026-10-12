@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from starlette.testclient import TestClient
+from tests.http_client import TestClient
 
 from agent.server.app import app
 from agent.server.workspaces import directory_page

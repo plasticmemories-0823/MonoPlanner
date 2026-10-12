@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import sys
 import tempfile
 import time
 from agent.acceptance import results
@@ -15,7 +14,7 @@ from agent.acceptance.artifact_checks import load_artifact_checks, run_artifact_
 from agent.acceptance.contracts import VerificationSpec, tests_ready_for_candidate
 from agent.acceptance.drivers import _BOOTSTRAP, _REPOSITORY_BOOTSTRAP
 from agent.acceptance.behavior import declaration_only, run_behavior_contract
-from agent.execution.process import log_excerpt, shell_arguments, stop_process
+from agent.execution.process import log_excerpt
 
 
 class AcceptanceRun:
@@ -29,6 +28,8 @@ class AcceptanceRun:
             raise ValueError(f"验收工作区不存在：{self.repo_root}")
         if timeout <= 0:
             raise ValueError("验收超时必须大于 0。")
+        if environment is None or not callable(getattr(environment, 'run_process', None)):
+            raise ValueError('An explicit execution backend is required; host fallback is disabled')
         self.spec = spec
         self.behavior_only = bool(spec.test_code and declaration_only(spec.test_code))
         self.artifact_checks = load_artifact_checks(spec.test_code, spec.required_consumer, spec.required_calls) if spec.test_code else []
@@ -82,8 +83,6 @@ class AcceptanceRun:
         except OSError:
             return False
 
-    _stop_process = staticmethod(stop_process)
-
     @staticmethod
     def _summary(path: Path):
         # 完整输出已直接写入文件；只把尾部放回 Agent 上下文。
@@ -126,13 +125,13 @@ class AcceptanceRun:
             process_finished = False
             try:
                 command = self.spec.command
-                backend = self.environment if hasattr(self.environment, "run_process") else None
-                map_path = backend.host_to_container if backend else str
+                backend = self.environment
+                map_path = backend.host_to_container
                 if command is None:
                     # -B 只阻止写缓存；独立目录同时避免读取仓库中的旧 .pyc。
                     cache_dir = tempfile.mkdtemp(prefix=f"{phase}.cache-", dir=self.artifact_dir)
                     command = [
-                        backend.python_executable if backend else sys.executable,
+                        backend.python_executable,
                         "-B", "-X", "utf8", "-X", f"pycache_prefix={map_path(cache_dir)}",
                         map_path(self.bootstrap_path), map_path(self.test_path),
                         map_path(self.repo_root), map_path(outcome_path),
@@ -140,33 +139,13 @@ class AcceptanceRun:
                     if self.spec.test_driver:
                         command[6] = map_path(self.repository_runner)
                         command.append(json.dumps(self.spec.test_driver))
-                options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP
-                            | subprocess.CREATE_NO_WINDOW} if os.name == "nt"
-                           else {"start_new_session": True})
-                if backend:
-                    outcome = backend.run_process(
-                        command, stdout_path=stdout_path, stderr_path=stderr_path,
-                        timeout=self.timeout, shell=self.spec.command is not None,
-                    )
-                    report["exit_code"] = outcome["exit_code"]
-                    timed_out = outcome["timed_out"]
-                    backend_error = outcome.get("error")
-                else:
-                    local_shell = self.spec.command is not None
-                    if local_shell:
-                        command, local_shell = shell_arguments(command)
-                    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
-                        process = subprocess.Popen(
-                            command, shell=local_shell,
-                            cwd=str(self.repo_root), stdout=stdout, stderr=stderr, **options,
-                        )
-                        timed_out, backend_error = False, None
-                        try:
-                            report["exit_code"] = process.wait(timeout=self.timeout)
-                        except subprocess.TimeoutExpired:
-                            self._stop_process(process)
-                            report["exit_code"] = process.returncode
-                            timed_out = True
+                outcome = backend.run_process(
+                    command, stdout_path=stdout_path, stderr_path=stderr_path,
+                    timeout=self.timeout, shell=self.spec.command is not None,
+                )
+                report["exit_code"] = outcome["exit_code"]
+                timed_out = outcome["timed_out"]
+                backend_error = outcome.get("error")
                 process_finished = True
                 if timed_out:
                     report["error_kind"] = "timeout"
@@ -192,8 +171,7 @@ class AcceptanceRun:
                     if self.spec.test_driver and report["test_evidence_valid"]:
                         self._repository_result(report, phase)
                     if self.artifact_checks and report["test_evidence_valid"]:
-                        from agent.execution.local import LocalEnvironment
-                        consumer_backend = backend or LocalEnvironment(self.repo_root, artifact_root=self.artifact_dir)
+                        consumer_backend = backend
                         remaining = self.timeout - (time.monotonic() - started)
                         if remaining <= 0:
                             raise RuntimeError('验收总时间已用完，尚未运行原始产物检查。')

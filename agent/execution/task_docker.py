@@ -1,5 +1,6 @@
 """An owned Docker container, with frozen runtime and filtered readonly materials."""
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -14,9 +15,12 @@ class TaskDocker(DockerEnvironment):
         super().__init__(repo, image, 'monoplanner-' + task_root.name,
                          artifact_root=task_root.parent.parent/'execution'/task_root.name,
                          runtime=runtime)
-        from agent.storage.preferences import state_root
+        from agent.storage.preferences import state_root, private_path
         from agent.settings import PROJECT_ROOT
-        if state_root().is_relative_to(self.repo_root) or task_root.is_relative_to(self.repo_root):
+        private_roots = [state_root(), task_root]
+        if os.getenv('LOCALAPPDATA'):
+            private_roots.append((Path(os.environ['LOCALAPPDATA'])/'MonoPlanner').resolve())
+        if private_path(self.repo_root) or any(root.is_relative_to(self.repo_root) for root in private_roots):
             raise ValueError('不能将助手私有记录目录挂入执行容器')
         if (PROJECT_ROOT/'.env').is_file() and (PROJECT_ROOT/'.env').is_relative_to(self.repo_root):
             raise ValueError('工作目录包含助手密钥文件，请使用不包含助手密钥的独立源码目录')

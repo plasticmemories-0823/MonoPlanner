@@ -1,15 +1,14 @@
 """Read-only web retrieval; search uses the same DeepSeek credential as dsh."""
-import ipaddress
 import json
 from html.parser import HTMLParser
-import socket
 import time
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 import httpx
 from langchain_core.messages import AIMessage, ToolMessage, message_to_dict
 
 from agent.model.network import model_http_clients
+from agent.execution.public_http import public_client, resolve_public
 from agent.settings import load_settings
 from agent.storage.records import save
 
@@ -22,12 +21,7 @@ class WebUnknown(RuntimeError):
 
 
 def public_url(url):
-    parsed = urlsplit(url)
-    if parsed.scheme not in {'http', 'https'} or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError('url must be a public HTTP(S) URL without credentials')
-    addresses = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80), type=socket.SOCK_STREAM)
-    if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
-        raise ValueError('Private, loopback and local-network pages are not permitted')
+    resolve_public(url)
     return url
 
 
@@ -136,12 +130,11 @@ class WebProvider:
         return search_sources(raw)
 
     def fetch(self, url, loop, folder):
-        clients = model_http_clients(min(30, loop.budget.remaining_time() or 30))
-        client = clients['http_client']
+        client = public_client(min(30, loop.budget.remaining_time() or 30))
         try:
             for _ in range(6):
                 public_url(url)
-                with client.stream('GET', url, follow_redirects=False, headers={'User-Agent': 'MonoPlaner/0.9'}) as response:
+                with client.stream('GET', url, follow_redirects=False, headers={'User-Agent': 'MonoPlanner/1.0'}) as response:
                     if response.is_redirect:
                         url = urljoin(url, response.headers['location'])
                         continue

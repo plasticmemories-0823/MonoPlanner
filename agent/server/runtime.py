@@ -128,7 +128,7 @@ class ConversationRunner(TaskRunner):
         self.rules += '\nWeb tools: ' + ('enabled' if self.runtime_settings.get('online') else 'disabled')
         if required_consumer(text):
             self.rules += ARTIFACT_RULES
-        self.state = {'engine': 'MonoPlaner V0.9', 'identity': self.identity, 'code_key': self.code_key,
+        self.state = {'engine': 'MonoPlanner 1.0', 'identity': self.identity, 'code_key': self.code_key,
             'request': text, 'repo': self.repo, 'acceptance': acceptance, 'verify_command': verify_command, 'runtime_settings': self.runtime_settings,
             'public_conversation': messages_to_dict(history),
             'rules': self.rules, 'history': messages_to_dict([*history, HumanMessage(content=text)]),

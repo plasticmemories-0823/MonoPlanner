@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage
 
 @pytest.fixture(autouse=True)
 def offline_conversation_service(tmp_path, monkeypatch):
+    monkeypatch.setenv('MONOPLANER_SERVICE_TOKEN', 'offline-instance-token-not-a-production-credential')
     if 'MONOPLANER_STATE_DIR' not in os.environ:
         monkeypatch.setenv('MONOPLANER_STATE_DIR', str(tmp_path / 'conversation-state'))
     from agent.server import titles

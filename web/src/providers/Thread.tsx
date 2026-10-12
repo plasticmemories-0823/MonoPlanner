@@ -1,8 +1,6 @@
 import { validate } from "uuid";
-import { getApiKey } from "@/lib/api-key";
-import { resolveApiUrl } from "@/lib/resolve-api-url";
+import { localApiUrl } from "@/lib/local-service";
 import { Thread } from "@langchain/langgraph-sdk";
-import { useQueryState } from "nuqs";
 import {
   createContext,
   useContext,
@@ -47,24 +45,14 @@ export function getThreadSearchMetadata(
 }
 
 export function ThreadProvider({ children }: { children: ReactNode }) {
-  const envApiUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:2024";
-  const envAssistantId: string | undefined =
-    process.env.NEXT_PUBLIC_ASSISTANT_ID || "monoplaner";
-  const envAuthScheme: string | undefined = process.env.NEXT_PUBLIC_AUTH_SCHEME;
-
-  const [apiUrl] = useQueryState("apiUrl", {
-    defaultValue: envApiUrl || "",
-  });
-  const [assistantId] = useQueryState("assistantId");
-  const [authScheme] = useQueryState("authScheme", {
-    defaultValue: envAuthScheme || "",
-  });
+  const apiUrl = localApiUrl();
+  const assistantId = "monoplaner";
   const [threads, setThreads] = useState<ManagedThread[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [threadsError, setThreadsError] = useState("");
   const [titleError, setTitleError] = useState("");
   const [titlePoll, setTitlePoll] = useState(0);
-  const scope = `${apiUrl}\0${assistantId || envAssistantId}\0${authScheme}`;
+  const scope = `${apiUrl}\0${assistantId}`;
   const activeScope = useRef(scope);
   activeScope.current = scope;
   const store = useRef(new ThreadHistoryStore());
@@ -92,19 +80,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const getThreads = useCallback(async (): Promise<ManagedThread[]> => {
-    const finalApiUrl = resolveApiUrl(apiUrl, envApiUrl);
-    const resolvedAssistantId = assistantId || envAssistantId;
+    const finalApiUrl = apiUrl;
+    const resolvedAssistantId = assistantId;
     if (!finalApiUrl || !resolvedAssistantId) return [];
     const expectedStore = store.current;
     expectedStore.retryTitles();
     const ticket = expectedStore.startRefresh();
     const version = ++request.current;
     setThreadsLoading(true);
-    const client = createClient(
-      finalApiUrl,
-      getApiKey(finalApiUrl) ?? undefined,
-      authScheme || undefined,
-    );
+    const client = createClient(finalApiUrl);
 
     try {
       const threads = await client.threads.search({
@@ -165,7 +149,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (activeScope.current === scope && request.current === version)
         setThreadsLoading(false);
     }
-  }, [apiUrl, envApiUrl, assistantId, authScheme, envAssistantId, scope]);
+  }, [apiUrl, assistantId, scope]);
 
   useEffect(() => {
     const expectedStore = store.current;
@@ -179,7 +163,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         // One lightweight watcher survives conversation selection changes.
         // It only reads display metadata, not SDK message histories.
         const response = await fetch(
-          `${resolveApiUrl(apiUrl, envApiUrl)}/conversations`,
+          `${apiUrl}/conversations`,
           {
             cache: "no-store",
             signal: controller.signal,
@@ -205,7 +189,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [scope, apiUrl, envApiUrl, titlePoll]);
+  }, [scope, apiUrl, titlePoll]);
 
   useEffect(() => {
     void getThreads();
@@ -222,7 +206,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const setVisibility = async (thread: string, visibility: Visibility) => {
     const response = await fetch(
-      `${resolveApiUrl(apiUrl, envApiUrl)}/threads/${thread}/visibility`,
+      `${apiUrl}/threads/${thread}/visibility`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -236,7 +220,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const deletePermanently = async (thread: string) => {
     const response = await fetch(
-      `${resolveApiUrl(apiUrl, envApiUrl)}/threads/${thread}/purge`,
+      `${apiUrl}/threads/${thread}/purge`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

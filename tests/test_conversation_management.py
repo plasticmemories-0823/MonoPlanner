@@ -6,7 +6,7 @@ import unittest
 import uuid
 from unittest.mock import AsyncMock, patch
 import httpx
-from starlette.testclient import TestClient
+from tests.http_client import TestClient
 from agent.storage.conversations import ConversationStore
 from agent.server.app import app
 from agent.storage.purge import begin_purge, finish_purge
@@ -114,7 +114,7 @@ class ConversationManagementTests(unittest.TestCase):
         self.store.set_visibility(self.thread, 'deleted')
         sdk = AsyncMock(); sdk.threads.get.return_value = {'status': 'idle'}
         with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), \
-                patch('agent.server.app.get_client', return_value=sdk), TestClient(app) as client:
+                patch('agent.server.app.get_client', return_value=sdk) as factory, TestClient(app) as client:
             url = f'/threads/{self.thread}/purge'
             body = {'confirm_thread_id': self.thread}
             self.assertEqual(client.post(url, json=body, headers={'origin': 'https://evil.example'}).status_code, 403)
@@ -122,6 +122,11 @@ class ConversationManagementTests(unittest.TestCase):
             sdk.threads.delete.assert_not_called()
             response = client.post(url, json=body)
             self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(factory.call_args.kwargs['headers'], {
+                'X-MonoPlanner-Service': os.environ['MONOPLANER_SERVICE_TOKEN'],
+                'Host': '127.0.0.1:' + os.getenv('MONOPLANER_BACKEND_PORT', '2024'),
+            })
+            self.assertIsNone(factory.call_args.kwargs['url'])
             sdk.threads.delete.assert_awaited_once_with(self.thread)
             sdk.aclose.assert_awaited_once()
             self.assertIsNone(self.store.session(self.thread))

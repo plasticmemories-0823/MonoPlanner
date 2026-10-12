@@ -54,7 +54,7 @@ class WebRetrievalTests(unittest.TestCase):
         self.assertEqual(parser.text(), '中文\nprint("x")\nback\\slash')
 
     def test_local_url_and_redirect_are_rejected_without_local_http(self):
-        with patch('agent.execution.web.socket.getaddrinfo', return_value=[(0, 0, 0, '', ('127.0.0.1', 80))]):
+        with patch('agent.execution.public_http.socket.getaddrinfo', return_value=[(0, 0, 0, '', ('127.0.0.1', 80))]):
             with self.assertRaises(ValueError):
                 public_url('http://localhost/secret')
         for url in ('file:///local', 'http://user:pass@example.com', ''):
@@ -67,7 +67,7 @@ class WebRetrievalTests(unittest.TestCase):
             requests.append(request)
             return httpx.Response(200, headers={'content-type': 'text/html; charset=utf-8'}, content='<p>公开内容</p><script>evil()</script>'.encode())
         with tempfile.TemporaryDirectory() as name, httpx.Client(transport=httpx.MockTransport(respond)) as client, \
-                patch('agent.execution.web.model_http_clients', return_value={'http_client': client}), \
+                patch('agent.execution.web.public_client', return_value=client), \
                 patch('agent.execution.web.public_url', side_effect=lambda value: value):
             loop = self.loop()
             result = WebProvider().fetch('https://example.com', loop, Path(name))
@@ -114,7 +114,7 @@ class WebRetrievalTests(unittest.TestCase):
                 raise ValueError('Private pages are not permitted')
             return url
         with tempfile.TemporaryDirectory() as name, httpx.Client(transport=httpx.MockTransport(respond)) as client, \
-                patch('agent.execution.web.model_http_clients', return_value={'http_client': client}), \
+                patch('agent.execution.web.public_client', return_value=client), \
                 patch('agent.execution.web.public_url', side_effect=validate):
             with self.assertRaisesRegex(ValueError, 'Private'):
                 WebProvider().fetch('https://example.com', self.loop(), Path(name))

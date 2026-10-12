@@ -4,7 +4,7 @@ import React from "react";
 import { NuqsAdapter } from "nuqs/adapters/next/app";
 
 export const metadata: Metadata = {
-  title: "MonoPlanner",
+  title: "MonoPlanner 1.0",
   description: "在本机工作目录中调查、实现与验证的 AI 编码助手",
   icons: { icon: "/brand/monoplanner.png", apple: "/brand/monoplanner.png" },
 };

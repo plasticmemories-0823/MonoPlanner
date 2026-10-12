@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from starlette.responses import JSONResponse, FileResponse
 from starlette.routing import Route
 
+from agent.execution.applications import _launch_environment
 from agent.execution.desktop import DesktopStore, fingerprint
 from agent.storage.preferences import state_root
 from agent.storage.permissions import Permissions
@@ -91,7 +92,7 @@ async def choose_file(request):
         if not await asyncio.to_thread(helper.is_file):
             raise ValueError('本机文件选择组件不可用')
         result = await asyncio.to_thread(subprocess.run, [str(helper), kind], capture_output=True,
-                                         encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW)
+                                         encoding='utf-8', creationflags=subprocess.CREATE_NO_WINDOW, env=_launch_environment())
         if result.returncode:
             raise ValueError('文件选择未完成')
         path = result.stdout.strip()

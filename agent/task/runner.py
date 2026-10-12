@@ -24,7 +24,7 @@ from agent.model import compaction
 from agent.source import lifecycle as source_runtime
 from agent.acceptance import revisions
 
-ENGINE = "MonoPlaner V0.9"
+ENGINE = "MonoPlanner 1.0"
 
 
 class TaskRunner:
