@@ -1,9 +1,7 @@
 """Narrow adapter for a provider field omitted by the installed LangChain SDK."""
 
-from copy import deepcopy
-
 from langchain_deepseek import ChatDeepSeek
-from agent.model.payload import RAW_TOOL_CALLS, wire_input
+from agent.model.payload import retain_provider_calls, wire_input
 
 
 class DeepSeekClient(ChatDeepSeek):
@@ -15,7 +13,7 @@ class DeepSeekClient(ChatDeepSeek):
         for generation, choice in zip(result.generations, raw.get("choices", [])):
             calls = choice.get("message", {}).get("tool_calls")
             if calls:
-                generation.message.additional_kwargs[RAW_TOOL_CALLS] = deepcopy(calls)
+                retain_provider_calls(generation.message, calls)
         return result
 
     def _get_request_payload(self, input_, *, stop=None, **kwargs):

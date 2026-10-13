@@ -1,6 +1,7 @@
 """One provider-facing representation for transmission, estimates and audit logs."""
 
 import json
+from copy import deepcopy
 from math import ceil
 
 from langchain_core.messages import AIMessage, convert_to_openai_messages
@@ -11,6 +12,33 @@ from agent.model.errors import ModelRequestNotSent
 
 
 RAW_TOOL_CALLS = "_provider_tool_calls"
+
+
+def retain_provider_calls(message, calls):
+    """Keep provider bytes; classify JSON rejected by the strict decoder.
+
+    The SDK parses tool arguments with strict=False, accepting literal control
+    characters inside JSON strings. Such input must be a rejected tool call,
+    not executable arguments followed by a fatal history mismatch. Never fix
+    escapes or fabricate arguments, names or call identities here.
+    """
+    message.additional_kwargs[RAW_TOOL_CALLS] = deepcopy(calls)
+    for original in calls:
+        function = original.get('function', {})
+        arguments = function.get('arguments')
+        if not isinstance(arguments, str):
+            continue  # The existing identity/original-argument guard handles it.
+        try:
+            json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            parsed = next((call for call in message.tool_calls
+                           if call.get('id') == original.get('id')
+                           and call.get('name') == function.get('name')), None)
+            if parsed is not None:
+                message.tool_calls.remove(parsed)
+                message.invalid_tool_calls.append({'type': 'invalid_tool_call',
+                    'id': parsed['id'], 'name': parsed['name'], 'args': arguments,
+                    'error': str(exc)})
 
 
 def original_calls(message):

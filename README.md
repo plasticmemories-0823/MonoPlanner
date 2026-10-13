@@ -29,7 +29,7 @@ MonoPlanner 是面向 Windows 本机使用的 AI 助手，可讨论需求、查�
 
 ## 下载与启动
 
-1. 在 [Releases](https://github.com/plasticmemories-0823/MonoPlanner/releases) 下载 `MonoPlanner-1.1.1-Windows11-x64.zip` 和 `SHA256SUMS.txt`。私有仓库需要访问权限。
+1. 在 [Releases](https://github.com/plasticmemories-0823/MonoPlanner/releases) 下载 `MonoPlanner-1.1.2-Windows11-x64.zip` 和 `SHA256SUMS.txt`。私有仓库需要访问权限。
 2. 使用 PowerShell 的 `Get-FileHash`，选择 SHA256 核对下载文件。
 3. 解压到新的目录，双击 **MonoPlanner.exe**。保持包内文件完整，不与旧版本覆盖混合。
 4. 在输入框工具栏选择 **齿轮 → API Key 设置**，填写密钥。

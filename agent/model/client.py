@@ -66,7 +66,7 @@ class ConfiguredModel:
     def invoke_with_progress(self, messages, on_reasoning):
         """Stream one request; only reasoning is exposed before completion."""
         from langchain_core.messages import message_chunk_to_message
-        from agent.model.payload import RAW_TOOL_CALLS
+        from agent.model.payload import retain_provider_calls
         bound = self.client.bind_tools(list(self.tools), strict=True) if self.tools else self.client
         from agent.server.interrupts import current
         signal = current()
@@ -109,10 +109,10 @@ class ConfiguredModel:
             raise RuntimeError('Model stream ended without a complete response')
         response = message_chunk_to_message(complete)
         if complete.tool_call_chunks:
-            response.additional_kwargs[RAW_TOOL_CALLS] = [
+            retain_provider_calls(response, [
                 {'id': call['id'], 'type': 'function', 'function': {
                     'name': call['name'], 'arguments': call['args']}}
-                for call in complete.tool_call_chunks]
+                for call in complete.tool_call_chunks])
         return response
 
 
