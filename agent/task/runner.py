@@ -64,7 +64,6 @@ class TaskRunner:
                 pass  # A disconnected presentation stream cannot invalidate saved execution.
 
     def initial_material(self):
-        from agent.source.work_materials import work_materials
         files = self.executor.inventory()
         names = sorted(files)
         docs = [n for n in names if "/" not in n and n.lower().startswith(("readme", "contributing"))][:2]
@@ -72,7 +71,6 @@ class TaskRunner:
                 "readme": [self.executor.read(n, 0, 150) for n in docs],
                 "test_config_paths": [n for n in names if n in {"bin/test", "pytest.ini", "tox.ini", "pyproject.toml", "setup.cfg", "runtests.py"}],
                 "runtime_facts": getattr(self.environment, "runtime_facts", {}),
-                "work_materials": work_materials(self.executor, self.state.get('request', '')),
                 "source": self.evidence.current}
 
     def planner_messages(self):
@@ -197,7 +195,6 @@ class TaskRunner:
 
     def decode_plan(self, raw):
         self.rejected_input = None
-        self.rejected_response = raw
         self.reviewing = False
         response = messages_from_dict([raw])[0]
         finish = response.response_metadata.get("finish_reason")
@@ -292,10 +289,6 @@ class TaskRunner:
         name = "p%04d" % number
         value = {"id": name, "parent": self.state.get("last_plan"), "plan": plan.model_dump(),
                  "response": response, "base_source": self.evidence.current, "cursor": 0, "rows": []}
-        if response["data"]["tool_calls"][0]["name"] == "repair_work":
-            ref = self.state["repair_draft"]
-            value["correction_source"] = {"draft_id": ref["id"], "record": "$record/" + ref["record"],
-                "plan_context": repair.read(self, ref)["plan_context"]}
         if self.state.get("acceptance_release"):
             value["origin_response"] = self.state["acceptance_release"]["origin_response"]
         save(self.root / "plans" / name / "plan.json", value)

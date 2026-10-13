@@ -80,7 +80,6 @@ def code_key(root=None):
         'agent/model/compaction.py', 'agent/model/client.py', 'agent/model/errors.py',
         'resources/context.json', 'resources/prompts/compaction.txt',
         'agent/source/paging.py', 'agent/execution/probe.py',
-        'agent/source/work_materials.py',
         'agent/source/exploration.py',
         'agent/storage/recovery.py', 'agent/storage/history.py', 'agent/storage/conversations.py', 'agent/storage/activity.py',
         'agent/storage/live_reasoning.py',

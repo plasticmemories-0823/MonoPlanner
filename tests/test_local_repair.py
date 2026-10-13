@@ -101,34 +101,7 @@ class LocalRepairTests(unittest.TestCase):
             "/note", "", json.dumps("落实已给出的修改，中文"))])])
         self.assertEqual(result["status"], "verified_success", result)
 
-    def test_inspect_correction_retains_call_origin_step_indices_and_result_identity(self):
-        plan = {"kind": "inspect", "note": "Check native loader and fixture registration",
-                "steps": [{"id": "loader", "op": "read", "path": "sample.py", "extra": ""},
-                          {"id": "fixture", "op": "read", "path": "sample.py"}]}
-        result = self.run_replies([f.reply(plan), lambda m: correction(m, [
-            edit("/steps/0/extra", '""', "", "remove")]),
-            f.reply({"kind": "blocked", "note": "Observed; no candidate requested"})])
-        self.assertEqual(result["status"], "task_blocked")
-        notice = json.loads(self.model.calls[1][-1].content.split("] ", 1)[1].split("\n", 1)[0])
-        context = notice['plan_context']
-        self.assertEqual(context['kind'], 'inspect')
-        self.assertEqual(context['note'], plan['note'])
-        self.assertEqual(context['call_id'], f.reply(plan).tool_calls[0]['id'])
-        self.assertEqual([(s['index'], s['id']) for s in context['steps']], [(0, 'loader'), (1, 'fixture')])
-        completed = json.loads(self.model.calls[2][-1].content)
-        self.assertEqual(completed['correction_source']['draft_id'], notice['draft_id'])
-        self.assertEqual(completed['correction_source']['plan_context'], context)
-        self.assertEqual(completed['plan'], 'p0001')
-        self.assertEqual(len(completed['steps']), 2)
 
-    def test_context_handles_malformed_parameters_without_guessing_or_copying_code(self):
-        self.assertEqual(repair.plan_context('invalid')['arguments'].split(';')[0], 'Unparsed JSON')
-        value = {'kind': 'candidate', 'note': 'n' * 1601, 'steps': 'invalid',
-                 'test_code': 'PRIVATE_TEST_CODE'}
-        context = repair.plan_context(value)
-        self.assertEqual(context['steps'], [])
-        self.assertEqual(len(context['note']), 240)
-        self.assertNotIn('PRIVATE_TEST_CODE', str(context))
 
     def draft_read_then_correction(self):
         plan = self.candidate()

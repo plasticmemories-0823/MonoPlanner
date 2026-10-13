@@ -118,8 +118,6 @@ def final_acceptance(self):
 def finish_plan(self, outcome):
     pending = self.state["pending"]
     result = {"outcome": outcome, "plan": pending["id"], "steps": [{k:v for k,v in r.items() if k != "cache_key"} for r in pending["rows"]]}
-    if pending.get("correction_source"):
-        result["correction_source"] = pending["correction_source"]
     if outcome.startswith("verification") or outcome == "verified_success":
         report = self.state["verification"]
         result["verification"] = {k: report.get(k) for k in ("status", "reason", "stderr", "test_results", "regression", "tests_ready", "execution_exception", "acceptance_comparison", "test_groups", "repository_skips", "repository_baseline_matched")}

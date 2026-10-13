@@ -53,7 +53,6 @@ def visible_reads(history, rows):
             continue
         if index == 0:
             values.extend(body.get('initial_evidence', {}).get('readme', []))
-            values.append(body.get('initial_evidence', {}).get('work_materials', {}))
         if data.get('name') == 'read_file':
             values.append(body)
         values.extend(row['data'] for row in body.get('steps', [])

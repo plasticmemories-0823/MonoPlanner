@@ -24,27 +24,7 @@ class CodingHandoffTests(unittest.TestCase):
             self.assertEqual((PROJECT_ROOT/'resources'/name).read_bytes(), original)
         original = subprocess.check_output(['git', 'show', '98b3851:resources/prompts/task.txt'], cwd=PROJECT_ROOT).decode()
         rules = (PROJECT_ROOT/'resources/prompts/task.txt').read_text(encoding='utf-8')
-        additions = [line for line in rules.splitlines(keepends=True)
-                     if line.startswith('Before the first freeze, if the proposed source edits')]
-        self.assertEqual(len(additions), 1)
-        self.assertIn('complete kind=candidate', additions[0])
-        self.assertIn('previous approval cannot release the replacement', additions[0])
-        comparable = rules.replace(additions[0], '', 1)
-        diagnostic_prefixes = (
-            'Use the supplied work_materials first:',
-            'An inspect plan answers the current missing fact',
-            'Prefer the observed native runner, settings and existing fixtures',
-        )
-        for prefix in diagnostic_prefixes:
-            permitted = [line for line in comparable.splitlines(keepends=True) if line.startswith(prefix)]
-            self.assertEqual(len(permitted), 1)
-            comparable = comparable.replace(permitted[0], '', 1)
-        clarified = [line for line in comparable.splitlines(keepends=True)
-                     if line.startswith('Do not put repeated optional lint checks')]
-        self.assertEqual(len(clarified), 1)
-        comparable = comparable.replace(clarified[0],
-            'Do not put progress tests, repeated optional lint checks, test polling or a final summary request into steps.\n', 1)
-        self.assertEqual(comparable, original)
+        self.assertEqual(rules, original)
         self.assertEqual(wire_input([], CODING_TOOLS)['tools'][:4], wire_input([], WORK_TOOLS)['tools'])
         self.assertEqual([t.name for t in CODING_TOOLS], [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch'])
         self.assertNotIn('submit_work', [t.name for t in CHAT_TOOLS])
@@ -68,9 +48,7 @@ class CodingHandoffTests(unittest.TestCase):
         self.assertIn('Public repository introduction.', repr(initial['initial_evidence']['readme']))
         self.assertIn('pytest.ini', initial['initial_evidence']['test_config_paths'])
         self.assertEqual(initial['initial_evidence']['runtime_facts'], facts)
-        supplied = initial['initial_evidence']['work_materials']
-        self.assertTrue(any(page['path'] == 'first.py' for page in supplied['reads']))
-        self.assertEqual(supplied['source_locations'][0]['path'], 'first.py')
+        self.assertNotIn('work_materials', initial['initial_evidence'])
         self.assertTrue(first[0].content.startswith((PROJECT_ROOT/'resources/prompts/task.txt').read_text(encoding='utf-8')))
         self.assertNotIn('general assistant', first[0].content)
         self.assertNotIn('application_id', first[0].content)
