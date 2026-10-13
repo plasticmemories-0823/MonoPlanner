@@ -1,9 +1,14 @@
-"""User-selected local images and immutable task execution bindings."""
+"""Project preferences and immutable task execution bindings.
+
+Looking up a project is read-only. Automatic preparation is reserved for the
+first actual execution, or an explicit prepare action in the project window.
+"""
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+from threading import RLock
 
 from agent.execution.docker import runtime_profile, docker_executable
 from agent.storage.preferences import atomic_write, state_root
@@ -11,6 +16,9 @@ from agent.storage.preferences import atomic_write, state_root
 
 class EnvironmentRequired(ValueError):
     pass
+
+
+_preferences_lock = RLock()
 
 
 def docker_query(arguments):
@@ -65,10 +73,20 @@ class ProjectEnvironments:
         inspected = json.loads(docker_query(['image', 'inspect', image]))[0]
         if inspected['Id'] != image or inspected['Os'] != 'linux' or inspected['Architecture'] != 'amd64':
             raise ValueError('当前执行后端需要本机已有的 Linux amd64 镜像')
-        values = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {}
-        values[repo] = {'backend': 'docker', 'image': image, 'runtime': runtime}
-        atomic_write(self.path, json.dumps(values, ensure_ascii=False, indent=2).encode('utf-8'))
+        with _preferences_lock:
+            values = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {}
+            values[repo] = {'backend': 'docker', 'image': image, 'runtime': runtime}
+            atomic_write(self.path, json.dumps(values, ensure_ascii=False, indent=2).encode('utf-8'))
         return values[repo]
+
+    def automatic(self, repo):
+        """Reset future executions only; task checkpoints keep their own image."""
+        repo = workspace_path(repo)
+        with _preferences_lock:
+            values = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {}
+            values.pop(repo, None)
+            atomic_write(self.path, json.dumps(values, ensure_ascii=False, indent=2).encode('utf-8'))
+        return {'backend': 'docker'}
 
 
 def workspace_binding(repo):
@@ -90,3 +108,12 @@ def require_binding(repo, binding=None):
     if not re.fullmatch(r'sha256:[0-9a-f]{64}', binding['image']):
         raise EnvironmentRequired('项目镜像 ID 无效，请重新配置；操作尚未执行。')
     return {**binding, 'runtime': runtime_profile(binding.get('runtime'))}
+
+
+def prepare_binding(repo, *, progress=None, cancelled=None):
+    """Resolve the latest project preference before the first execution only."""
+    selected = workspace_binding(repo)
+    if selected.get('image'):
+        return require_binding(repo, selected)
+    from agent.execution.preparation import ensure_prepared
+    return require_binding(repo, ensure_prepared(repo, progress=progress, cancelled=cancelled))

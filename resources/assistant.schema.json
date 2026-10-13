@@ -1,5 +1,5 @@
 {
-  "list_files": {
+  "list_directory": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
@@ -43,7 +43,7 @@
       "reread_reason"
     ]
   },
-  "search_files": {
+  "search_file_contents": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
@@ -67,7 +67,7 @@
       "limit"
     ]
   },
-  "run_existing": {
+  "run_project_task": {
     "type": "object",
     "additionalProperties": false,
     "properties": {

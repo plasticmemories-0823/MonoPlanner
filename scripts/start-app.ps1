@@ -52,7 +52,7 @@ function Test-Ready([string]$Kind, [int]$Port) {
                    $taskValue.source_hash -eq $taskExpected.source_hash
         }
         $taskBody = Get-ServiceText $Port '/'
-        if ($taskBody -notmatch '<title>MonoPlanner 1\.0</title>') { return $false }
+        if ($taskBody -notmatch '<title>MonoPlanner 1\.1</title>') { return $false }
         $taskScriptPattern = '<script[^>]+src="(/_next/static/[^"?]+(?:\?[^" ]*)?)"'
         $taskScripts = @([regex]::Matches($taskBody, $taskScriptPattern) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
         if ($taskScripts.Count -eq 0) { return $false }
@@ -69,9 +69,13 @@ function Test-Ready([string]$Kind, [int]$Port) {
 function Assert-BackendIdle {
     if (@(Get-Listener $BackendPort).Count -eq 0) { return }
     try {
-        $taskQueue = ((Get-ServiceText $BackendPort '/service/status') | ConvertFrom-Json).queue
+        $taskStatus = (Get-ServiceText $BackendPort '/service/status') | ConvertFrom-Json
+        $taskQueue = $taskStatus.queue
         if ($null -eq $taskQueue -or $null -eq $taskQueue.n_running -or $null -eq $taskQueue.n_pending) { throw '任务状态不完整' }
     } catch { throw '无法确认任务是否已停止；未关闭服务。请先在工作界面中暂停任务，再尝试重启或退出。' }
+    if ($taskStatus.PSObject.Properties['environment_preparations'] -and $taskStatus.environment_preparations -gt 0) {
+        throw '项目环境仍在准备；未关闭服务。请在工作目录窗口取消准备，等待安装容器停止后再退出。'
+    }
     if ($taskQueue.n_running -gt 0 -or $taskQueue.n_pending -gt 0) {
         throw '任务正在运行或等待执行；未关闭服务。请先在工作界面中暂停任务，并等待当前请求或操作结束。'
     }

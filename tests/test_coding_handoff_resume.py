@@ -53,7 +53,7 @@ class WorkPreparationResumeTests(unittest.TestCase):
         self.assertEqual(state['execution_binding']['image'], 'sha256:'+'1'*64)
         self.assertEqual(len(list((self.root/'runs/tasks'/resumed['task_id']).glob('plans/*/*/result.json'))), 1)
         history = state['chat_history']
-        self.assertEqual(sum(m['type'] == 'tool' and m['data']['name'] == 'start_work' for m in history), 1)
+        self.assertEqual(sum(m['type'] == 'tool' and m['data']['name'] == 'start_coding' for m in history), 1)
 
     def test_resume_without_configuration_never_calls_model_or_starts_docker(self):
         self.remove_environment()

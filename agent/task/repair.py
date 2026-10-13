@@ -189,7 +189,7 @@ def reject(owner, error):
         notice["issues"] = record["issues"]
     if str(error) != record["error"]:
         notice["original_error"] = record["error"][:1800]
-    instruction = ("Use repair_work for these fields; preserve all other work." if record["paths"] else
+    instruction = ("Use correct_plan_arguments for these fields; preserve all other work." if record["paths"] else
                    "No field correction is available; submit a valid work request.")
     return "[Plan rejected; no actions executed] " + encode(notice) + "\n" + instruction
 
@@ -210,6 +210,6 @@ def merge(owner, arguments):
     correction = Correction.model_validate(arguments)
     ref = owner.state.get("repair_draft")
     if not ref or correction.draft_id != ref["id"]:
-        raise ValueError("repair_work requires the current draft_id")
+        raise ValueError("correct_plan_arguments requires the current draft_id")
     record = read(owner, ref)
     return apply(record["value"], correction.edits, record["paths"])

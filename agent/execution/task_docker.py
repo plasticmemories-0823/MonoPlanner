@@ -5,16 +5,28 @@ from pathlib import Path
 import re
 import shutil
 
-from agent.execution.docker import DockerEnvironment
+from agent.execution.docker import DockerEnvironment, PROXY_VARIABLES
 from agent.storage.records import digest, save
 
 
+def inspected_host_path(source):
+    """Docker Desktop reports Windows bind sources using its VM mount prefix."""
+    if os.name == 'nt' and isinstance(source, str):
+        match = re.fullmatch(r'/(?:run/desktop/mnt/host|host_mnt)/([A-Za-z])(?:/(.*))?', source)
+        if match:
+            relative = match[2] or ''
+            if '\\' in relative or any(part in {'.', '..'} for part in relative.split('/')):
+                raise ValueError('Unsafe Docker Desktop mount path')
+            source = match[1] + ':/' + relative
+    return Path(source).resolve()
+
+
 class TaskDocker(DockerEnvironment):
-    def __init__(self, repo, image, task_root, *, runtime=None, read_sources=()):
+    def __init__(self, repo, image, task_root, *, runtime=None, read_sources=(), managed=None):
         task_root = Path(task_root).resolve()
         super().__init__(repo, image, 'monoplanner-' + task_root.name,
                          artifact_root=task_root.parent.parent/'execution'/task_root.name,
-                         runtime=runtime)
+                         runtime=runtime, managed=managed)
         from agent.storage.preferences import state_root, private_path
         from agent.settings import PROJECT_ROOT
         private_roots = [state_root(), task_root]
@@ -64,26 +76,42 @@ class TaskDocker(DockerEnvironment):
                 raise RuntimeError('Saved task container is unavailable; no automatic replacement')
             actual = json.loads(result.stdout)[0]
             host = actual['HostConfig']
-            expected = {'/testbed': (self.repo_root, True), '/agent-artifacts': (self.artifact_root, True)}
-            expected.update({f'/agent-materials/{i}': (Path(p), False) for i, p in enumerate(self.material_mounts.values())})
-            mounts = actual['Mounts']
+            expected = {'/testbed': ('bind', self.repo_root, True),
+                        '/agent-artifacts': ('bind', self.artifact_root, True)}
+            expected.update({f'/agent-materials/{i}': ('bind', Path(p), False)
+                             for i, p in enumerate(self.material_mounts.values())})
+            expected.update({target: ('volume', volume, False) for target, volume in self.dependency_mounts.items()})
+            caches = [mount for mount in actual['Mounts'] if mount.get('Type') == 'tmpfs']
+            mounts = [mount for mount in actual['Mounts'] if mount.get('Type') != 'tmpfs']
+            proxies = [value for value in actual.get('Config', {}).get('Env', [])
+                       if value.partition('=')[0] in PROXY_VARIABLES and value.partition('=')[2]]
             if (actual['Image'] != image or actual['Name'] != '/' + self.container_name
+                    or proxies
                     or host['NetworkMode'] != 'none' or host.get('Privileged')
                     or set(host.get('CapDrop') or []) != {'ALL'}
                     or 'no-new-privileges' not in (host.get('SecurityOpt') or [])
+                    or (host.get('Tmpfs') or {}) != self.dependency_caches
+                    or any(mount['Destination'] not in self.dependency_caches
+                           or not mount.get('RW', False) for mount in caches)
                     or len(mounts) != len(expected)
                     or {m['Destination'] for m in mounts} != set(expected)
-                    or any(Path(m['Source']).resolve() != expected[m['Destination']][0]
-                           or m.get('RW', True) != expected[m['Destination']][1] for m in mounts)):
+                    or any((m.get('Type', 'bind') != expected[m['Destination']][0]
+                            or (m.get('Name') if m.get('Type') == 'volume' else inspected_host_path(m['Source']))
+                                != expected[m['Destination']][1]
+                            or m.get('RW', True) != expected[m['Destination']][2]) for m in mounts)):
                 raise ValueError('Task container identity or isolation changed')
             self.running = bool(actual['State']['Running'])
         else:
             self.running = False
 
     def _binding(self, container_id):
-        return {'container_id': container_id, 'image': self.image, 'runtime': self.runtime,
+        result = {'container_id': container_id, 'image': self.image, 'runtime': self.runtime,
                 'repo': str(self.repo_root), 'artifacts': str(self.artifact_root),
                 'materials': self.material_mounts, 'runtime_materials_sha256': self.runtime_materials_sha256}
+        if self.dependency_mounts:
+            result['dependency_mounts'] = self.dependency_mounts
+            result['dependency_caches'] = self.dependency_caches
+        return result
 
     def _runtime_materials(self, path):
         from agent.execution.runtime_inventory import runtime_inventory
@@ -141,6 +169,7 @@ class TaskDocker(DockerEnvironment):
 
     def start(self):
         if self._container_id is not None:
+            self._prepare_dependencies(allow_create=False)
             if not self.running:
                 raise RuntimeError('Task container stopped; saved operations are not automatically replayed')
             if not self._probing_runtime:

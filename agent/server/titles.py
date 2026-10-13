@@ -143,10 +143,12 @@ def schedule(root, thread):
 @asynccontextmanager
 async def lifespan(app):
     global _dispatcher
-    dispatcher = TitleDispatcher(state_root())
+    dispatcher = await asyncio.to_thread(lambda: TitleDispatcher(state_root()))
     _dispatcher = dispatcher
     try:
         yield
     finally:
         _dispatcher = None
         await asyncio.to_thread(dispatcher.close)
+        from agent.execution.preparation import close_jobs
+        await asyncio.to_thread(lambda: close_jobs(state_root()))

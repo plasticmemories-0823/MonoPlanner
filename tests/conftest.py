@@ -19,3 +19,12 @@ def offline_conversation_service(tmp_path, monkeypatch):
                                              'input_token_details': {'cache_read': 2}})
 
     monkeypatch.setattr(titles, 'model_factory', OfflineTitleModel)
+    # Missing-environment conversation tests must never download production
+    # images. Managed preparation tests explicitly replace this boundary.
+    from agent.execution import preparation
+    from agent.execution.projects import EnvironmentRequired
+
+    def offline_prepare(*args, **kwargs):
+        raise EnvironmentRequired('Docker 离线测试未准备环境；不会下载依赖。')
+
+    monkeypatch.setattr(preparation, 'ensure_prepared', offline_prepare)

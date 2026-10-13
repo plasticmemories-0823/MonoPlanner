@@ -33,8 +33,12 @@ def command_for(workspace, entry, args, environment=None):
     if separator:
         if path.name != 'package.json' or not target or target not in json.loads(raw).get('scripts', {}):
             raise ValueError('使用 package.json#已有脚本名称，不接受临时任务正文')
-        # Node 22 --run dispatches only an existing package script; no npm installation.
-        executable, prefix = '/usr/bin/env', ['node', '--run', target, '--']
+        # Dispatch exactly the chosen existing script, including nested projects
+        # and Node versions before 22. Disable automatic pre/post lifecycle hooks.
+        directory = (environment.host_to_container(path.parent) if environment else
+                     '/testbed/' + path.parent.relative_to(root).as_posix())
+        directory = directory.removesuffix('/.')
+        executable, prefix = '/usr/bin/env', ['npm', '--ignore-scripts', '--prefix', directory, 'run', target, '--']
     elif suffix == '.py':
         executable = environment.python_executable if environment else '/opt/miniconda3/envs/testbed/bin/python'
     elif suffix in {'.js', '.mjs', '.cjs'}:

@@ -26,7 +26,7 @@ internal sealed class DesktopWindow : Form
 
     internal DesktopWindow(EventWaitHandle activate, string key)
     {
-        Text = "MonoPlanner 1.0";
+        Text = "MonoPlanner 1.1";
         Font = new Font("Microsoft YaHei UI", 9);
         ClientSize = new Size(1240, 820);
         MinimumSize = new Size(850, 600);

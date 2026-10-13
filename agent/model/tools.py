@@ -17,7 +17,7 @@ def submit_plan(**kwargs) -> dict:
 
 
 @tool(args_schema=REPAIR_SCHEMA)
-def repair_work(**kwargs) -> dict:
+def correct_plan_arguments(**kwargs) -> dict:
     """Correct only listed draft paths. set/remove use JSON literals in before/after
     (remove: after=''; missing field: before=''). edit_text uses one exact unique
     substring and its replacement. Never replan, execute, or guess unchanged data.
@@ -30,7 +30,10 @@ REVIEW_SCHEMA = json.loads((PROJECT_ROOT / "resources/acceptance-review.schema.j
 
 @tool(args_schema=REVIEW_SCHEMA["freeze"])
 def freeze_acceptance(**kwargs) -> dict:
-    """Confirm a completed original-source trial. Release retained edits only after acceptance is runnable."""
+    """Freeze the selected acceptance after a completed original-source trial AND authorize
+    execution of its bound candidate edits. This is an execution gate, not just a review note.
+    Use only after verifying runnable acceptance and evidence-supported expectations.
+    """
     return kwargs
 
 
@@ -43,7 +46,7 @@ def revise_acceptance(**kwargs) -> dict:
     return kwargs
 
 
-WORK_TOOLS = (submit_plan, repair_work, freeze_acceptance, revise_acceptance)
+WORK_TOOLS = (submit_plan, correct_plan_arguments, freeze_acceptance, revise_acceptance)
 
 WEB_SCHEMA = json.loads((PROJECT_ROOT / 'resources/web.schema.json').read_text(encoding='utf-8'))
 
@@ -63,9 +66,11 @@ def web_fetch(**kwargs) -> dict:
 ASSISTANT_SCHEMA = json.loads((PROJECT_ROOT / 'resources/assistant.schema.json').read_text(encoding='utf-8'))
 
 
-@tool(args_schema=ASSISTANT_SCHEMA['list_files'])
-def list_files(**kwargs) -> dict:
-    """List one authorized local directory; offset is zero-based, limit at most 200."""
+@tool(args_schema=ASSISTANT_SCHEMA['list_directory'])
+def list_directory(**kwargs) -> dict:
+    """List files and subdirectories in one authorized local directory.
+    Offset is zero-based, limit at most 200. This lists entries, not file contents.
+    """
     return kwargs
 
 
@@ -77,16 +82,17 @@ def read_file(**kwargs) -> dict:
     return kwargs
 
 
-@tool(args_schema=ASSISTANT_SCHEMA['search_files'])
-def search_files(**kwargs) -> dict:
+@tool(args_schema=ASSISTANT_SCHEMA['search_file_contents'])
+def search_file_contents(**kwargs) -> dict:
     """Find literal, case-sensitive text in authorized files. Page hits with offset, limit at most 50."""
     return kwargs
 
 
-@tool(args_schema=ASSISTANT_SCHEMA['run_existing'])
-def run_existing(**kwargs) -> dict:
+@tool(args_schema=ASSISTANT_SCHEMA['run_project_task'])
+def run_project_task(**kwargs) -> dict:
     """Run an existing WORKSPACE script, module:local.module or package.json#script using argv.
-    No inline code, generated scripts, apps or dependency installation. Supply timeout seconds;
+    The program prepares declared project dependencies before first execution.
+    No inline code, generated scripts, apps or arbitrary installer commands. Supply timeout seconds;
     usage_file='' unless the task writes an explicit usage JSON. Failure requires user-requested repair.
     """
     return kwargs
@@ -104,7 +110,8 @@ def open_file(**kwargs) -> dict:
     """Preview an authorized file locally; application_id='' uses isolated in-app preview.
     An installed application ID requests external opening. Sandbox denies it; ask mode
     requires one approval for this application and file together; full mode opens directly.
-    File contents are not automatically sent to the model. Never execute scripts as documents.
+    This tool returns preview/open status, NOT file contents to the model; use read_file to read text.
+    Never execute scripts as documents.
     """
     return kwargs
 
@@ -128,7 +135,7 @@ def request_file_operation(**kwargs) -> dict:
 
 
 @tool(args_schema={'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False})
-def start_work() -> dict:
+def start_coding() -> dict:
     """Enter coding after explicit user authorization. The host prepares original requirements
     and repository materials before requesting any code or plan. Supply no arguments.
     """
@@ -136,5 +143,5 @@ def start_work() -> dict:
 
 
 CODING_TOOLS = (*WORK_TOOLS, web_search, web_fetch)
-CHAT_TOOLS = (start_work, web_search, web_fetch, list_files, read_file, search_files,
-              run_existing, list_applications, open_file, launch_application, request_file_operation)
+CHAT_TOOLS = (start_coding, web_search, web_fetch, list_directory, read_file, search_file_contents,
+              run_project_task, list_applications, open_file, launch_application, request_file_operation)

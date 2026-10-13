@@ -35,7 +35,7 @@ class FixtureDocker(LocalEnvironment):
 
 
 def start_reply():
-    return AIMessage(content='开始准备工作资料。', tool_calls=[{'name': 'start_work', 'id': 'start', 'args': {}}],
+    return AIMessage(content='开始准备工作资料。', tool_calls=[{'name': 'start_coding', 'id': 'start', 'args': {}}],
                      usage_metadata={'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2})
 
 
@@ -45,7 +45,7 @@ class BlockedModel:
         return self
 
     def invoke(self, messages):
-        if any(t.name == 'start_work' for t in self.tools):
+        if any(t.name == 'start_coding' for t in self.tools):
             return start_reply()
         return AIMessage(content='', tool_calls=[{'name': 'submit_plan', 'id': 'blocked',
             'args': {'kind': 'blocked', 'note': 'private explanation'}}],
@@ -71,7 +71,7 @@ class ChatWorkModel:
         self.model.bind_tools(tools)
         return self
     def invoke(self, messages):
-        if any(t.name == 'start_work' for t in self.tools):
+        if any(t.name == 'start_coding' for t in self.tools):
             self.calls.append(messages)
             return start_reply()
         return self.model.invoke(messages)

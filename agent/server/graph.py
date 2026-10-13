@@ -195,7 +195,8 @@ def step(state: ConversationState, config: RunnableConfig, phase='decide'):
                     and 'awaiting_approval' in runner_state.get('desktop_approvals', {}).values() else
                 '任务未能启动，已保存错误记录。请检查运行环境后重新提交。' if session.get('initialization_failed') else
                 '请先在设置中配置可用的 DeepSeek API Key，然后重新发送消息。' if status == 'settings_required' else
-                runner_state['reason'] if status == 'awaiting_user' and 'Docker' in runner_state.get('reason', '') else
+                runner_state['reason'] if status == 'awaiting_user' and (
+                    'Docker' in runner_state.get('reason', '') or runner_state.get('environment_preparation', {}).get('status') == 'failed') else
                 '已暂停，可以补充要求或继续。' if status in {'paused', 'awaiting_user'} else
                 '任务尚未完成，已保留运行记录，供后续检查。')
         updates.append(AIMessage(content=text, id=session['task_id']+'-'+status))

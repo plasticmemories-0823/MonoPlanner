@@ -173,6 +173,8 @@ def build(destination, make_zip=True):
                 'webview2_sdk': '1.0.4258.31', 'webview2_fixed': '155.0.4283.45',
                 'startup_installs_dependencies': False, 'chat_requires_docker': False,
                 'coding_requires_docker': True, 'existing_tasks_require_docker': True}
+    metadata['automatic_project_environments'] = True
+    metadata['project_preparation_downloads_dependencies'] = True
     licenses = []
     sources = {
         'git-v2.53.0.windows.2.zip': '2642f2ac3b19e5e734376dadfb5aad403ad8f1e53785125292a270bbf8dbf9be',

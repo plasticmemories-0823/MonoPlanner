@@ -24,7 +24,7 @@ class CodingHandoffTests(unittest.TestCase):
             self.assertEqual((PROJECT_ROOT/'resources'/name).read_bytes(), original)
         original = subprocess.check_output(['git', 'show', '98b3851:resources/prompts/task.txt'], cwd=PROJECT_ROOT).decode()
         rules = (PROJECT_ROOT/'resources/prompts/task.txt').read_text(encoding='utf-8')
-        self.assertEqual(rules, original.replace("submit_work", "submit_plan"))
+        self.assertEqual(rules, original.replace("submit_work", "submit_plan").replace("repair_work", "correct_plan_arguments"))
         self.assertEqual(wire_input([], CODING_TOOLS)['tools'][:4], wire_input([], WORK_TOOLS)['tools'])
         self.assertEqual([t.name for t in CODING_TOOLS], [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch'])
         self.assertNotIn('submit_plan', [t.name for t in CHAT_TOOLS])
@@ -55,12 +55,12 @@ class CodingHandoffTests(unittest.TestCase):
         self.assertEqual(len(list((Path(result['result']['artifact_dir'])/'requests').glob('call-*'))), 3)
 
     def test_invalid_start_arguments_and_direct_coding_call_are_rejected_in_chat(self):
-        invalid = AIMessage(content='', tool_calls=[{'name': 'start_work', 'id': 'bad', 'args': {'request': 'replacement'}}])
+        invalid = AIMessage(content='', tool_calls=[{'name': 'start_coding', 'id': 'bad', 'args': {'request': 'replacement'}}])
         model = fixtures.ScriptedModel([invalid, fixtures.investigation(['first.py']), fixtures.text_reply('Discuss only')])
         with patch('agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('must not execute')):
             result = self.invoke(model)
         self.assertEqual(result['status'], 'chat_complete')
-        self.assertIn('start_work takes no arguments', model.calls[1][-1].content)
+        self.assertIn('start_coding takes no arguments', model.calls[1][-1].content)
         self.assertFalse(result['workspace_bound'])
 
     def test_six_inspection_steps_reuse_one_copy_and_container(self):

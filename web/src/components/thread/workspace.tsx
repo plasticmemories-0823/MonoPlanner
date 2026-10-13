@@ -150,7 +150,7 @@ export function Workspace({
         }}
       >
         <DialogContent
-          className="max-w-xl"
+          className="max-h-[calc(100dvh-2rem)] max-w-xl overflow-y-auto"
           closeLabel="关闭目录选择"
         >
           <DialogHeader>

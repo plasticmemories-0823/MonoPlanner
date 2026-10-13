@@ -51,6 +51,9 @@ def code_key(root=None):
 
         'agent/version.py', 'agent/server/access.py', 'agent/execution/public_http.py',
         'agent/execution/projects.py', 'agent/execution/task_docker.py',
+        'agent/execution/preparation.py', 'agent/execution/managed.py',
+        'agent/execution/managed_plan.py', 'agent/execution/managed_proxy.py',
+        'agent/execution/managed_setup.py',
         'agent/execution/runtime_inventory.py',
         'agent/cli/interactive.py', 'agent/cli/tasks.py',
         'agent/server/interrupts.py', 'agent/model/streaming.py',

@@ -215,9 +215,9 @@ class TaskRunner:
                 self.rejected_input = invalid[0]["args"]
                 repair.loads(self.rejected_input)
             raise ValueError("Expected exactly one valid work tool call; no actions were executed")
-        if len(calls) != 1 or calls[0]["name"] not in {"submit_plan", "repair_work"}:
+        if len(calls) != 1 or calls[0]["name"] not in {"submit_plan", "correct_plan_arguments"}:
             raise ValueError("Expected exactly one valid work tool call; no actions were executed")
-        value = repair.merge(self, calls[0]["args"]) if calls[0]["name"] == "repair_work" else calls[0]["args"]
+        value = repair.merge(self, calls[0]["args"]) if calls[0]["name"] == "correct_plan_arguments" else calls[0]["args"]
         self.rejected_input = value
         return self.validate_work(value), raw
 

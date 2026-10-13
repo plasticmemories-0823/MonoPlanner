@@ -28,6 +28,34 @@ from agent.storage.titles import Titles
 from agent.server.titles import lifespan
 
 
+async def project_environment(request: Request):
+    """Authenticated preparation only; GET never installs or invokes a model."""
+    from agent.execution.preparation import jobs
+    try:
+        if request.method == 'GET':
+            result = await asyncio.to_thread(lambda: jobs().status(request.query_params.get('repo', '')))
+        else:
+            raw = await request.body()
+            if len(raw) > 8192:
+                raise ValueError('环境准备请求过大')
+            value = json.loads(raw)
+            if (not isinstance(value, dict) or set(value) != {'repo', 'action'}
+                    or not isinstance(value['repo'], str)
+                    or value['action'] not in {'prepare', 'automatic', 'cancel'}):
+                raise ValueError('请选择准备环境、自动模式或取消')
+            if value['action'] == 'automatic':
+                await asyncio.to_thread(lambda: ProjectEnvironments().automatic(value['repo']))
+                result = await asyncio.to_thread(lambda: jobs().status(value['repo']))
+            else:
+                def change():
+                    service = jobs()
+                    return (service.start if value['action'] == 'prepare' else service.cancel)(value['repo'])
+                result = await asyncio.to_thread(change)
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        return JSONResponse({'error': str(exc)}, status_code=400, headers={'Cache-Control': 'no-store'})
+
+
 LOADED_SERVICE = service_identity()
 
 
@@ -42,7 +70,10 @@ async def service_status(request: Request):
         from langgraph_runtime.ops import Runs
         async with connect() as connection:
             queue = await Runs.stats(connection)
-        return JSONResponse({'queue': {k: queue[k] for k in ('n_running', 'n_pending')}},
+        from agent.execution.preparation import active_count
+        preparing = await asyncio.to_thread(active_count)
+        return JSONResponse({'queue': {k: queue[k] for k in ('n_running', 'n_pending')},
+                             'environment_preparations': preparing},
                             headers={'Cache-Control': 'no-store'})
     except Exception:
         return JSONResponse({'error': 'Cannot confirm whether tasks are idle'}, status_code=503)
@@ -257,6 +288,7 @@ async def settings(request: Request):
 app = Starlette(lifespan=lifespan, middleware=[Middleware(InstanceAccess)], routes=[*desktop_routes, Route('/service', service, methods=['GET']), Route('/service/status', service_status, methods=['GET']),
                        Route('/execution/images', execution_images, methods=['GET']),
                        Route('/workspace/execution', project_execution, methods=['GET', 'POST']),
+                       Route('/workspace/environment', project_environment, methods=['GET', 'POST']),
                        Route('/workspace', workspace, methods=['GET', 'POST']),
                        Route('/workspace/directories', directories, methods=['GET']),
                        Route('/settings', settings, methods=['GET', 'POST']),

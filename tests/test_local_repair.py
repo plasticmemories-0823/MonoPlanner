@@ -25,7 +25,7 @@ import test_task_runner as f
 
 def correction(messages, edits, identifier=None):
     notice = json.loads(messages[-1].content.split("] ", 1)[1].split("\n", 1)[0])
-    return AIMessage(content="", tool_calls=[{"name": "repair_work", "id": "repair-call",
+    return AIMessage(content="", tool_calls=[{"name": "correct_plan_arguments", "id": "repair-call",
         "args": {"draft_id": identifier or notice["draft_id"], "edits": edits}}])
 
 
@@ -86,7 +86,7 @@ class LocalRepairTests(unittest.TestCase):
         accepted = json.loads((self.root / "state/plans/p0001/plan.json").read_text())
         self.assertEqual(accepted["plan"]["steps"][0]["command"], plan["steps"][0]["command"])
         self.assertEqual(accepted["plan"]["test_code"], f.CODE)
-        self.assertEqual(accepted["origin_response"]["data"]["tool_calls"][0]["name"], "repair_work")
+        self.assertEqual(accepted["origin_response"]["data"]["tool_calls"][0]["name"], "correct_plan_arguments")
         self.assertEqual(accepted["response"]["data"]["tool_calls"][0]["name"], "freeze_acceptance")
         state = self.load_state()
         self.assertEqual(state["history"][-1]["data"]["tool_call_id"], "confirm-call")
@@ -116,7 +116,7 @@ class LocalRepairTests(unittest.TestCase):
                            "offset": 0, "limit": 200}]})
 
         def correct_draft(messages):
-            return AIMessage(content="", tool_calls=[{"name": "repair_work", "id": "after-read",
+            return AIMessage(content="", tool_calls=[{"name": "correct_plan_arguments", "id": "after-read",
                 "args": {"draft_id": draft["id"], "edits": [edit("/extra", "1", "", "remove")]}}])
 
         return plan, draft, read_draft, correct_draft
@@ -314,7 +314,7 @@ class LocalRepairTests(unittest.TestCase):
                 name, arguments = "submit_plan", json.dumps(original, ensure_ascii=False, indent=2)
             elif len(requests) == 2:
                 notice = json.loads(body["messages"][-1]["content"].split("] ", 1)[1].split("\n", 1)[0])
-                name, arguments = "repair_work", json.dumps({"draft_id": notice["draft_id"],
+                name, arguments = "correct_plan_arguments", json.dumps({"draft_id": notice["draft_id"],
                     "edits": [edit("/extra", "1", "", "remove")]}, ensure_ascii=False, indent=2)
             else:
                 notice = json.loads(body["messages"][-1]["content"])

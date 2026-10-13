@@ -6,7 +6,7 @@ import time
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, message_to_dict, messages_from_dict, messages_to_dict
 
 from agent.execution.executor import OperationExecutor
-from agent.execution.projects import require_binding, workspace_binding, EnvironmentRequired
+from agent.execution.projects import require_binding, workspace_binding, prepare_binding, EnvironmentRequired
 from agent.execution.web import WEB_NAMES, execute_calls
 from agent.model.client import configure_call
 from agent.model.context import admit
@@ -41,17 +41,55 @@ class ConversationRunner(TaskRunner):
     def chat_rules(self):
         return self.state.get('chat_rules', self.rules)
 
+    def environment_blocked(self, exc):
+        from agent.execution.preparation import PreparationCancelled
+        self.state.update(status='awaiting_user', reason=str(exc))
+        if isinstance(exc, PreparationCancelled):
+            self.state['environment_preparation'] = {
+                'status': 'cancelled', 'stage': 'cancelled', 'message': '已停止等待环境准备，项目尚未执行'}
+            self.persist('environment_preparation', self.state['environment_preparation'])
+            dialogue.apply_controls(self)
+            from agent.server.interrupts import current
+            signal = current()
+            if signal:
+                for identity in self.state.get('applied_inputs', []):
+                    signal.consume_input(identity)
+        else:
+            self.state['environment_preparation'] = {
+                'status': 'failed', 'stage': 'failed', 'message': '项目环境准备未完成'}
+            self.persist('environment_preparation', self.state['environment_preparation'])
+        self.persist('environment_required')
+
     def activate(self):
         if not self.repo or not Path(self.repo).is_dir():
             raise ValueError('工作需要选择一个已有仓库；普通聊天无需仓库')
         if not self.execution_binding.get('image'):
-            self.execution_binding = require_binding(self.repo)
+            from agent.server.interrupts import current
+            signal = current()
+
+            def interrupted():
+                applied = self.state.get('applied_inputs', [])
+                return bool((signal and signal.kind in {'pause', 'message'}) or any(
+                    row['id'] not in applied and row['kind'] in {'pause', 'message'} for row in self.mailbox()))
+
+            def progress(value):
+                self.state['environment_preparation'] = {
+                    key: value[key] for key in ('status', 'stage', 'message') if key in value}
+                self.persist('environment_preparation', self.state['environment_preparation'])
+                if self.event_sink:
+                    try:
+                        self.event_sink({'type': 'progress', 'phase': 'preparing_environment', 'text': value['message']})
+                    except (OSError, RuntimeError):
+                        pass
+
+            self.execution_binding = prepare_binding(self.repo, progress=progress, cancelled=interrupted)
             self.state['execution_binding'] = self.execution_binding
             self.persist('execution_binding_frozen')
         binding = require_binding(self.repo, self.execution_binding)
         from agent.execution.task_docker import TaskDocker
         self.environment = TaskDocker(self.repo, binding['image'], self.root,
-                                     runtime=binding['runtime'], read_sources=self.read_sources)
+                                     runtime=binding['runtime'], read_sources=self.read_sources,
+                                     **({'managed': binding['managed']} if binding.get('managed') else {}))
         if self.root.is_relative_to(self.environment.repo_root) or self.root.is_relative_to(self.environment.artifact_root):
             raise ValueError('Task records must stay outside source and execution mounts')
         self.environment.start()
@@ -121,7 +159,9 @@ class ConversationRunner(TaskRunner):
         if self.execution_binding.get('runtime'):
             self.rules += '\nContainer Python executable: ' + self.execution_binding['runtime']['python']
         else:
-            self.rules += '\nProject Docker environment is not configured; ask the user to select it before executing.'
+            self.rules += ('\nThe program automatically prepares and reuses this project\'s Docker environment '
+                           'before the first execution, using its dependency files. Do not ask users for '
+                           'image IDs, Python paths or Conda names. Preparation does not require a model call.')
         if self.read_sources:
             self.rules += '\nReadonly material paths in execution: ' + json.dumps({
                 s['path']: f'/agent-materials/{i}' for i, s in enumerate(self.read_sources)}, ensure_ascii=False)
@@ -189,18 +229,18 @@ class ConversationRunner(TaskRunner):
             mode = 'chat'
         elif names and names <= WEB_NAMES and not response.invalid_tool_calls:
             mode = 'web'
-        elif names == {'run_existing'}:
+        elif names == {'run_project_task'}:
             mode = 'run'
-        elif names == {'start_work'} and len(calls) == 1 and not response.invalid_tool_calls and calls[0]['args'] == {}:
+        elif names == {'start_coding'} and len(calls) == 1 and not response.invalid_tool_calls and calls[0]['args'] == {}:
             mode = 'work'
-        elif names <= {t.name for t in CHAT_TOOLS} - {'start_work'} and not response.invalid_tool_calls:
+        elif names <= {t.name for t in CHAT_TOOLS} - {'start_coding'} and not response.invalid_tool_calls:
             mode = 'read'
         else:
             target = turn['messages'] if turn else self.state['history']
             target.append(raw)
             for call in [*calls, *response.invalid_tool_calls]:
                 target.append(message_to_dict(ToolMessage(content=json.dumps({'error':
-                    'Only advertised chat tools are allowed. start_work takes no arguments and must be called alone; '
+                    'Only advertised chat tools are allowed. start_coding takes no arguments and must be called alone; '
                     'coding plans are requested after repository preparation.'}), name=call['name'], tool_call_id=call['id'])))
             if turn:
                 turn.pop('response', None)
@@ -353,8 +393,7 @@ class ConversationRunner(TaskRunner):
             try:
                 self.bootstrap_work()
             except EnvironmentRequired as exc:
-                self.state.update(status='awaiting_user', reason=str(exc))
-                self.persist('environment_required')
+                self.environment_blocked(exc)
             else:
                 self.state['dispatch'] = 'work'
             return
@@ -405,12 +444,12 @@ class ConversationRunner(TaskRunner):
                 self.state['response_pending'] = turn.get('work_response')
             return
         self.tools = CODING_TOOLS
-        if raw and raw['data'].get('tool_calls') and raw['data']['tool_calls'][0]['name'] == 'start_work':
+        if raw and raw['data'].get('tool_calls') and raw['data']['tool_calls'][0]['name'] == 'start_coding':
             dialogue.publish(self, raw)
             target = turn['messages'] if turn else self.state['history']
             target.append(raw)
             target.append(message_to_dict(ToolMessage(content=json.dumps({'outcome': 'coding_handoff_saved',
-                'actions_executed': False}), name='start_work', tool_call_id=raw['data']['tool_calls'][0]['id'])))
+                'actions_executed': False}), name='start_coding', tool_call_id=raw['data']['tool_calls'][0]['id'])))
             if turn:
                 turn = self.complete_turn()
                 if self.state.get('pending'):
@@ -473,8 +512,7 @@ class ConversationRunner(TaskRunner):
             try:
                 self.bootstrap_work()
             except EnvironmentRequired as exc:
-                self.state.update(status='awaiting_user', reason=str(exc))
-                self.persist('environment_required')
+                self.environment_blocked(exc)
                 return
         super().advance()
 

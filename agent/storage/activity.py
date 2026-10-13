@@ -25,6 +25,13 @@ def projection(root, task, seq, record, db):
         anchor = state['conversation_turn']['id']
     call = payload.get('call')
     row = {'after_id': anchor, 'seq': seq, 'task_id': task['id']}
+    if event == 'environment_preparation':
+        status = payload.get('status', 'preparing')
+        row.update(id=f"{task['id']}-environment", kind='operation',
+                   label=payload.get('message', '正在准备项目环境'), detail='',
+                   status='completed' if status == 'ready' else 'failed' if status == 'failed' else
+                          'interrupted' if status == 'cancelled' else 'running')
+        return row
     if event.startswith('model_request_') or event == 'model_response_received':
         call = call or state['budget']['used_steps']
         row.update(id=f"{task['id']}-thinking-{call}", kind='thinking',
@@ -84,10 +91,12 @@ def projection(root, task, seq, record, db):
         labels = {'list_files': '正在列出目录', 'read_file': '正在读取文件', 'search_files': '正在搜索文件',
                   'run_existing': '正在运行已有任务', 'web_search': '正在搜索网页', 'web_fetch': '正在读取网页',
                   'list_applications': '正在查找应用', 'open_file': '正在准备打开文件', 'launch_application': '正在准备启动应用'}
+        labels.update(list_directory='正在列出目录', search_file_contents='正在搜索文件内容',
+                      run_project_task='正在运行项目任务')
         detail = args.get('path') or args.get('entry') or args.get('query') or args.get('url', '')
-        if name == 'search_files':
+        if name in {'search_files', 'search_file_contents'}:
             detail += '\n' + args.get('query', '')
-        if name == 'run_existing':
+        if name in {'run_existing', 'run_project_task'}:
             detail += '\n参数：' + json.dumps(args.get('args', []), ensure_ascii=False)
         row.update(id=f"{task['id']}-assistant-{payload['request_call']}-{payload['id']}", kind='operation', label=labels.get(name, '工具调用'),
                    detail=detail, started_at=payload.get('started_at'), seconds=payload.get('seconds'),
