@@ -19,7 +19,7 @@ from agent.execution.executor import OperationExecutor
 from agent.source.preparation import Preparation, build_preparation
 from agent.task.runner import TaskRunner
 from agent.task.contracts import Operation
-from agent.model.tools import submit_work
+from agent.model.tools import submit_plan
 import test_task_runner as f
 
 
@@ -122,7 +122,7 @@ class SourceTests(unittest.TestCase):
             model=f.Model([scan,self.candidate()])
             result=TaskRunner(model,self.env,state_dir=self.root/'state',optimize_source=enabled).run([], 'return 4',StepBudget(max_steps=5))
             self.assertEqual(result['status'],'verified_success',result)
-            outputs.append([wire_input(m,[submit_work]) for m in model.calls])
+            outputs.append([wire_input(m,[submit_plan]) for m in model.calls])
             shutil.rmtree(self.root/'state')
             shutil.rmtree(self.env.artifact_root)
             self.env.artifact_root.mkdir()

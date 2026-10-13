@@ -51,7 +51,7 @@ pnpm --dir web build
 
 ## 执行与验收边界
 
-- 工作工具为 `submit_work`、`repair_work`、`freeze_acceptance` 和 `revise_acceptance`，保持 Beta strict 和本地校验。
+- 工作工具为 `submit_plan`、`repair_work`、`freeze_acceptance` 和 `revise_acceptance`，保持 Beta strict 和本地校验。
 - 浏览器另有 `web_search` 和 `web_fetch`。联网开关不改变工具定义；网络执行由程序根据当前任务快照检查。
 - 浏览器固定增加 `list_files`、`read_file`、`search_files`、`run_existing`。工具参数存于 `resources/assistant.schema.json`，查询和已有任务运行不初始化编码环境。
 - `run_existing` 仅接收已有入口和 argv。记录保存在任务目录 `assistant/`；子任务可提供本次生成的四项 Token JSON，来源、哈希及未知用量单独保存，不混入助手用量。

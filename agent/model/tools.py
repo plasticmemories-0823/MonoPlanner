@@ -11,7 +11,7 @@ REPAIR_SCHEMA = json.loads(REPAIR_SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
 @tool(args_schema=WORK_SCHEMA)
-def submit_work(**kwargs) -> dict:
+def submit_plan(**kwargs) -> dict:
     """Return one fully specified plan. The host, not a model, executes its steps."""
     return kwargs
 
@@ -43,7 +43,7 @@ def revise_acceptance(**kwargs) -> dict:
     return kwargs
 
 
-WORK_TOOLS = (submit_work, repair_work, freeze_acceptance, revise_acceptance)
+WORK_TOOLS = (submit_plan, repair_work, freeze_acceptance, revise_acceptance)
 
 WEB_SCHEMA = json.loads((PROJECT_ROOT / 'resources/web.schema.json').read_text(encoding='utf-8'))
 

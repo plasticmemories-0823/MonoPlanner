@@ -54,7 +54,7 @@ class StreamTests(unittest.TestCase):
             def stream(self, *args, **kwargs):
                 from langchain_core.messages import AIMessageChunk
                 yield AIMessageChunk(content='', additional_kwargs={'reasoning_content': '部分思考'},
-                                      tool_call_chunks=[{'name': 'submit_work', 'args': '{', 'id': 'call', 'index': 0}])
+                                      tool_call_chunks=[{'name': 'submit_plan', 'args': '{', 'id': 'call', 'index': 0}])
         with self.assertRaisesRegex(RuntimeError, 'without a complete'):
             ConfiguredModel(Partial()).invoke_with_progress([], lambda text: None)
 

@@ -244,7 +244,7 @@ class LocalRepairTests(unittest.TestCase):
     def test_malformed_arguments_can_be_corrected_without_replanning(self):
         arguments = json.dumps(self.candidate()) + "}"
         malformed = AIMessage(content="", invalid_tool_calls=[{
-            "name": "submit_work", "id": "bad-json", "args": arguments, "error": "Extra data"}])
+            "name": "submit_plan", "id": "bad-json", "args": arguments, "error": "Extra data"}])
         result = self.run_replies([malformed, lambda m: correction(m, [edit(
             "$raw", arguments[-30:], arguments[-30:-1], "edit_text")])])
         self.assertEqual(result["status"], "verified_success", result)
@@ -311,7 +311,7 @@ class LocalRepairTests(unittest.TestCase):
             body = json.loads(request.content)
             requests.append(body)
             if len(requests) == 1:
-                name, arguments = "submit_work", json.dumps(original, ensure_ascii=False, indent=2)
+                name, arguments = "submit_plan", json.dumps(original, ensure_ascii=False, indent=2)
             elif len(requests) == 2:
                 notice = json.loads(body["messages"][-1]["content"].split("] ", 1)[1].split("\n", 1)[0])
                 name, arguments = "repair_work", json.dumps({"draft_id": notice["draft_id"],

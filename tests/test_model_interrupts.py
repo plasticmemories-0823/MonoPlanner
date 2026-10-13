@@ -38,7 +38,7 @@ class WaitingClient:
                 self.started.set()
                 if not self.before_headers:
                     yield AIMessageChunk(content='', additional_kwargs={'reasoning_content': '部分思考'},
-                        tool_call_chunks=[{'name': 'submit_work', 'args': '{', 'id': 'partial', 'index': 0}])
+                        tool_call_chunks=[{'name': 'submit_plan', 'args': '{', 'id': 'partial', 'index': 0}])
                 await asyncio.Event().wait()
             finally:
                 self.closed.set()

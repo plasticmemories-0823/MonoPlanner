@@ -33,7 +33,7 @@ class ReleaseModel(OfflineModel):
                 return self.call('freeze_acceptance', {'trial_id': value['trial_id'],
                     'reason': '原源码真实断言失败且用例已加载，按固定原件验收。'}, '验收已可运行，继续冻结并核验修改。')
         submitted = [call for message in messages if isinstance(message, AIMessage)
-                     for call in message.tool_calls if call['name'] == 'submit_work']
+                     for call in message.tool_calls if call['name'] == 'submit_plan']
         if not submitted:
             args = {'kind': 'inspect', 'note': '读取实现并验证只读调查临时编译。', 'steps': [
                 {'id': 'readSource', 'op': 'read', 'path': 'sample.py'},
@@ -45,7 +45,7 @@ class ReleaseModel(OfflineModel):
                     'steps': [{'id': 'editSource', 'op': 'shell', 'command': 'python -c ' + shlex.quote(command)}],
                     'test_code': "import unittest\nfrom sample import value\nclass Acceptance(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(value(), 4)\n",
                     'regression_command': "python -c 'import sample; assert isinstance(sample.value(), int)'"}
-        return self.call('submit_work', WorkRequest.model_validate(args).model_dump(), '继续按实际执行结果核验。')
+        return self.call('submit_plan', WorkRequest.model_validate(args).model_dump(), '继续按实际执行结果核验。')
 
     @staticmethod
     def call(name, args, text):

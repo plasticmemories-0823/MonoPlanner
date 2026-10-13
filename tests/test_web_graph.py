@@ -47,7 +47,7 @@ class BlockedModel:
     def invoke(self, messages):
         if any(t.name == 'start_work' for t in self.tools):
             return start_reply()
-        return AIMessage(content='', tool_calls=[{'name': 'submit_work', 'id': 'blocked',
+        return AIMessage(content='', tool_calls=[{'name': 'submit_plan', 'id': 'blocked',
             'args': {'kind': 'blocked', 'note': 'private explanation'}}],
             usage_metadata={'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2})
 
@@ -100,7 +100,7 @@ def text_reply(text='公开回答'):
 
 
 def investigation(paths):
-    return AIMessage(content='先读取必要的源码。', tool_calls=[{'name': 'submit_work', 'id': 'investigate',
+    return AIMessage(content='先读取必要的源码。', tool_calls=[{'name': 'submit_plan', 'id': 'investigate',
         'args': {'kind': 'inspect', 'note': 'PRIVATE_NOTE',
                  'steps': [{'id': 'read'+str(i), 'op': 'read', 'path': p} for i, p in enumerate(paths)]}}],
         usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5})
@@ -313,7 +313,7 @@ class ConversationTests(unittest.TestCase):
             return result
         # A coding supplement selects the work route. Plain chat now preserves
         # the old plan; it must not serve as an implicit cancellation command.
-        stopped = AIMessage(content='停止剩余读取。', tool_calls=[{'name': 'submit_work', 'id': 'stop',
+        stopped = AIMessage(content='停止剩余读取。', tool_calls=[{'name': 'submit_plan', 'id': 'stop',
             'args': {'kind': 'blocked', 'note': 'User cancelled the remaining read'}}])
         model = ScriptedModel([start_reply(), investigation(['first.py', 'second.py']), start_reply(), stopped])
         with patch.object(OperationExecutor, 'execute', operation):
@@ -433,7 +433,7 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'task_blocked')
 
     def test_saved_input_applies_once_after_acknowledgment_interruption(self):
-        model = ScriptedModel([start_reply(), investigation(['first.py']), start_reply(), AIMessage(content='', tool_calls=[{'name':'submit_work','id':'stop','args':{'kind':'blocked','note':'User stops remaining work'}}])],
+        model = ScriptedModel([start_reply(), investigation(['first.py']), start_reply(), AIMessage(content='', tool_calls=[{'name':'submit_plan','id':'stop','args':{'kind':'blocked','note':'User stops remaining work'}}])],
             hook=lambda n: self.store.enqueue(self.thread, 'new', 'message', '只解释') if n == 2 else None)
         original = ConversationStore.acknowledge
         def interrupted(store, thread, identities):

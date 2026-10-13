@@ -211,11 +211,11 @@ class TaskRunner:
                 "decision": "freeze" if calls[0]["name"] == "freeze_acceptance" else "revise"}, revisions.Review), raw
         if response.invalid_tool_calls:
             invalid = response.invalid_tool_calls
-            if not calls and len(invalid) == 1 and invalid[0]["name"] == "submit_work":
+            if not calls and len(invalid) == 1 and invalid[0]["name"] == "submit_plan":
                 self.rejected_input = invalid[0]["args"]
                 repair.loads(self.rejected_input)
             raise ValueError("Expected exactly one valid work tool call; no actions were executed")
-        if len(calls) != 1 or calls[0]["name"] not in {"submit_work", "repair_work"}:
+        if len(calls) != 1 or calls[0]["name"] not in {"submit_plan", "repair_work"}:
             raise ValueError("Expected exactly one valid work tool call; no actions were executed")
         value = repair.merge(self, calls[0]["args"]) if calls[0]["name"] == "repair_work" else calls[0]["args"]
         self.rejected_input = value

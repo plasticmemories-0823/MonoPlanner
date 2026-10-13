@@ -16,7 +16,7 @@ from eval.swebench_runner import archive_source
 from agent.model.client import create_model
 from agent.model.payload import wire_input
 from agent.task.contracts import WorkRequest
-from agent.model.tools import WORK_SCHEMA, SCHEMA_PATH, submit_work
+from agent.model.tools import WORK_SCHEMA, SCHEMA_PATH, submit_plan
 from agent.storage.recovery import code_key
 
 
@@ -43,7 +43,7 @@ class PlanSchemaTests(unittest.TestCase):
         project(actual)
         self.assertEqual(actual, WORK_SCHEMA)
         self.assertEqual(actual, expected)
-        self.assertTrue(wire_input([], [submit_work])["tools"][0]["function"]["strict"])
+        self.assertTrue(wire_input([], [submit_plan])["tools"][0]["function"]["strict"])
 
     def test_real_http_payload_uses_beta_high_and_preserves_code_and_tool_history(self):
         code = 'print("中文\\n")\npath = "C:\\\\quoted\\\\file"\n# brackets { [ and a quote \'\n'
@@ -58,12 +58,12 @@ class PlanSchemaTests(unittest.TestCase):
                 "model": "deepseek-flash", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
                     "role": "assistant", "content": "", "reasoning_content": "existing P0338 thinking",
                     "tool_calls": [{"id": "plan-call", "type": "function", "function": {
-                        "name": "submit_work", "arguments": arguments}}]}}],
+                        "name": "submit_plan", "arguments": arguments}}]}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20}})
 
         with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
             with patch("agent.model.network.model_http_clients", return_value={"http_client": transport}):
-                model = create_model({"model_name": "deepseek-flash", "api_key": "offline-placeholder"}).bind_tools([submit_work])
+                model = create_model({"model_name": "deepseek-flash", "api_key": "offline-placeholder"}).bind_tools([submit_plan])
             history = [HumanMessage(content="original request")]
             first = model.invoke(history)
             self.assertEqual(first.tool_calls[0]["args"]["test_code"], code)
@@ -74,7 +74,7 @@ class PlanSchemaTests(unittest.TestCase):
             self.assertEqual(body["reasoning_effort"], "high")
             self.assertNotIn("response_format", body)
             self.assertNotIn("tool_choice", body)
-            self.assertEqual(body["tools"], wire_input([], [submit_work])["tools"])
+            self.assertEqual(body["tools"], wire_input([], [submit_plan])["tools"])
         self.assertEqual(requests[1][1]["messages"][:1], requests[0][1]["messages"])
         self.assertEqual(requests[1][1]["messages"][1]["tool_calls"][0]["function"]["arguments"], arguments)
 

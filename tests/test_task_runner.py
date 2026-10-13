@@ -18,7 +18,7 @@ CODE = "import unittest\nfrom sample import value\nclass ValueTests(unittest.Tes
 
 
 def reply(plan):
-    return AIMessage(content="", tool_calls=[{"name": "submit_work", "id": "plan-call", "args": plan}],
+    return AIMessage(content="", tool_calls=[{"name": "submit_plan", "id": "plan-call", "args": plan}],
         usage_metadata={"input_tokens": 10, "output_tokens": 10, "total_tokens": 20})
 
 

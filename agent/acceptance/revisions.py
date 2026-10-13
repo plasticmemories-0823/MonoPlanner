@@ -197,7 +197,7 @@ def trial(loop, code, regression, response, *, driver=(), candidate=None, parent
                 "A runnable assertion failure may reproduce the defect; it is not proof that the expectation is correct. "
                 "No proposed modification has run. freeze_acceptance releases only the selected_candidate above. "
                 "revise_acceptance changes tests only and keeps that candidate; to replace its edits before the first "
-                "freeze, submit a complete candidate with submit_work and review the new trial_id."})
+                "freeze, submit a complete candidate with submit_plan and review the new trial_id."})
     loop.persist("acceptance_trial_finished", {"trial_id": identifier, "status": report["status"]})
 
 

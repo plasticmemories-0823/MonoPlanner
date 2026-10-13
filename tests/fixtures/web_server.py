@@ -60,7 +60,7 @@ class OfflineModel:
             value = WorkRequest.model_validate({'kind': 'inspect', 'note': 'private fixture note',
                 'steps': [{'id': 'readDemo', 'op': 'read', 'path': 'demo.py'}]}).model_dump()
             return AIMessage(content='我会读取指定的小文件。', tool_calls=[{
-                'name': 'submit_work', 'id': 'offline-read', 'args': value}],
+                'name': 'submit_plan', 'id': 'offline-read', 'args': value}],
                 additional_kwargs={'reasoning_content': 'PRIVATE_BROWSER_REASONING'},
                 usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5,
                                 'input_token_details': {'cache_read': 2}})

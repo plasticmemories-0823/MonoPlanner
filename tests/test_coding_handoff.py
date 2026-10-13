@@ -24,10 +24,10 @@ class CodingHandoffTests(unittest.TestCase):
             self.assertEqual((PROJECT_ROOT/'resources'/name).read_bytes(), original)
         original = subprocess.check_output(['git', 'show', '98b3851:resources/prompts/task.txt'], cwd=PROJECT_ROOT).decode()
         rules = (PROJECT_ROOT/'resources/prompts/task.txt').read_text(encoding='utf-8')
-        self.assertEqual(rules, original)
+        self.assertEqual(rules, original.replace("submit_work", "submit_plan"))
         self.assertEqual(wire_input([], CODING_TOOLS)['tools'][:4], wire_input([], WORK_TOOLS)['tools'])
         self.assertEqual([t.name for t in CODING_TOOLS], [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch'])
-        self.assertNotIn('submit_work', [t.name for t in CHAT_TOOLS])
+        self.assertNotIn('submit_plan', [t.name for t in CHAT_TOOLS])
 
     def test_first_coding_request_contains_initial_material_and_no_chat_instructions(self):
         (self.repo/'README.md').write_text('Public repository introduction.', encoding='utf-8')
@@ -69,7 +69,7 @@ class CodingHandoffTests(unittest.TestCase):
             def clone_options(self):
                 return {}
         FakeDocker.instances, FakeDocker.outcomes = [], []
-        plan = AIMessage(content='Inspect six independent observations.', tool_calls=[{'name': 'submit_work', 'id': 'six',
+        plan = AIMessage(content='Inspect six independent observations.', tool_calls=[{'name': 'submit_plan', 'id': 'six',
             'args': {'kind': 'inspect', 'note': 'Readonly observations', 'steps': [
                 {'id': 's'+str(i), 'op': 'shell', 'command': 'echo observation'+str(i)} for i in range(6)]}}])
         model = fixtures.ScriptedModel([fixtures.start_reply(), plan, fixtures.text_reply()])

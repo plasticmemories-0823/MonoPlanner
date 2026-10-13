@@ -31,7 +31,7 @@ def summary(text='Known failure remains unresolved. Original code and tests rema
 def cycle(call_id, path, reasoning=''):
     data = {'path': path, 'sha256': path, 'text': '1: exact source\n', 'visible_ranges': [[0, 1]]}
     return [message_to_dict(AIMessage(content='inspection', additional_kwargs={'reasoning_content': reasoning},
-                tool_calls=[{'id': call_id, 'name': 'submit_work', 'args': {'kind': 'inspect'}}])),
+                tool_calls=[{'id': call_id, 'name': 'submit_plan', 'args': {'kind': 'inspect'}}])),
             message_to_dict(ToolMessage(tool_call_id=call_id, content=json.dumps(
                 {'steps': [{'op': 'read', 'status': 'succeeded', 'data': data}]})))]
 
@@ -199,7 +199,7 @@ class CompactionTests(unittest.TestCase):
     def test_incomplete_empty_tool_and_expanding_summaries_do_not_replace_history(self):
         for answer in (summary(''), summary('x' * 400000),
                        message_to_dict(AIMessage(content='truncated', response_metadata={'finish_reason': 'length'})),
-                       message_to_dict(AIMessage(content='bad', tool_calls=[{'id': 'bad', 'name': 'submit_work', 'args': {}}],
+                       message_to_dict(AIMessage(content='bad', tool_calls=[{'id': 'bad', 'name': 'submit_plan', 'args': {}}],
                                                 response_metadata={'finish_reason': 'stop'}))):
             with self.subTest(answer=answer['data']['content'][:15]):
                 self.loop = Loop(self.root / str(len(self.loop.calls)) / str(len(answer['data']['content'])))

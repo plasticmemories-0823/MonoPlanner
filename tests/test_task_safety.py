@@ -9,7 +9,7 @@ from agent.model.payload import wire_input
 from agent.model.errors import ModelRequestNotSent
 from agent.model.context import admit
 from agent.task.contracts import WorkRequest
-from agent.model.tools import submit_work
+from agent.model.tools import submit_plan
 from agent.execution.probe import run_probe
 import test_task_runner as f
 
@@ -24,7 +24,7 @@ class TaskSafetyTests(unittest.TestCase):
         bad = {'kind':'inspect','note':'invalid','steps':[]}
         result = self.loop([bad, self.candidate(2), self.candidate()]).run([], 'return 4', StepBudget(max_steps=6))
         self.assertEqual(result['status'], 'verified_success', result)
-        payloads = [wire_input(m, [submit_work]) for m in self.model.calls]
+        payloads = [wire_input(m, [submit_plan]) for m in self.model.calls]
         for a, b in zip(payloads, payloads[1:]):
             self.assertEqual(a['messages'], b['messages'][:len(a['messages'])])
         self.assertIn('Plan rejected', str(self.model.calls[-1]))
@@ -59,9 +59,9 @@ class TaskSafetyTests(unittest.TestCase):
     def test_guard_refuses_changes(self):
         state = {}
         original = [SystemMessage(content='stable'),HumanMessage(content='task')]
-        admit(state, original, [submit_work], {})
+        admit(state, original, [submit_plan], {})
         with self.assertRaises(ModelRequestNotSent):
-            admit(state, [SystemMessage(content='changed')], [submit_work], {})
+            admit(state, [SystemMessage(content='changed')], [submit_plan], {})
 
     def test_probe_never_falls_back_to_host(self):
         marker = self.repo/'unsafe'

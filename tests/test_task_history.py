@@ -11,7 +11,7 @@ from agent.task.budget import StepBudget
 from agent.model.payload import wire_input
 from agent.task.runner import TaskRunner
 from agent.storage.history import LocalHistory
-from agent.model.tools import submit_work
+from agent.model.tools import submit_plan
 from support import interrupt_after_persist
 import test_task_runner as f
 
@@ -107,13 +107,13 @@ class TaskHistoryTests(unittest.TestCase):
         scan={'kind':'inspect','note':'read needed file','steps':[
             {'id':'s','op':'search','query':'def value'}, {'id':'r','op':'read','from_step':'s'}]}
         self.assertEqual(self.run_plans([scan,self.candidate()],persistence=False)["status"],"verified_success")
-        a=[wire_input(x,[submit_work]) for x in self.model.calls]
+        a=[wire_input(x,[submit_plan]) for x in self.model.calls]
         shutil.rmtree(self.root/'state')
         shutil.rmtree(self.env.artifact_root)
         self.env.artifact_root.mkdir()
         (self.repo/'sample.py').write_text('def value():\n    return 0\n')
         self.assertEqual(self.run_plans([scan,self.candidate()])["status"],"verified_success")
-        b=[wire_input(x,[submit_work]) for x in self.model.calls]
+        b=[wire_input(x,[submit_plan]) for x in self.model.calls]
         def normalize(value):
             if isinstance(value,dict):
                 return {k:normalize(v) for k,v in value.items() if k!='seconds'}
