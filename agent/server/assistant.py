@@ -12,9 +12,9 @@ from agent.storage.records import save
 from agent.execution.projects import EnvironmentRequired
 from agent.execution.preparation import PreparationCancelled
 
-READ_NAMES = {'list_directory', 'read_file', 'search_file_contents', 'list_applications'}
+READ_NAMES = {'list_files', 'read_file', 'search_files', 'list_applications'}
 OPEN_NAMES = {'open_file', 'launch_application', 'request_file_operation'}
-ASSISTANT_NAMES = {*READ_NAMES, *OPEN_NAMES, 'run_project_task'}
+ASSISTANT_NAMES = {*READ_NAMES, *OPEN_NAMES, 'run_existing'}
 
 
 def validate(name, args):
@@ -35,7 +35,7 @@ def validate(name, args):
             errors.append(f'{key}: 实际值 {str(value)[:100]!r}；要求 {field["type"]}')
         if field.get('enum') and value not in field['enum']:
             errors.append(f'{key}: 实际值 {value!r}；要求 {field["enum"]}')
-    for key, minimum, maximum in (('offset', 0, None), ('limit', 1, 200 if name == 'list_directory' else 50 if name == 'search_file_contents' else 1000), ('timeout', 1, None)):
+    for key, minimum, maximum in (('offset', 0, None), ('limit', 1, 200 if name == 'list_files' else 50 if name == 'search_files' else 1000), ('timeout', 1, None)):
         if type(args.get(key)) is int and (args[key] < minimum or (maximum and args[key] > maximum)):
             errors.append(f'{key}: 实际值 {args[key]}；要求 {minimum}..{maximum or "任务剩余时间"}')
     if errors:
@@ -57,9 +57,9 @@ def invoke(loop, call, folder, history):
         from agent.execution.desktop import invoke as desktop_invoke
         return desktop_invoke(loop, name, args)
     files = AssistantFiles(loop.repo, read_sources=loop.state.get('read_sources', []))
-    if name == 'list_directory':
+    if name == 'list_files':
         return files.list(args['path'], args['offset'], args['limit'])
-    if name == 'search_file_contents':
+    if name == 'search_files':
         return files.search(args['path'], args['query'], args['offset'], args['limit'])
     if name == 'read_file':
         return files.read(args['path'], args['offset'], args['limit'], history, bool(args['reread_reason'].strip()))
@@ -76,7 +76,7 @@ def execute_calls(loop, response, history=None):
         loop.persist('assistant_prepared')
     calls = pending['calls']
     conflict = (any(c['name'] not in ASSISTANT_NAMES | WEB_NAMES for c in calls)
-                or (any(c['name'] in {'run_project_task', *OPEN_NAMES} for c in calls) and len(calls) != 1))
+                or (any(c['name'] in {'run_existing', *OPEN_NAMES} for c in calls) and len(calls) != 1))
     while pending['cursor'] < len(calls):
         call = calls[pending['cursor']]
         folder = loop.root/'assistant'/('call-%04d-%02d' % (pending['call'], pending['cursor']))
@@ -100,7 +100,7 @@ def execute_calls(loop, response, history=None):
             if result.get('status') == 'awaiting_approval':
                 pending.setdefault('approval_ids', []).append(result['id'])
                 loop.state.setdefault('desktop_approvals', {})[result['id']] = 'awaiting_approval'
-            status = 'failed' if result.get('error') or (call['name'] == 'run_project_task'
+            status = 'failed' if result.get('error') or (call['name'] == 'run_existing'
                 and (result['exit_code'] != 0 or result['timed_out'])) else 'succeeded'
         except PreparationCancelled as exc:
             # The entry has not started. Preserve its call/cursor for explicit
@@ -116,7 +116,7 @@ def execute_calls(loop, response, history=None):
             loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
             return
         except (ValueError, OSError, KeyError, RuntimeError) as exc:
-            if call['name'] == 'run_project_task' and loop.state.get('assistant_process'):
+            if call['name'] == 'run_existing' and loop.state.get('assistant_process'):
                 loop.state.update(status='execution_unknown', reason='已有任务执行结果不明，不自动重试')
                 loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
                 return
@@ -131,7 +131,7 @@ def execute_calls(loop, response, history=None):
                                   name=call['name'], tool_call_id=call['id'])))
         pending['cursor'] += 1
         loop.state.update(assistant_running=None, assistant_process=None)
-        if call['name'] == 'run_project_task':
+        if call['name'] == 'run_existing':
             turn = loop.state.get('conversation_turn')
             loop.state['assistant_run_turn'] = turn['id'] if turn else 'initial'
             loop.state.setdefault('existing_runs', []).append({'record': str(folder/'result.json'),

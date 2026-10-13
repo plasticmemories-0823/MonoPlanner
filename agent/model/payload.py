@@ -13,21 +13,42 @@ from agent.model.errors import ModelRequestNotSent
 RAW_TOOL_CALLS = "_provider_tool_calls"
 
 
-def _original_calls(message):
+def original_calls(message):
+    """Validate call identities, retaining even rejected argument strings verbatim."""
     raw = message.additional_kwargs.get(RAW_TOOL_CALLS)
-    if raw is None or not message.tool_calls or message.invalid_tool_calls:
-        return None  # Old archives and simulated models still use parsed calls.
+    parsed = [*message.tool_calls, *message.invalid_tool_calls]
+    if raw is None and not parsed:
+        return []
     try:
-        if not isinstance(raw, list) or len(raw) != len(message.tool_calls):
+        by_id = {}
+        for call in parsed:
+            if (not isinstance(call.get('id'), str) or not call['id'].strip()
+                    or not isinstance(call.get('name'), str) or not call['name'].strip()
+                    or call['id'] in by_id):
+                raise ValueError('missing or duplicate call identity')
+            by_id[call['id']] = call
+        if raw is None:
+            # Legacy archives/fake models have no provider representation.
+            raw = [{'id': c['id'], 'type': 'function', 'function': {
+                'name': c['name'], 'arguments': c['args'] if c in message.invalid_tool_calls
+                else json.dumps(c['args'], ensure_ascii=False, sort_keys=True)}} for c in parsed]
+        if not isinstance(raw, list) or len(raw) != len(parsed):
             raise ValueError("call count changed")
-        for original, parsed in zip(raw, message.tool_calls, strict=True):
+        seen = set()
+        for original in raw:
             function = original["function"]
-            if (original.get("type") != "function" or original["id"] != parsed["id"]
-                    or function["name"] != parsed["name"] or not isinstance(function["arguments"], str)):
+            call = by_id[original['id']]
+            if (original.get("type") != "function" or original['id'] in seen
+                    or function["name"] != call["name"] or not isinstance(function["arguments"], str)):
                 raise ValueError("call identity changed")
-            decoded = json.loads(function["arguments"])
-            if json.dumps(decoded, sort_keys=True) != json.dumps(parsed["args"], sort_keys=True):
-                raise ValueError("parsed arguments changed")
+            seen.add(original['id'])
+            if call in message.invalid_tool_calls:
+                if function['arguments'] != call['args']:
+                    raise ValueError('rejected arguments changed')
+            else:
+                decoded = json.loads(function["arguments"])
+                if json.dumps(decoded, sort_keys=True) != json.dumps(call["args"], sort_keys=True):
+                    raise ValueError("parsed arguments changed")
     except (KeyError, TypeError, ValueError) as exc:
         raise ModelRequestNotSent("invalid_message_history",
                                   "原始工具参数与执行参数不一致，停止回放以保留可核查记录。") from exc
@@ -45,8 +66,8 @@ def wire_input(messages, tools=()):
                 item["content"] = json.dumps(item["content"], ensure_ascii=False)
             item.pop("name", None)
         if isinstance(original, AIMessage):
-            raw_calls = _original_calls(original)
-            if raw_calls is not None:
+            raw_calls = original_calls(original)
+            if raw_calls:
                 item["tool_calls"] = raw_calls
             if isinstance(item["content"], list):
                 item["content"] = "".join(block.get("text", "") for block in item["content"]
@@ -66,7 +87,12 @@ def estimate_input_tokens(messages, tools=()):
     payload = wire_input(messages, tools)
     # LangChain's approximate counter handles text/tool schemas, but ignores
     # the vendor reasoning extension. Add only that transmitted field once.
-    total = count_tokens_approximately(payload["messages"], tools=payload.get("tools", []))
+    # The SDK counter reparses tool JSON and cannot handle a retained rejected
+    # string. Count those exact transmitted strings separately, without parsing.
+    texts = [{k: v for k, v in item.items() if k != 'tool_calls'} for item in payload['messages']]
+    total = count_tokens_approximately(texts, tools=payload.get("tools", []))
+    total += sum(ceil(len(json.dumps(item['tool_calls'], ensure_ascii=False)) / 4)
+                 for item in payload['messages'] if item.get('tool_calls'))
     total += sum(ceil(len(item.get("reasoning_content", "")) / 4)
                  for item in payload["messages"])
     return total

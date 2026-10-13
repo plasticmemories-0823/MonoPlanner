@@ -31,7 +31,7 @@ class GeneralAssistantTests(unittest.TestCase):
 
     def task(self, code, **args):
         (self.repo/'task.py').write_text(code, encoding='utf-8')
-        return reply('run_project_task', entry='task.py', args=args.get('argv', []), timeout=args.get('timeout', 10),
+        return reply('run_existing', entry='task.py', args=args.get('argv', []), timeout=args.get('timeout', 10),
                      usage_file=args.get('usage_file', ''))
 
     def test_fixed_tools_and_aggregate_parameter_feedback(self):
@@ -209,19 +209,19 @@ class GeneralAssistantTests(unittest.TestCase):
         self.assertNotIn('total_tokens', child)
 
     def test_read_search_and_disabled_web_in_one_reply_remain_paired(self):
-        first = reply('list_directory', path='.', offset=0, limit=20)
-        first.tool_calls.extend([reply('search_file_contents', path='.', query='VALUE', offset=0, limit=20).tool_calls[0],
+        first = reply('list_files', path='.', offset=0, limit=20)
+        first.tool_calls.extend([reply('search_files', path='.', query='VALUE', offset=0, limit=20).tool_calls[0],
                                  reply('web_fetch', url='https://example.com').tool_calls[0]])
         model = ScriptedModel([first, text_reply()])
         with patch('agent.execution.web.WebProvider.fetch', side_effect=AssertionError('network disabled')):
             result = self.invoke(model, '查询资料')
         self.assertEqual(result['status'], 'chat_complete')
-        self.assertEqual([m.name for m in model.calls[1] if m.type == 'tool'], ['list_directory', 'search_file_contents', 'web_fetch'])
+        self.assertEqual([m.name for m in model.calls[1] if m.type == 'tool'], ['list_files', 'search_files', 'web_fetch'])
         self.assertIn('VALUE', repr(model.calls[1]))
 
     def test_conflicting_run_and_read_do_not_execute_and_are_both_reported(self):
         first = self.task("from pathlib import Path\nPath('marker').write_text('ran')")
-        first.tool_calls.append(reply('list_directory', path='.', offset=0, limit=20).tool_calls[0])
+        first.tool_calls.append(reply('list_files', path='.', offset=0, limit=20).tool_calls[0])
         model = ScriptedModel([first, text_reply()])
         self.invoke(model, '查询和运行')
         self.assertFalse((self.repo/'marker').exists())

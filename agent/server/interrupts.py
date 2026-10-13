@@ -30,12 +30,6 @@ class Signal:
         kinds = [kind for kind, _ in self.pending.values()]
         self.kind = 'pause' if 'pause' in kinds else kinds[-1] if kinds else None
 
-    def consume(self, sequence):
-        """Consume exactly the observed signal; never clear a newer input."""
-        with self.lock:
-            self.pending.pop(sequence, None)
-            self._refresh()
-
     def consume_input(self, identity):
         with self.lock:
             for sequence, (_, saved) in list(self.pending.items()):

@@ -38,7 +38,8 @@
             "type": "integer"
           },
           "limit": {
-            "maximum": 1000,
+            "description": "read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.",
+            "maximum": 2000,
             "minimum": 1,
             "type": "integer"
           },

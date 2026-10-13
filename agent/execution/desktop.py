@@ -74,10 +74,6 @@ class DesktopStore:
         exact = [a for a in matches if a['name'].casefold() == query.casefold()]
         return exact or matches
 
-    def authorize_file(self, thread, path):
-        ReadSources(self.root).add(thread, path, 'file')
-        return str(Path(path).resolve())
-
     def path(self, thread, path, repo, read_roots):
         sources = ReadSources(self.root).get(thread, read_roots)
         return AssistantFiles(repo, read_sources=sources).path(path)

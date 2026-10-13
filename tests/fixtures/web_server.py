@@ -28,9 +28,9 @@ class OfflineModel:
                 return self.web('web_fetch', url='https://example.com/fixture')
             if last.name in {'web_search', 'web_fetch'}:
                 return self.text('联网工具的离线结果已收到。来源：https://example.com/fixture；没有调用付费 API。')
-            if last.name == 'run_project_task':
+            if last.name == 'run_existing':
                 return self.text('已有任务运行结束。退出码：' + str(result.get('exit_code')) + '；被运行任务 Token 未知。没有调用付费 API。')
-            if last.name in {'read_file', 'list_directory', 'search_file_contents'}:
+            if last.name in {'read_file', 'list_files', 'search_files'}:
                 return self.text('查询已完成：' + (result.get('text') or result.get('error') or '目录已列出') + '。没有调用付费 API。')
             content = '实际读取已完成；这里没有调用付费模型。'
             if result.get('outcome') == 'superseded_by_user':
@@ -53,7 +53,7 @@ class OfflineModel:
         if '联网' in request:
             return self.web('web_search', query='离线界面验证')
         if '运行样本' in request:
-            return self.web('run_project_task', entry='task.py', args=[], timeout=30, usage_file='')
+            return self.web('run_existing', entry='task.py', args=[], timeout=30, usage_file='')
         if '查询文件' in request:
             return self.web('read_file', path='demo.py', offset=0, limit=80, reread_reason='')
         if '读取' in request:

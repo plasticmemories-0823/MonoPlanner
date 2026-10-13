@@ -229,18 +229,18 @@ class ConversationRunner(TaskRunner):
             mode = 'chat'
         elif names and names <= WEB_NAMES and not response.invalid_tool_calls:
             mode = 'web'
-        elif names == {'run_project_task'}:
+        elif names == {'run_existing'}:
             mode = 'run'
-        elif names == {'start_coding'} and len(calls) == 1 and not response.invalid_tool_calls and calls[0]['args'] == {}:
+        elif names == {'start_work'} and len(calls) == 1 and not response.invalid_tool_calls and calls[0]['args'] == {}:
             mode = 'work'
-        elif names <= {t.name for t in CHAT_TOOLS} - {'start_coding'} and not response.invalid_tool_calls:
+        elif names <= {t.name for t in CHAT_TOOLS} - {'start_work'} and not response.invalid_tool_calls:
             mode = 'read'
         else:
             target = turn['messages'] if turn else self.state['history']
             target.append(raw)
             for call in [*calls, *response.invalid_tool_calls]:
                 target.append(message_to_dict(ToolMessage(content=json.dumps({'error':
-                    'Only advertised chat tools are allowed. start_coding takes no arguments and must be called alone; '
+                    'Only advertised chat tools are allowed. start_work takes no arguments and must be called alone; '
                     'coding plans are requested after repository preparation.'}), name=call['name'], tool_call_id=call['id'])))
             if turn:
                 turn.pop('response', None)
@@ -342,6 +342,10 @@ class ConversationRunner(TaskRunner):
             self.phase = {'chat': 'chat', 'web': 'web', 'read': 'assistant', 'run': 'assistant',
                           'work': 'work'}.get(self.state.get('dispatch'),
                                             'work' if self.state['status'] == 'executing' else 'decide')
+        if self.state.get('rejection_pending'):
+            # Complete saved assistant/tool pairing before chat steering changes history.
+            super().advance()
+            return
         self.budget.check_request(0)
         approvals = self.state.get('desktop_approvals', {})
         if approvals:
@@ -444,12 +448,12 @@ class ConversationRunner(TaskRunner):
                 self.state['response_pending'] = turn.get('work_response')
             return
         self.tools = CODING_TOOLS
-        if raw and raw['data'].get('tool_calls') and raw['data']['tool_calls'][0]['name'] == 'start_coding':
+        if raw and raw['data'].get('tool_calls') and raw['data']['tool_calls'][0]['name'] == 'start_work':
             dialogue.publish(self, raw)
             target = turn['messages'] if turn else self.state['history']
             target.append(raw)
             target.append(message_to_dict(ToolMessage(content=json.dumps({'outcome': 'coding_handoff_saved',
-                'actions_executed': False}), name='start_coding', tool_call_id=raw['data']['tool_calls'][0]['id'])))
+                'actions_executed': False}), name='start_work', tool_call_id=raw['data']['tool_calls'][0]['id'])))
             if turn:
                 turn = self.complete_turn()
                 if self.state.get('pending'):

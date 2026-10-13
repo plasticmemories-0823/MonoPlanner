@@ -178,17 +178,6 @@ class StepBudget:
             self.refund_step(ticket.purpose)
             ticket.active = False
 
-    def take_step(self, purpose="work") -> bool:
-        """调用模型前扣一步；没有余额时不允许调用。"""
-        with _BUDGET_LOCK:
-            if self.available_steps(purpose) == 0:
-                return False
-            self.used_steps += 1
-            self.request_sequence = max(self.request_sequence + 1, self.used_steps)
-            if purpose == "report":
-                self.report_used_steps += 1
-            return True
-
     def refund_step(self, purpose="work"):
         with _BUDGET_LOCK:
             self.used_steps -= 1

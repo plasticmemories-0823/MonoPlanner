@@ -21,10 +21,19 @@ class CodingHandoffTests(unittest.TestCase):
     def test_original_four_schema_and_other_task_rules_are_unchanged(self):
         for name in ('plan.schema.json', 'repair.schema.json', 'acceptance-review.schema.json'):
             original = subprocess.check_output(['git', 'show', '98b3851:resources/' + name], cwd=PROJECT_ROOT)
-            self.assertEqual((PROJECT_ROOT/'resources'/name).read_bytes(), original)
+            expected = json.loads(original)
+            if name == 'plan.schema.json':
+                expected['properties']['steps']['items']['properties']['limit']['maximum'] = 2000
+                expected['properties']['steps']['items']['properties']['limit']['description'] = (
+                    'read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.')
+            self.assertEqual(json.loads((PROJECT_ROOT/'resources'/name).read_bytes()), expected)
         original = subprocess.check_output(['git', 'show', '98b3851:resources/prompts/task.txt'], cwd=PROJECT_ROOT).decode()
         rules = (PROJECT_ROOT/'resources/prompts/task.txt').read_text(encoding='utf-8')
-        self.assertEqual(rules, original.replace("submit_work", "submit_plan").replace("repair_work", "correct_plan_arguments"))
+        expected = original.replace('submit_work', 'submit_plan')
+        expected = expected.replace("limit=80, expected_exit=[0].", "limit=80, expected_exit=[0]. A read defaults to limit=2000; choose a smaller window when appropriate. Other operation defaults and limits are unchanged.")
+        expected = expected.replace('a total line limit (1..1000), automatically paged at 200 lines; search',
+            'a total line limit (1..2000), automatically paged at 200 lines. All pages and from_step locations share 50 KiB of UTF-8 text per read step. Truncation returns only an original prefix and continuation.next_offset; a partial long line is not a complete read. search')
+        self.assertEqual(rules, expected)
         self.assertEqual(wire_input([], CODING_TOOLS)['tools'][:4], wire_input([], WORK_TOOLS)['tools'])
         self.assertEqual([t.name for t in CODING_TOOLS], [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch'])
         self.assertNotIn('submit_plan', [t.name for t in CHAT_TOOLS])
@@ -55,12 +64,12 @@ class CodingHandoffTests(unittest.TestCase):
         self.assertEqual(len(list((Path(result['result']['artifact_dir'])/'requests').glob('call-*'))), 3)
 
     def test_invalid_start_arguments_and_direct_coding_call_are_rejected_in_chat(self):
-        invalid = AIMessage(content='', tool_calls=[{'name': 'start_coding', 'id': 'bad', 'args': {'request': 'replacement'}}])
+        invalid = AIMessage(content='', tool_calls=[{'name': 'start_work', 'id': 'bad', 'args': {'request': 'replacement'}}])
         model = fixtures.ScriptedModel([invalid, fixtures.investigation(['first.py']), fixtures.text_reply('Discuss only')])
         with patch('agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('must not execute')):
             result = self.invoke(model)
         self.assertEqual(result['status'], 'chat_complete')
-        self.assertIn('start_coding takes no arguments', model.calls[1][-1].content)
+        self.assertIn('start_work takes no arguments', model.calls[1][-1].content)
         self.assertFalse(result['workspace_bound'])
 
     def test_six_inspection_steps_reuse_one_copy_and_container(self):
@@ -109,9 +118,9 @@ class CodingHandoffTests(unittest.TestCase):
 class SignalSequenceTests(unittest.TestCase):
     def test_consuming_old_message_cannot_clear_new_message_or_pause(self):
         signal = Signal()
-        first = signal.interrupt('message', 'one')
+        signal.interrupt('message', 'one')
         signal.interrupt('message', 'two')
-        signal.consume(first)
+        signal.consume_input('one')
         self.assertEqual(signal.kind, 'message')
         signal.interrupt('pause', 'pause')
         signal.consume_input('two')

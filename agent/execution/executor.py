@@ -74,7 +74,7 @@ class OperationExecutor:
                 return lines
         return self.source_bytes(name).decode('utf-8').splitlines()
 
-    def read(self, name, offset, limit):
+    def read(self, name, offset, limit, *, budget=None):
         name = PurePosixPath(name.replace('\\', '/')).as_posix()
         if name.startswith('$record/'):
             data = self.path(name).read_bytes()
@@ -82,21 +82,11 @@ class OperationExecutor:
         else:
             data = self.source_bytes(name)
             lines = self.source_lines(name)
-        text = clip("\n".join(f"{i+1}: {line}" for i, line in
-                    enumerate(lines[offset:offset+limit], offset)), 12000)
-        from agent.source.paging import merged
-        # Clipping can retain the head and tail with a hole, or cut a long line.
-        # Only complete, byte-equivalent lines count as visible for continuation.
-        visible = []
-        for row in text.splitlines():
-            number, separator, value = row.partition(': ')
-            if separator and number.isdigit():
-                index = int(number) - 1
-                if offset <= index < min(len(lines), offset + limit) and value == lines[index]:
-                    visible.append([index, index + 1])
+        from agent.source.paging import ReadBudget
+        budget = budget if budget is not None else ReadBudget()
         return {"path": name, "offset": offset, "total_lines": len(lines),
                 "sha256": hashlib.sha256(data).hexdigest(),
-                "text": text, "visible_ranges": merged(visible)}
+                **budget.excerpt(lines, offset, limit)}
 
     def has_visible_overlap(self, step):
         if step.path.startswith('$') or step.query.startswith('reread:'):
@@ -106,25 +96,34 @@ class OperationExecutor:
         return any(start < step.offset + step.limit and end > step.offset
                    for start, end in self.visible_reads.get((name, sha), []))
 
-    def read_continuation(self, path, offset, limit, repeat=False):
-        from agent.source.paging import ranges, unread, read_pages, read_range
+    def read_continuation(self, path, offset, limit, repeat=False, *, budget=None):
+        from agent.source.paging import ranges, unread, read_pages, read_range, ReadBudget
+        budget = budget if budget is not None else ReadBudget()
         ranges(offset, limit)  # Preserve parameter limits even when nothing needs rereading.
         path = PurePosixPath(path.replace('\\', '/')).as_posix()
         if path.startswith('$record/'):
-            return read_range(self, path, offset, limit)
+            data = read_range(self, path, offset, limit, budget)
+            pages = list(read_pages(data))
+            data['continuation'] = {'requested_offset': offset, 'requested_lines': limit,
+                'next_offset': pages[-1]['next_offset'], 'reason': 'archived_record'}
+            return data
         sha = self.inventory().get(path)
         total = len(self.source_lines(path))  # Validates source access even for a visible range.
         end = min(total, offset + limit)
         seen = self.visible_reads.get((path, sha), []) if not repeat else []
         missing = unread(offset, end, seen)
         if missing == [[offset, end]] or offset >= total:
-            data = read_range(self, path, offset, limit)
+            data = read_range(self, path, offset, limit, budget)
         elif missing:
-            reads = [read_range(self, path, start, stop - start) for start, stop in missing]
-            data = reads[0] if len(reads) == 1 else {'reads': reads}
+            reads = []
+            for start, stop in missing:
+                reads.append(read_range(self, path, start, stop - start, budget))
+                if reads[-1]['truncated']:
+                    break
+            data = reads[0] if len(reads) == 1 else {'reads': reads, 'truncated': any(r['truncated'] for r in reads)}
         else:
             data = {'path': path, 'sha256': sha, 'offset': offset, 'total_lines': total,
-                    'text': '', 'visible_ranges': [], 'already_visible': True}
+                    'text': '', 'visible_ranges': [], 'already_visible': True, 'truncated': False}
         returned = [pair for page in read_pages(data) for pair in page['visible_ranges']]
         from agent.source.paging import merged
         self.visible_reads[(path, sha)] = merged([*self.visible_reads.get((path, sha), []), *returned])
@@ -166,14 +165,19 @@ class OperationExecutor:
     def execute(self, step, prior, directory, timeout, *, isolated=False):
         started = time.monotonic()
         if step.op == "read":
+            from agent.source.paging import ReadBudget, OUTPUT_BYTES
+            budget = ReadBudget()
             if step.from_step:
                 hits = prior[step.from_step]["data"]["hits"][:5]
                 if not hits:
                     raise ValueError("Referenced search has no hits; no path was guessed")
                 data = {"reads": [self.read_continuation(h["path"], max(0, h["line"]-1-step.limit//2), step.limit,
-                                                       step.query.startswith('reread:')) for h in hits]}
+                                                       step.query.startswith('reread:'), budget=budget) for h in hits]}
+                data['truncated'] = any(r['truncated'] for r in data['reads'])
             else:
-                data = self.read_continuation(step.path, step.offset, step.limit, step.query.startswith('reread:'))
+                data = self.read_continuation(step.path, step.offset, step.limit, step.query.startswith('reread:'), budget=budget)
+            data['output_budget'] = {'limit_bytes': OUTPUT_BYTES, 'used_bytes': OUTPUT_BYTES - budget.remaining,
+                                     'encoding': 'utf-8', 'scope': 'read_step_text'}
             ok = True
         elif step.op == "search":
             data, ok = self.search(step), True

@@ -9,6 +9,7 @@ from tests.http_client import TestClient
 from agent.execution.desktop import DesktopStore, applications
 from agent.server.desktop import routes
 from agent.storage.permissions import Permissions
+from agent.storage.read_sources import ReadSources
 from starlette.applications import Starlette
 
 
@@ -83,7 +84,7 @@ class DesktopPermissionsTests(unittest.TestCase):
     def test_single_file_authorization_does_not_authorize_its_directory(self):
         a, b = self.root/'one.txt', self.root/'two.txt'
         a.write_text('one'); b.write_text('two')
-        self.store.authorize_file(self.thread, a)
+        ReadSources(self.store.root).add(self.thread, str(a), 'file')
         self.store.preview(self.thread, str(a), '', [])
         with self.assertRaises(ValueError):
             self.store.preview(self.thread, str(b), '', [])

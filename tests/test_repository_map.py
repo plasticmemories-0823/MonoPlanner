@@ -50,40 +50,18 @@ class RepositoryMapTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.navigator.inspect_code("long_function", "../outside")
 
-    def test_readme_is_read_before_source_index_and_both_have_length_limits(self):
-        (self.repo / "README.md").write_text("PROJECT_OVERVIEW\n" * 2000, encoding="utf-8")
-        events = []
-        read = self.navigator._text_excerpt
-        refresh = self.navigator.refresh
-        def track_read(path, chars):
-            events.append(path.name)
-            return read(path, chars)
-        def track_refresh():
-            events.append("INDEX")
-            return refresh()
-        with patch.object(self.navigator, "_text_excerpt", side_effect=track_read), \
-             patch.object(self.navigator, "refresh", side_effect=track_refresh):
-            result = self.navigator.overview("修复 add")
-        self.assertLess(events.index("README.md"), events.index("INDEX"))
-        self.assertTrue(result["readme"]["excerpt"].startswith("PROJECT_OVERVIEW"))
-        self.assertTrue(result["readme"]["truncated"])
-        self.assertLessEqual(len(result["readme"]["excerpt"]), 2400)
-        self.assertLessEqual(len(json.dumps(result, ensure_ascii=False)), 8000)
-        self.assertEqual(result["test_config_hints"][0]["line"], 4)
-        self.assertIn("[tool.pytest.ini_options]", result["test_config_hints"][0]["excerpt"])
-
-    def test_missing_readme_and_natural_language_miss_leave_module_navigation(self):
+    def test_missing_readme_and_natural_language_miss_allow_explicit_module_query(self):
         (self.repo / "README.md").unlink()
-        result = self.navigator.overview("修复空白昵称的行为")
-        self.assertIsNone(result["readme"]["path"])
+        result = self.navigator.query("修复空白昵称的行为")
         self.assertEqual(result["candidates"], [])
-        self.assertIn("src/tinycalc/names.py", result["module_paths"])
+        explicit = self.navigator.query("src/tinycalc/names.py")
+        self.assertEqual(explicit["candidates"][0]["path"], "src/tinycalc/names.py")
         self.assertIn("不是语义检索", result["note"])
 
     def test_nested_request_prefers_consumer_not_argument_definitions(self):
         (self.repo / "consumer.py").write_text("def render(value):\n    return str(value)\n", encoding="utf-8")
         (self.repo / "arguments.py").write_text("def sin(x): return x\ndef wrap(x): return x\n", encoding="utf-8")
-        result = self.navigator.overview("Please implement a code fix for this repository issue:\n\nrender(sin(wrap(x))) returns invalid output")
+        result = self.navigator.query("Please implement a code fix for this repository issue:\n\nrender(sin(wrap(x))) returns invalid output")
         self.assertEqual(result["candidates"][0]["path"], "consumer.py")
         self.assertEqual(result["candidates"][0]["symbols"][0]["name"], "render")
 

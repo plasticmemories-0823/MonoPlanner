@@ -9,7 +9,7 @@ from tests.fixtures.web_server import OfflineModel, graph, application
 
 class ReleaseModel(OfflineModel):
     def bind_tools(self, tools):
-        self.coding = not any(tool.name == 'start_coding' for tool in tools)
+        self.coding = not any(tool.name == 'start_work' for tool in tools)
         return self
 
     def invoke_with_progress(self, messages, on_reasoning):
@@ -24,7 +24,7 @@ class ReleaseModel(OfflineModel):
     def invoke(self, messages):
         if not getattr(self, 'coding', False):
             if '发布编码验证' in messages[-1].text:
-                return self.call('start_coding', {}, '开始验证独立项目的编码流程。')
+                return self.call('start_work', {}, '开始验证独立项目的编码流程。')
             return super().invoke(messages)
         previous = messages[-1]
         if isinstance(previous, ToolMessage):

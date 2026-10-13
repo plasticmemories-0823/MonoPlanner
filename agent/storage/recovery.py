@@ -71,7 +71,6 @@ def code_key(root=None):
         'agent/execution/applications.py', 'launcher/Applications.cs', 'launcher/FilePicker.cs',
         'agent/execution/file_actions.py', 'agent/storage/read_sources.py',
         'agent/server/portable.py',
-        'resources/drivers/sitecustomize.py',
         'agent/source/syntax.py', 'agent/source/excerpts.py', 'agent/acceptance/results.py', 'agent/execution/executor.py',
         'agent/task/contracts.py', 'agent/model/tools.py',
         'agent/task/repair.py', 'resources/repair.schema.json',

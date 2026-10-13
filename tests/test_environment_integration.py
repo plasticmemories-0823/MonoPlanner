@@ -103,7 +103,7 @@ def test_pause_during_preparation_preserves_work_and_resume_does_not_reask_model
 
 
 def test_existing_entry_pause_during_preparation_does_not_start_or_consume_call(conversation):
-    reply = AIMessage(content='运行现有脚本。', tool_calls=[{'name': 'run_project_task', 'id': 'run-once',
+    reply = AIMessage(content='运行现有脚本。', tool_calls=[{'name': 'run_existing', 'id': 'run-once',
         'args': {'entry': 'first.py', 'args': [], 'timeout': 10, 'usage_file': ''}}],
         usage_metadata={'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2})
     model = graph_fixture.ScriptedModel([reply, graph_fixture.text_reply('脚本已运行')])

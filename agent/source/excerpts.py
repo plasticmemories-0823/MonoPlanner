@@ -1,8 +1,7 @@
 """Render bounded source excerpts for repository navigation."""
-import re
 import hashlib
 from pathlib import Path
-from agent.source.snapshots import _link, _safe_file
+from agent.source.snapshots import _safe_file
 
 MAX_FILE_BYTES = 512 * 1024
 
@@ -33,23 +32,3 @@ def _code_excerpt(self, name, line, count, max_chars):
             "source_sha256": entry["digest"], "text": "\n".join(rows),
             "truncated": actual_end < (symbol["end_line"] if symbol else len(lines)),
             "read_hint": {"mode": "read", "path": name, "offset": max(start - 1, actual_end), "limit": count}}
-
-
-def _text_excerpt(self, path, chars):
-    if getattr(self, '_frozen_view', None) is not None:
-        name = path.relative_to(self.root).as_posix()
-        if name not in self._frozen_view.files:
-            return None
-        raw = self._frozen_view.read_bytes(name)[:16_385]
-    else:
-        if _link(path) or not path.is_file():
-            return None
-        with path.open('rb') as stream:
-            raw = stream.read(16_385)
-    text = raw[:16_384].decode("utf-8-sig", errors="replace")
-    start = 0
-    if path.name.lower() in {"pyproject.toml", "setup.cfg", "tox.ini"}:
-        match = re.search(r"(?mi)^\[[^\n]*(?:pytest|testenv)[^\n]*\]", text)
-        start = match.start() if match else 0
-    return {"path": path.relative_to(self.root).as_posix(), "line": text[:start].count("\n") + 1, "excerpt": text[start:start + chars],
-            "truncated": len(raw) > 16_384 or len(text) > chars}

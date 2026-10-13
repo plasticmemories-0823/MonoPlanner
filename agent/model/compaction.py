@@ -105,7 +105,8 @@ def balanced_boundaries(items):
     for index, item in enumerate(items, 1):
         data = item.get('data', {})
         if item.get('type') == 'ai':
-            for call in data.get('tool_calls', []):
+            from agent.model.payload import original_calls
+            for call in original_calls(messages_from_dict([item])[0]):
                 if call['id'] in pending:
                     raise ModelRequestNotSent('invalid_message_history', 'Duplicate open tool call.')
                 pending.add(call['id'])

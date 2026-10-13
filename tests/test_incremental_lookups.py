@@ -71,12 +71,12 @@ class IncrementalLookupTests(unittest.TestCase):
         self.assertNotEqual(first['sha256'], second['sha256'])
         self.assertIn('LINE', second['text'])
 
-    def test_clipped_middle_is_still_missing_and_partial_lines_are_not_seen(self):
+    def test_budget_truncated_suffix_is_still_missing(self):
         reader = self.reader()
-        (self.repo / 'long.py').write_text(''.join('# %03d ' % i + 'x' * 140 + '\n' for i in range(180)))
+        (self.repo / 'long.py').write_text(''.join('# %03d ' % i + 'x' * 400 + '\n' for i in range(180)))
         reader.evidence.record('long_excerpt')
         first = reader.read_continuation('long.py', 0, 180)
-        self.assertEqual(len(first['visible_ranges']), 2)
+        self.assertEqual(len(first['visible_ranges']), 1)
         second = reader.read_continuation('long.py', 0, 180)
         missing_start = first['visible_ranges'][0][1]
         self.assertEqual(second['offset'], missing_start)
@@ -148,7 +148,7 @@ class IncrementalLookupTests(unittest.TestCase):
 
     def test_visible_range_does_not_bypass_path_or_parameter_checks(self):
         reader = self.reader()
-        for path, offset, limit in (('../private', 0, 10), ('long.py', -1, 10), ('long.py', 0, 1001)):
+        for path, offset, limit in (('../private', 0, 10), ('long.py', -1, 10), ('long.py', 0, 2001)):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 reader.read_continuation(path, offset, limit)
 

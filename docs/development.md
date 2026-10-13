@@ -55,11 +55,13 @@ pnpm --dir web build
 
 首次实际执行才由 `ConversationRunner.activate` 绑定准备好的镜像；聊天、目录浏览和预览不启动容器。手动或正式评测的显式镜像配置继续优先。项目依赖配置变化会使自动环境缓存失效；已绑定任务仍使用原环境。无依赖声明的新项目使用通用 Python/Node 基础环境，不猜测第三方依赖。
 
-- 工作工具为 `submit_plan`、`correct_plan_arguments`、`freeze_acceptance` 和 `revise_acceptance`，保持 Beta strict 和本地校验。
-- `start_coding` 只提交无参数开工交接；`correct_plan_arguments` 只修正拒收稿件列出的字段。`freeze_acceptance` 会冻结选定验收并放行与之绑定的候选修改，不是单纯记录审阅意见。
+- 工作工具为 `submit_plan`、`repair_work`、`freeze_acceptance` 和 `revise_acceptance`，保持 Beta strict 和本地校验。
+- `start_work` 只提交无参数开工交接；`repair_work` 只修正拒收稿件列出的字段。
+- 编码 `read` 默认及单次上限为2,000行，允许较小窗口；内部按200行分页。同一步的所有页及 `from_step` 区间共享50KiB UTF-8正文预算。按原文顺序截断，使用 `continuation.next_offset` 续读；超长单行会明确标记，部分行不计入已读区间。搜索限额及普通聊天 `read_file` 不变。
+- 完整但参数非法的助手回复仍按原件追加：保留公开文字、思考、工具调用身份及原始参数字符串，每个调用配对一个未执行的拒收结果。追加与配对状态写入检查点，恢复先完成配对，不重发请求。损坏JSON可以作为拒收原件续接；不完整回复或调用身份不可信则停止并保留现场。
 - 浏览器另有 `web_search` 和 `web_fetch`。联网开关不改变工具定义；网络执行由程序根据当前任务快照检查。
-- 浏览器固定增加 `list_directory`、`read_file`、`search_file_contents`、`run_project_task`。工具参数存于 `resources/assistant.schema.json`，查询和已有任务运行不初始化编码环境。
-- `run_project_task` 仅接收已有入口和 argv。记录保存在任务目录 `assistant/`；子任务可提供本次生成的四项 Token JSON，来源、哈希及未知用量单独保存，不混入助手用量。
+- 浏览器固定增加 `list_files`、`read_file`、`search_files`、`run_existing`。工具参数存于 `resources/assistant.schema.json`，查询和已有任务运行不初始化编码环境。
+- `run_existing` 仅接收已有入口和 argv。记录保存在任务目录 `assistant/`；子任务可提供本次生成的四项 Token JSON，来源、哈希及未知用量单独保存，不混入助手用量。
 - 首次 `candidate` 必须提交完整 `test_code`，在保留的原始源码上试跑并明确冻结后才执行修改。调查中的只读局部检查无需完整验收；固定用户验收仍走原分支。冻结的代码、驱动、回归命令及用户固定验收不能被普通聊天改写。
 - 零用例、新增跳过、加载失败、不完整结果、超时和真实失败不能算通过。验收修订继续走证据与源码版本对照。
 - 完整历史只追加，压缩只替换请求视图；摘要不批准执行或覆盖真实失败。当前压缩阈值约 80 万输入 Token。

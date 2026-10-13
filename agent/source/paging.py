@@ -2,7 +2,38 @@
 import json
 
 PAGE_LINES = 200
-MAX_REQUEST_LINES = 1000
+MAX_REQUEST_LINES = 2000
+OUTPUT_BYTES = 50 * 1024
+
+
+class ReadBudget:
+    """One UTF-8 text budget shared by every page/location of a read step."""
+    def __init__(self):
+        self.remaining = OUTPUT_BYTES
+
+    def excerpt(self, lines, offset, limit):
+        rows, end, long_line = [], offset, None
+        for index in range(offset, min(len(lines), offset + limit)):
+            row = f'{index + 1}: {lines[index]}'
+            raw = row.encode('utf-8')
+            separator = 1 if rows else 0
+            if len(raw) + separator > self.remaining:
+                if len(raw) > OUTPUT_BYTES:
+                    long_line = {'offset': index, 'utf8_bytes': len(raw),
+                                 'reason': 'Single line exceeds the 50 KiB read budget; partial text only.'}
+                    if self.remaining > separator:
+                        part = raw[:self.remaining - separator].decode('utf-8', errors='ignore')
+                        rows.append(part)
+                        self.remaining -= separator + len(part.encode('utf-8'))
+                break
+            rows.append(row)
+            self.remaining -= len(raw) + separator
+            end = index + 1
+        result = {'text': '\n'.join(rows), 'visible_ranges': [[offset, end]] if end > offset else [],
+                  'truncated': end < min(len(lines), offset + limit), 'next_offset': end}
+        if long_line:
+            result['long_line'] = long_line
+        return result
 
 
 def merged(intervals):
@@ -70,19 +101,22 @@ def ranges(offset, limit):
     if type(offset) is not int or offset < 0:
         raise ValueError('offset must be a nonnegative integer')
     if type(limit) is not int or not 1 <= limit <= MAX_REQUEST_LINES:
-        raise ValueError('Request 1..1000 lines; pages contain at most 200 lines')
+        raise ValueError('Request 1..2000 lines; pages contain at most 200 lines')
     return [(start, min(PAGE_LINES, offset + limit - start))
             for start in range(offset, offset + limit, PAGE_LINES)]
 
 
-def read_range(executor, path, offset, limit):
+def read_range(executor, path, offset, limit, budget=None):
+    budget = budget if budget is not None else ReadBudget()
     pages = []
     for start, count in ranges(offset, limit):
         if pages and start >= pages[-1]['total_lines']:
             break
-        pages.append(executor.read(path, start, count))
+        pages.append(executor.read(path, start, count, budget=budget))
+        if pages[-1]['truncated']:
+            break
     if len(pages) == 1:
         return pages[0]
-    return {'reads': pages, 'pagination': {
+    return {'reads': pages, 'truncated': any(page['truncated'] for page in pages), 'pagination': {
         'requested_offset': offset, 'requested_lines': limit,
         'page_line_limit': PAGE_LINES, 'returned_pages': len(pages)}}

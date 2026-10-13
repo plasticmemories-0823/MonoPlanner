@@ -15,7 +15,7 @@ from agent.source.snapshots import SourceSnapshot
 from agent.source.versions import SourceVersions
 from agent.acceptance.contracts import VerificationSpec
 from agent.execution.executor import OperationExecutor
-from agent.storage.records import clip, digest, save
+from agent.storage.records import digest, save
 from agent.task.contracts import WorkRequest
 from agent.task.instructions import TASK_RULES
 from agent.task import dialogue, operations, repair
@@ -215,9 +215,9 @@ class TaskRunner:
                 self.rejected_input = invalid[0]["args"]
                 repair.loads(self.rejected_input)
             raise ValueError("Expected exactly one valid work tool call; no actions were executed")
-        if len(calls) != 1 or calls[0]["name"] not in {"submit_plan", "correct_plan_arguments"}:
+        if len(calls) != 1 or calls[0]["name"] not in {"submit_plan", "repair_work"}:
             raise ValueError("Expected exactly one valid work tool call; no actions were executed")
-        value = repair.merge(self, calls[0]["args"]) if calls[0]["name"] == "correct_plan_arguments" else calls[0]["args"]
+        value = repair.merge(self, calls[0]["args"]) if calls[0]["name"] == "repair_work" else calls[0]["args"]
         self.rejected_input = value
         return self.validate_work(value), raw
 
@@ -375,6 +375,9 @@ class TaskRunner:
         self.persist('model_wait_interrupted', {'kind': kind})
 
     def advance(self):
+        if self.state.get('rejection_pending'):
+            repair.finish_rejection(self)
+            return
         self.budget.check_request(0)
         if dialogue.apply_controls(self):
             return
@@ -420,13 +423,7 @@ class TaskRunner:
                 return
             self.accept_plan(plan, response)
         except ValueError as exc:
-            self.state["response_pending"] = None
-            self.state["repair_count"] += 1
-            self.state["plan_error"] = clip(str(exc), 1800)
-            notice = ("[Acceptance review rejected; no workspace edits] " + str(exc)
-                      if getattr(self, "reviewing", False) else repair.reject(self, exc))
-            self.state["history"].append(message_to_dict(HumanMessage(content=notice)))
-            self.persist("plan_rejected", {"reason": str(exc)})
+            repair.prepare_rejection(self, exc)
 
     def result(self):
         source_runtime.close(self)

@@ -126,7 +126,7 @@ def _selected_files(root, runtime_files=()):
     """Git includes staged, dirty and new files; fallback is a pruned source walk."""
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     # Source discovery is trusted host work, so repository fsmonitor hooks must
-    # not execute outside the native sandbox merely because Git reads an index.
+    # not execute on the host merely because Git reads an index.
     git = ["git", "-c", "core.fsmonitor=false", "-C", str(root)]
     try:
         probe = subprocess.run([*git, "rev-parse", "--show-toplevel"],

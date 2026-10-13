@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
 from agent.model.errors import ModelRequestNotSent
-from agent.storage.records import save
+from agent.storage.records import save, digest, clip
 from agent.source.snapshots import _safe_file
 
 
@@ -189,7 +189,7 @@ def reject(owner, error):
         notice["issues"] = record["issues"]
     if str(error) != record["error"]:
         notice["original_error"] = record["error"][:1800]
-    instruction = ("Use correct_plan_arguments for these fields; preserve all other work." if record["paths"] else
+    instruction = ("Use repair_work for these fields; preserve all other work." if record["paths"] else
                    "No field correction is available; submit a valid work request.")
     return "[Plan rejected; no actions executed] " + encode(notice) + "\n" + instruction
 
@@ -210,6 +210,53 @@ def merge(owner, arguments):
     correction = Correction.model_validate(arguments)
     ref = owner.state.get("repair_draft")
     if not ref or correction.draft_id != ref["id"]:
-        raise ValueError("correct_plan_arguments requires the current draft_id")
+        raise ValueError("repair_work requires the current draft_id")
     record = read(owner, ref)
     return apply(record["value"], correction.edits, record["paths"])
+
+
+def prepare_rejection(owner, error):
+    """Journal a complete reply before committing its paired rejection results."""
+    from langchain_core.messages import messages_from_dict
+    from agent.model.payload import original_calls
+    response = owner.state.get('response_pending')
+    if not response:
+        raise ModelRequestNotSent('invalid_message_history', 'Rejected response is unavailable; no retry.')
+    message = messages_from_dict([response])[0]
+    if message.response_metadata.get('finish_reason') in {
+            'length', 'content_filter', 'aborted', 'insufficient_system_resource'}:
+        raise ModelRequestNotSent('incomplete_model_response',
+                                  'Incomplete reply retained; no operations executed or automatic retry.')
+    calls = original_calls(message)
+    if not calls:
+        raise ModelRequestNotSent('invalid_message_history', 'No trustworthy tool identity; reply retained.')
+    notice = ('[Acceptance review rejected; no workspace edits] ' + str(error)
+              if getattr(owner, 'reviewing', False) else reject(owner, error))
+    history = owner.state['history']
+    owner.state['rejection_pending'] = {'response': response, 'calls': calls, 'notice': notice,
+        'reason': str(error), 'history_length': len(history), 'prefix_digest': digest(history)}
+    owner.persist('plan_rejection_prepared')
+    finish_rejection(owner)
+
+
+def finish_rejection(owner):
+    from langchain_core.messages import ToolMessage, message_to_dict, messages_from_dict
+    from agent.model.payload import original_calls
+    from agent.task import dialogue
+    pending = owner.state['rejection_pending']
+    history = owner.state['history']
+    if (len(history) != pending['history_length'] or digest(history) != pending['prefix_digest']
+            or owner.state.get('response_pending') != pending['response']
+            or original_calls(messages_from_dict([pending['response']])[0]) != pending['calls']):
+        raise ModelRequestNotSent('state_conflict', 'Rejection continuation changed; no request sent.')
+    if owner.interactive:
+        dialogue.publish(owner, pending['response'])
+    # A single checkpoint contains the entire cycle, never an unpaired assistant.
+    history.extend([pending['response'], *[message_to_dict(ToolMessage(
+        content=pending['notice'], name=call['function']['name'], tool_call_id=call['id'],
+        status='error')) for call in pending['calls']]])
+    owner.state.update(response_pending=None, repair_count=owner.state['repair_count'] + 1,
+                       plan_error=clip(pending['reason'], 1800))
+    owner.state.pop('rejection_pending')
+    owner.persist('plan_rejected', {'reason': pending['reason'],
+                                  'call_ids': [call['id'] for call in pending['calls']]})

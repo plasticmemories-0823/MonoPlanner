@@ -89,7 +89,6 @@ def copy_python_runtime(source, destination):
                 shutil.copy2(path, output)
     if found != set(locked):
         raise ValueError('Production runtime dependencies missing: ' + ', '.join(sorted(set(locked)-found)))
-    shutil.copy2(ROOT/'resources/drivers/sitecustomize.py', target/'sitecustomize.py')
     return found
 
 

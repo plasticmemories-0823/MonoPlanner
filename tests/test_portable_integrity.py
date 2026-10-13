@@ -61,8 +61,6 @@ class PortableIntegrityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root/'requirements.lock').write_text('product==1.0\n')
-            driver = root/'resources/drivers/sitecustomize.py'
-            driver.parent.mkdir(parents=True); driver.write_text('# fixed driver\n')
             source, output = root/'runtime', root/'package'
             packages = source/'Lib/site-packages'
             packages.mkdir(parents=True)
@@ -77,7 +75,7 @@ class PortableIntegrityTests(unittest.TestCase):
                 self.assertTrue((output/'Lib/site-packages/product.py').is_file())
                 self.assertFalse((output/'Lib/site-packages/pytest.py').exists())
                 self.assertFalse((output/'Lib/site-packages/pytest-1.0.dist-info').exists())
-                self.assertEqual((output/'Lib/site-packages/sitecustomize.py').read_bytes(), driver.read_bytes())
+                self.assertFalse((output/'Lib/site-packages/sitecustomize.py').exists())
                 (root/'requirements.lock').write_text('product==2.0\n')
                 with self.assertRaisesRegex(ValueError, 'differs from lock'):
                     module.copy_python_runtime(source, root/'stale')

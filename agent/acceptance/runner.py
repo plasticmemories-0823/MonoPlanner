@@ -72,10 +72,6 @@ class AcceptanceRun:
                 paths.append(self.repository_runner)
         self._hashes = {path: hashlib.sha256(path.read_bytes()).digest() for path in paths}
 
-    def is_intact(self):
-        """供任务控制器检查跨阶段的冻结材料。"""
-        return self._unchanged()
-
     def _unchanged(self):
         try:
             return all(hashlib.sha256(path.read_bytes()).digest() == digest

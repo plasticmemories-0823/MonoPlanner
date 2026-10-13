@@ -10,13 +10,23 @@ class Operation(BaseModel):
     path: str = "."
     query: str = ""
     offset: int = Field(default=0, ge=0)
-    limit: int = Field(default=80, ge=1, le=1000)
+    limit: int = Field(default=80, ge=1, le=2000,
+                       description='read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.')
     from_step: str = ""
     command: str = Field(default="", max_length=30000)
     expected_exit: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=4)
 
+    @model_validator(mode="before")
+    @classmethod
+    def read_window_default(cls, value):
+        if isinstance(value, dict) and value.get('op') == 'read' and 'limit' not in value:
+            return {**value, 'limit': 2000}
+        return value
+
     @model_validator(mode="after")
     def complete_parameters(self):
+        if self.op != 'read' and self.limit > 1000:
+            raise ValueError('Only read accepts more than 1000 lines; other operation limits are unchanged')
         if self.op == "shell" and not self.command.strip():
             raise ValueError("shell requires actual executable commands, not a task description")
         if self.op == "search" and not self.query.strip():

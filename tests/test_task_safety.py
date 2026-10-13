@@ -81,7 +81,7 @@ class TaskSafetyTests(unittest.TestCase):
 
     def test_oversized_and_unsafe_paths_are_not_reinterpreted(self):
         with self.assertRaises(ValueError):
-            WorkRequest.model_validate({'kind':'inspect','note':'huge','steps':[{'id':'r','op':'read','limit':1001}]})
+            WorkRequest.model_validate({'kind':'inspect','note':'huge','steps':[{'id':'r','op':'read','limit':2001}]})
         self.loop([self.candidate()]).run([], 'return 4', StepBudget(max_steps=3))
         with self.assertRaises(ValueError):
             self.agent.executor.path('../private.txt')
