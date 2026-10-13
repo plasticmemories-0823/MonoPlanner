@@ -1,4 +1,4 @@
-"""Run MonoPlaner on public SWE-bench issues; export predictions.
+"""Run MonoPlanner on public SWE-bench issues; export predictions.
 
 Official tests and reference patches belong to the separate grading process.
 This module accepts a deliberately restricted public task manifest only.
@@ -343,13 +343,13 @@ def run_instance(task, image, directory, model, ledger, args, secrets):
     return result
 
 
-def parse_args(argv=None):
+def _argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tasks", required=True)
     parser.add_argument("--images", required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--instance-id", action="append")
-    parser.add_argument("--workflow", choices=("task",), default="task")
+    parser.add_argument("--workflow", choices=("task",), default="task", help=argparse.SUPPRESS)
     parser.add_argument("--max-steps", type=int, default=60)
     parser.add_argument("--max-rounds", type=int, default=3)
     parser.add_argument("--token-limit", type=int, default=3_000_000,
@@ -359,6 +359,11 @@ def parse_args(argv=None):
     parser.add_argument("--max-output-tokens", type=int, default=ModelPolicy().max_output_tokens)
     parser.add_argument("--command-timeout", type=int, default=120)
     parser.add_argument("--task-timeout", type=int, default=1800)
+    return parser
+
+
+def parse_args(argv=None):
+    parser = _argument_parser()
     args = parser.parse_args(argv)
     for key in ("token_limit", "task_token_limit"):
         if getattr(args, key) < 0:
@@ -377,12 +382,12 @@ def main(argv=None):
     tasks = load_tasks(args.tasks)
     if args.instance_id:
         if set(args.instance_id) - {task["instance_id"] for task in tasks}:
-            parser.error("Unknown instance id")
+            _argument_parser().error("Unknown instance id")
         tasks = [task for task in tasks if task["instance_id"] in args.instance_id]
     image_rows = json.loads(Path(args.images).read_text(encoding="utf-8-sig"))
     images = {item["instance_id"]: item["image"] for item in image_rows}
     if any(task["instance_id"] not in images for task in tasks):
-        parser.error("Missing image mapping")
+        _argument_parser().error("Missing image mapping")
     directory = Path(args.run_dir).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     args.run_dir = str(directory)

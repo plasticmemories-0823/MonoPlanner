@@ -1,2 +1,2 @@
-# 当前代理网络使用 SOCKS；不修改 Agent 本身的模型配置。
-socksio==1.0.0
+# 评测复用主依赖；保留旧安装命令入口。
+-r requirements.txt

@@ -215,7 +215,7 @@ def check_workspace(environment):
     if WORK_SCHEMA.get("type") != "object":
         raise ValueError("计划 Schema 必须是 JSON 对象")
     print(f"工作区：{environment.repo_root}")
-    print("检查通过：工作区有效，p0401 计划 Schema 已加载。")
+    print("检查通过：工作区有效，计划 Schema 已加载。")
     print("本次未读取 API 配置，也未创建或调用模型。")
 
 

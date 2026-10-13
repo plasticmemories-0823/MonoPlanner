@@ -99,9 +99,19 @@ class PortableIntegrityTests(unittest.TestCase):
             config = {'repoRoot': 'private-build-path', 'outputFileTracingRoot': 'private-build-path',
                       'turbopack': {'root': 'private-build-path'}, 'poweredByHeader': False}
             (root/'server.js').write_text("const hostname = process.env.HOSTNAME || '0.0.0.0'\nconst nextConfig = "+json.dumps(config)+"\nprocess.env.__NEXT_PRIVATE_STANDALONE_CONFIG = JSON.stringify(nextConfig)\n")
-            (root/'.next/required-server-files.json').write_text(json.dumps({'config': config, 'appDir': 'private-build-path', 'relativeAppDir': '.'}))
+            private_directory = r'E:\Users\private-owner\project\web'
+            (root/'.next/required-server-files.json').write_text(json.dumps({'config': config, 'appDir': private_directory, 'relativeAppDir': '.'}))
+            server = root/'.next/server'; server.mkdir()
+            references = server/'page_client-reference-manifest.js'
+            bundle = server/'page.js'
+            client_id = private_directory + r'\src\page.tsx'
+            references.write_text('self.manifest = '+json.dumps({client_id: {'id': 123}}))
+            bundle.write_text('registerClientReference('+json.dumps(client_id)+');const diagnostic='+json.dumps(json.dumps(client_id)))
             module.sanitize_frontend_metadata(root)
             self.assertNotIn('private-build-path', (root/'server.js').read_text())
             self.assertNotIn('private-build-path', (root/'.next/required-server-files.json').read_text())
             self.assertIn("const hostname = '127.0.0.1'", (root/'server.js').read_text())
             self.assertIn('nextConfig.turbopack.root = dir', (root/'server.js').read_text())
+            for generated in (references, bundle):
+                self.assertNotIn('private-owner', generated.read_text())
+                self.assertIn(json.dumps(r'/monoplanner/web\src\page.tsx')[1:-1], generated.read_text())

@@ -41,6 +41,34 @@ class ManifestTests(unittest.TestCase):
                 self.assertIsInstance(selected, TaskRunner)
 
 
+    def test_manifest_selection_errors_stop_before_model_or_archive(self):
+        task = {"instance_id": "example__repo-1", "repo": "example/repo",
+                "base_commit": "a" * 40, "problem_statement": "Fix the issue"}
+        for selection, images, message in (
+            (["--instance-id", "missing"], [], "Unknown instance id"),
+            ([], [], "Missing image mapping"),
+        ):
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                (root / "tasks.json").write_text(json.dumps([task]), encoding="utf-8")
+                (root / "images.json").write_text(json.dumps(images), encoding="utf-8")
+                with (
+                    patch.object(runner, "load_settings") as settings,
+                    patch.object(runner, "create_model") as model,
+                    patch.object(runner, "archive_source") as archive,
+                    redirect_stderr(io.StringIO()) as output,
+                    self.assertRaises(SystemExit) as error,
+                ):
+                    runner.main(["--tasks", str(root / "tasks.json"), "--images",
+                                 str(root / "images.json"), "--run-dir", str(root / "run"),
+                                 *selection])
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn(message, output.getvalue())
+                self.assertFalse((root / "run").exists())
+                settings.assert_not_called()
+                model.assert_not_called()
+                archive.assert_not_called()
+
     def test_answer_material_is_rejected_before_model_setup(self):
         task = {"instance_id": "example__repo-1", "repo": "example/repo",
                 "base_commit": "a" * 40, "problem_statement": "Fix the issue"}

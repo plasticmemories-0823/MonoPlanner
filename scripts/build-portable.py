@@ -117,6 +117,20 @@ def sanitize_frontend_metadata(frontend):
     entry.write_text(content, encoding='utf-8', newline='\n')
     metadata = frontend/'.next/required-server-files.json'
     value = json.loads(metadata.read_text(encoding='utf-8'))
+    original_directory = value.get('appDir')
+    if original_directory and original_directory != '.':
+        prefixes = {original_directory, original_directory.replace('\\', '/')}
+        # Generated client-reference IDs must match in both manifests and bundles.
+        for generated in (frontend/'.next/server').rglob('*.js'):
+            content = generated.read_text(encoding='utf-8')
+            relocated = content
+            for prefix in prefixes:
+                escaped = prefix
+                for _ in range(3):
+                    escaped = json.dumps(escaped)[1:-1]
+                    relocated = relocated.replace(escaped, '/monoplanner/web')
+            if relocated != content:
+                generated.write_text(relocated, encoding='utf-8', newline='\n')
     value['config'] = relocate(value['config'])
     for key in ('appDir', 'relativeAppDir'):
         if key in value:
