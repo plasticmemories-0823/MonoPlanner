@@ -13,6 +13,10 @@ from agent.application.lease import ServiceLease
 from agent.application.store import identity, encode
 
 
+class ServiceClosing(Conflict):
+    """退出已锁住派发；重新打开后也不会自动重发被取消的请求。"""
+
+
 class StorageUnavailable(OSError):
     """关键记录失败后只能读取与停止，不能继续派发。"""
 
@@ -54,7 +58,11 @@ class Scheduler:
         self.title_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='application-title')
         self.control_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='application-control')
         self.worker = None
+        self.starting = False
         self.lease = None
+        from agent.application.shutdown import Shutdown
+
+        self.shutdown = Shutdown(self)
 
     def storage_error(self):
         with self.lock:
@@ -85,6 +93,8 @@ class Scheduler:
         return fault
 
     def ensure_dispatch_available(self):
+        if self.stop.is_set():
+            raise ServiceClosing('MonoPlanner 正在退出，已停止接收新操作。')
         if self.storage_error():
             raise StorageUnavailable(self.storage_error()['message'])
 
@@ -159,39 +169,49 @@ class Scheduler:
             return jobs(root=self.store.root).start(repo)
 
     def start(self):
-        if self.worker is not None:
-            return
-        self.lease = ServiceLease(self.store.root)
-        self.lease.acquire()
+        with self.lock:
+            if self.worker is not None or self.starting or self.stop.is_set():
+                return
+            self.starting = True
+        lease = ServiceLease(self.store.root)
         try:
+            lease.acquire()
+            with self.lock:
+                self.lease = lease
             self.store.recover_interrupted()
+            with self.lock:
+                if not self.stop.is_set():
+                    self.worker = Thread(target=self._loop, name='application-dispatch', daemon=True)
+                    self.worker.start()
         except Exception:
-            self.lease.close()
-            self.lease = None
+            lease.close()
+            with self.lock:
+                if self.lease is lease:
+                    self.lease = None
             raise
-        self.worker = Thread(target=self._loop, name='application-dispatch', daemon=True)
-        self.worker.start()
+        finally:
+            with self.lock:
+                self.starting = False
+            self._release_if_idle()
 
     def close(self):
-        self.stop.set()
-        self.wake.set()
-        if self.worker:
-            self.worker.join(timeout=2)
-        for pool in (self.chat_pool, self.work_pool, self.report_pool, self.title_pool,
-                     self.control_pool):
-            pool.shutdown(wait=False, cancel_futures=True)
+        self.shutdown.start()
+        self.shutdown.finished.wait(timeout=2)
         self._release_if_idle()
 
     def _release_if_idle(self):
         with self.lock:
-            if self.stop.is_set() and not (
-                self.chats or self.works or self.titles or self.reporting or self.controls_inflight
+            if (self.shutdown.finished.is_set() and self.shutdown.controls_idle()) and not (
+                self.starting or self.chats or self.works or self.titles or self.reporting
+                or self.controls_inflight
             ):
                 if self.lease:
                     self.lease.close()
                     self.lease = None
 
     def submit(self, conversation, command):
+        if self.stop.is_set():
+            raise ServiceClosing('MonoPlanner 正在退出，已停止接收新操作。')
         target = None
         if isinstance(command, dict) and command.get('kind') == 'pause':
             target = self._pause_identity(conversation, command)
@@ -215,6 +235,8 @@ class Scheduler:
             raise StorageUnavailable(self.storage_error()['message']) from exc
 
     def _submit_saved(self, conversation, command):
+        if self.stop.is_set():
+            raise ServiceClosing('MonoPlanner 正在退出，已停止接收新操作。')
         result = self.store.submit(conversation, command)
         if command['kind'] == 'message' and not result['applied']:
             try:
@@ -288,6 +310,8 @@ class Scheduler:
         while not self.stop.is_set():
             try:
                 self.tick()
+            except ServiceClosing:
+                return
             except Exception:
                 logging.getLogger(__name__).exception('Application dispatcher failed')
             self.wake.wait(0.5)
@@ -295,7 +319,7 @@ class Scheduler:
 
     def tick(self):
         """每轮只派发未持有执行者的工作；实际调用在独立线程内。"""
-        if self.storage_error():
+        if self.stop.is_set() or self.storage_error():
             return
         try:
             self._tick()
@@ -305,9 +329,13 @@ class Scheduler:
 
     def _tick(self):
         for row in self.store.commands(states=('pending',)):
+            if self.stop.is_set():
+                return
             conversation, command = row['conversation'], row['value']
             if row['kind'] == 'message':
                 with self.lock:
+                    if self.stop.is_set():
+                        return
                     if conversation in self.chats or len(self.chats) >= 2:
                         continue
                     self.chats.add(conversation)
@@ -321,6 +349,7 @@ class Scheduler:
             elif row['kind'] == 'workspace':
                 self.store.command_state(conversation, command['id'], 'running')
                 try:
+                    self.ensure_dispatch_available()
                     self.prepare_callback(self.store.get(conversation)['repo'])
                     self.store.command_state(conversation, command['id'], 'applied')
                 except (OSError, sqlite3.Error):
@@ -341,13 +370,15 @@ class Scheduler:
                     self.store.command_state(conversation, command['id'], 'failed',
                                              error='WorkNoLongerAcceptsControl')
         for conversation in self.store.list():
+            if self.stop.is_set():
+                return
             if conversation.get('read_only'):
                 continue
             task = self.store.work(conversation['work_id'])
             if task and task['status'] == 'queued':
                 self._schedule_work(task)
         with self.lock:
-            if self.reporting:
+            if self.stop.is_set() or self.reporting:
                 return
             pending = self.store.reserve_progress()
             if pending:
@@ -363,6 +394,8 @@ class Scheduler:
             from agent.task.control import active, current
 
             with active(self.store.root, 'chat:' + conversation):
+                if self.stop.is_set():
+                    current().interrupt('pause', self.shutdown.identity)
                 if self.store.pause_after(conversation, command['id']):
                     current().interrupt('pause')
                 result = self.chatbot.run(conversation, command)
@@ -377,7 +410,7 @@ class Scheduler:
             from agent.application.chat import ChatStopped
 
             status = (
-                'paused' if isinstance(exc, ModelInterrupted)
+                'paused' if isinstance(exc, (ModelInterrupted, ServiceClosing))
                 else exc.status if isinstance(exc, (ModelRequestNotSent, ChatStopped))
                 else 'model_request_unknown'
             )
@@ -409,6 +442,8 @@ class Scheduler:
     def _schedule_work(self, job):
         self.ensure_dispatch_available()
         with self.lock:
+            if self.stop.is_set():
+                return
             if self.works or job['task_id'] in self.controls_inflight.values():
                 return
             self.works.add(job['task_id'])
@@ -426,6 +461,8 @@ class Scheduler:
             raise
 
     def controls(self, task):
+        if self.stop.is_set():
+            return [{'id': self.shutdown.identity, 'kind': 'pause', 'text': ''}]
         fault = self.storage_error()
         if fault:
             return [{'id': fault['id'], 'kind': 'pause', 'text': ''}]
@@ -479,6 +516,8 @@ class Scheduler:
                 self.store.publish(job['conversation_id'], 'work:' + task + ':failure',
                                    result.get('stop_reason', result.get('reason', '工作已停止，运行记录已保留。')),
                                    'system')
+        except ServiceClosing:
+            self.store.work_state(task, 'paused', reason='应用退出，工作尚未派发；可明确继续。')
         except Exception as error:
             logging.getLogger(__name__).exception('Work bridge stopped')
             if isinstance(error, (OSError, sqlite3.Error)):
@@ -563,7 +602,7 @@ class Scheduler:
                     'running_progress': int(self.reporting), 'running_title': len(self.titles),
                     'running_control': len(self.controls_inflight),
                     'pending': pending, 'queued_work': queued, 'environment_preparations': preparing,
-                    'storage_error': fault}
+                    'storage_error': fault, 'shutting_down': self.stop.is_set()}
 
     def _reserve_title(self, conversation, command):
         from agent.application.titles import reserve
@@ -571,6 +610,8 @@ class Scheduler:
         if not reserve(self.store, conversation, command):
             return
         with self.lock:
+            if self.stop.is_set():
+                return
             self.titles.add(conversation)
         self.title_pool.submit(self._title, conversation)
 

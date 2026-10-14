@@ -116,9 +116,37 @@ try {
       report.commands.push(request.postDataJSON());
   });
   await page.goto(base);
+  const environmentRequests = [];
+  let environmentState = "ready";
+  const environmentRoute = async (route) => {
+    const request = route.request();
+    environmentRequests.push({ method: request.method(), url: request.url() });
+    if (request.method() === "POST") {
+      environmentState = "failed";
+      return route.fulfill({ status: 503, contentType: "application/json",
+        body: JSON.stringify({ error: "离线模拟：暂时无法核验资源状态" }) });
+    }
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({
+      mode: "auto", status: environmentState, stage: environmentState,
+      message: environmentState === "ready" ? "项目环境已就绪" : "镜像已不存在，请明确重新准备",
+    }) });
+  };
+  await page.route("**/api/workspace/environment*", environmentRoute);
   await page.getByRole("button", { name: "选择工作目录", exact: true }).click();
   await page.getByRole("textbox", { name: "目录路径" }).fill(project);
   await page.getByRole("button", { name: "打开", exact: true }).click();
+  const environmentCard = page.getByRole("region", { name: "项目执行环境" });
+  await environmentCard.getByRole("button", { name: "检查并复用环境" }).click();
+  await environmentCard.getByText("环境状态待核对", { exact: true }).waitFor();
+  const beforeReconnect = environmentRequests.filter((item) => item.method === "POST").length;
+  await environmentCard.getByRole("button", { name: "重新连接", exact: true }).click();
+  await environmentCard.getByText("镜像已不存在，请明确重新准备", { exact: true }).waitFor();
+  assert.equal(environmentRequests.filter((item) => item.method === "POST").length, beforeReconnect);
+  assert.equal(new URL(environmentRequests.at(-1).url).searchParams.get("verify"), "1");
+  assert.equal(await environmentCard.getByText("项目环境已就绪", { exact: true }).count(), 0);
+  await page.screenshot({ path: path.join(output, "resource-state-reconnected.png"), fullPage: true });
+  report.checks.push("resource failure removes stale ready display; reconnect verifies without reinstall or resend");
+  await page.unroute("**/api/workspace/environment*", environmentRoute);
   await page.getByRole("button", { name: "选择此目录", exact: true }).click();
   await page.getByRole("button", { name: "关闭目录选择" }).waitFor({ state: "hidden" });
   const send = async (text) => {

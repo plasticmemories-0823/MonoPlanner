@@ -162,15 +162,11 @@ class ManagedEnvironments:
             catalog.cleanup(docker=delete_owned_docker_resource)
         return binding
 
-    def _stop_owned_container(self, name):
-        result = subprocess.run(
-            [docker_executable(), 'kill', name], capture_output=True, text=True,
-            encoding='utf-8', errors='replace', timeout=8,
-            **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}),
-        )
-        if result.returncode and not any(text in result.stderr.lower()
-                                        for text in ('no such container', 'is not running')):
-            raise PreparationError('Docker 未确认安装容器已停止。')
+    def _stop_owned_container(self, name, metadata, owner):
+        from agent.storage.resources import stop_recorded_container
+
+        # 原件同时留在内存；磁盘已满时，仍能按原 ID、标签和镜像终止安装。
+        return stop_recorded_container(name, metadata, owner, self.root.parent)
 
     def _finish_resources(self, owner, identities, work, *, completed):
         from agent.storage.resources import resource_catalog, delete_owned_docker_resource
@@ -231,7 +227,7 @@ class ManagedEnvironments:
                     'container_id': None, 'image': image['Id'], 'labels': labels}
         catalog.register(identity, 'container', container, owner=owner, metadata=metadata)
         control = register_active_container(
-            owner, container, lambda: self._stop_owned_container(actual_id or container),
+            owner, container, lambda: self._stop_owned_container(container, metadata, owner),
             root=self.root.parent,
         )
         complete = False
@@ -297,8 +293,9 @@ class ManagedEnvironments:
                     self._finish_resources(owner, [identity, volume_identity], work, completed=True)
                 else:
                     try:
-                        self._stop_owned_container(actual_id or container)
-                    except (PreparationError, OSError, subprocess.SubprocessError):
+                        stopped = self._stop_owned_container(container, metadata, owner)
+                        catalog.record_container_stop(owner, container, stopped or {})
+                    except (PreparationError, OSError, ValueError, subprocess.SubprocessError):
                         pass
                 receipt('completed' if complete else 'interrupted')
             finally:
@@ -330,6 +327,71 @@ class ManagedEnvironments:
                 else '首次工作时将自动准备项目环境。'
             ),
         }
+
+    def verify(self, binding):
+        """用户明确刷新时核验保存环境；不创建容器、下载镜像或重建依赖。"""
+        deadline = time.monotonic() + 5
+        image = binding.get('image', '')
+        verified = []
+        if not isinstance(image, str) or not IMAGE_ID.fullmatch(image):
+            return {'state': 'unknown', 'message': '保存的环境身份不完整，请核对配置。'}
+
+        def inspect(kind, identity):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('environment verification deadline')
+            result = subprocess.run(
+                [docker_executable(), kind, 'inspect', identity],
+                capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=remaining,
+                **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}),
+            )
+            if result.returncode:
+                error = (result.stdout + result.stderr).lower()
+                if 'no such ' + kind in error or 'no such object' in error:
+                    from agent.storage.resources import resource_catalog
+
+                    with resource_catalog(self.root.parent)._db() as db:
+                        db.execute("UPDATE resources SET status='deleted',touched=? "
+                                   'WHERE kind=? AND location=?',
+                                   (time.time(), kind, identity))
+                    return None
+                raise PreparationError('Docker 查询未完成。')
+            values = json.loads(result.stdout)
+            if not isinstance(values, list) or len(values) != 1:
+                raise PreparationError('Docker 资源记录不完整。')
+            verified.append((kind, identity))
+            return values
+
+        try:
+            inspected = inspect('image', image)
+            if inspected is None:
+                return {'state': 'missing', 'message':
+                        '保存的项目镜像已不存在，请明确重新准备；已有任务仍保留原绑定。'}
+            actual = inspected[0]
+            if (actual.get('Id') != image or actual.get('Os') != 'linux'
+                    or actual.get('Architecture') != 'amd64'):
+                return {'state': 'unknown', 'message': '项目镜像身份或平台不一致，请核对配置。'}
+            usable = dependency_cache_usable(
+                image, binding.get('managed'), root=self.root.parent,
+                inspect_volume=lambda name: inspect('volume', name),
+                cancelled=lambda: time.monotonic() >= deadline,
+            )
+            if not usable:
+                return {'state': 'missing', 'message':
+                        '保存的依赖缓存缺失或与记录不一致，请明确重新准备；原任务现场已保留。'}
+            from agent.storage.resources import resource_catalog
+
+            # 原身份重新出现且完整核验通过后，同步展示台账；不恢复任何执行游标。
+            with resource_catalog(self.root.parent)._db() as db:
+                db.executemany("UPDATE resources SET status='ready',touched=? "
+                               "WHERE kind=? AND location=? AND status='deleted'",
+                               [(time.time(), kind, identity) for kind, identity in verified])
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+            return {'state': 'unknown', 'message':
+                    '暂时无法核验保存的环境，请检查 Docker 后重新连接；不会自动下载或准备。',
+                    'error_type': type(exc).__name__}
+        return {'state': 'ready', 'message': '已核验保存的项目环境，可以复用。'}
 
     def _run(self, arguments, *, log, cancelled=None, timeout=60, check=True):
         _check_cancel(cancelled)
@@ -522,16 +584,19 @@ LABEL org.monoplanner.managed-base="{key}"
         label_args = [part for key, value in labels.items() for part in ('--label', key + '=' + value)]
         catalog = resource_catalog(self.root.parent)
         owned_records = {}
-        container_ids = {}
+        container_records = {}
         complete = False
 
         def register(name):
+            metadata = {'container_id': None, 'preparation': str(work),
+                        'image': base, 'labels': labels}
+            container_records[name] = metadata
             owned_records[name] = catalog.register(
                 'container:' + name, 'container', name, owner=owner,
-                metadata={'container_id': None, 'preparation': str(work), 'image': base, 'labels': labels},
+                metadata=metadata,
             )
             def stop():
-                self._stop_owned_container(container_ids.get(name, name))
+                return self._stop_owned_container(name, container_records[name], owner)
             control_keys.append(register_active_container(
                 owner, name, stop, root=self.root.parent
             ))
@@ -539,10 +604,9 @@ LABEL org.monoplanner.managed-base="{key}"
         def record_identity(name, result):
             container_id = result.stdout.strip()
             if re.fullmatch(r'[0-9a-f]{64}', container_id):
-                container_ids[name] = container_id
+                container_records[name]['container_id'] = container_id
                 catalog.register(owned_records[name], 'container', name, owner=owner,
-                                 metadata={'container_id': container_id, 'preparation': str(work),
-                                           'image': base, 'labels': labels})
+                                 metadata=container_records[name])
             else:
                 raise PreparationError('环境准备容器身份未确认，已保留现场。')
         source = self._copy(plan, work, cancelled)

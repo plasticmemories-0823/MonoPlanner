@@ -149,10 +149,13 @@ def _launch_environment():
 
 
 def start(app, path=None):
+    # 用户打开的应用独立于助手服务；只有此受控入口允许脱离桌面作业对象。
+    flags = subprocess.CREATE_BREAKAWAY_FROM_JOB if os.name == 'nt' else 0
     if app.get('kind', 'exe') == 'exe':
         entry = executable_path(app['path'])
         process = subprocess.Popen(
-            [str(entry)] + ([str(path)] if path else []), close_fds=True, env=_launch_environment()
+            [str(entry)] + ([str(path)] if path else []), close_fds=True,
+            env=_launch_environment(), creationflags=flags,
         )
         return process.pid
     helper = PROJECT_ROOT / 'launcher/runtime/MonoPlanner.Applications.exe'
@@ -161,7 +164,7 @@ def start(app, path=None):
         capture_output=True,
         encoding='utf-8',
         timeout=15,
-        creationflags=subprocess.CREATE_NO_WINDOW,
+        creationflags=subprocess.CREATE_NO_WINDOW | flags,
         env=_launch_environment(),
     )
     if result.returncode:

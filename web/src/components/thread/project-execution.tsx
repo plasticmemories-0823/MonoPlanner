@@ -45,7 +45,7 @@ function ProjectEnvironmentCard({ apiUrl, repo }: { apiUrl: string; repo: string
       busy: setBusy,
     });
     monitor.current = next;
-    void next.refresh();
+    void next.refresh(true);
     return () => {
       next.dispose();
       monitor.current = null;
@@ -74,22 +74,22 @@ function ProjectEnvironmentCard({ apiUrl, repo }: { apiUrl: string; repo: string
   }, [advanced, apiUrl, imageRevision]);
 
   const preparing = status?.status === "preparing";
-  const ready = status?.status === "ready";
+  const ready = status?.status === "ready" && !error;
   const automatic = status?.mode !== "manual";
-  const failed = status?.status === "failed";
-  const label = !status
-    ? error
-      ? "暂时无法读取环境状态"
-      : "正在读取环境状态"
-    : preparing
-      ? "正在准备项目环境"
-      : ready
-        ? "项目环境已就绪"
-        : failed
-          ? "项目环境准备未完成"
-          : status.status === "cancelled"
-            ? "已取消环境准备"
-            : "自动准备项目环境";
+  const failed = status?.status === "failed" || status?.status === "interrupted";
+  const label = error
+    ? "环境状态待核对"
+    : !status
+      ? "正在读取环境状态"
+      : preparing
+        ? "正在准备项目环境"
+        : ready
+          ? "项目环境已就绪"
+          : failed
+            ? "项目环境准备未完成"
+            : status.status === "cancelled"
+              ? "已取消环境准备"
+              : "自动准备项目环境";
 
   return (
     <section
@@ -147,7 +147,7 @@ function ProjectEnvironmentCard({ apiUrl, repo }: { apiUrl: string; repo: string
             variant="outline"
             size="sm"
             disabled={busy}
-            onClick={() => void monitor.current?.refresh()}
+            onClick={() => void monitor.current?.refresh(true)}
           >
             重新连接
           </Button>

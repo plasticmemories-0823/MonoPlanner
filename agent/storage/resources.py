@@ -153,6 +153,27 @@ class ResourceCatalog:
                 db.execute('DELETE FROM resource_refs WHERE owner=? AND resource=?',
                            (owner, resource_id))
 
+    def record_container_stop(self, owner, name, receipt):
+        """只同步已核验的原容器状态，不改写任务执行结果或删除故障证据。"""
+        state = receipt.get('resource_state')
+        if state not in {'missing', 'stopped'} or not receipt.get('stopped'):
+            return
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = list(db.execute('SELECT r.id,r.metadata FROM resources r '
+                'JOIN resource_refs f ON r.id=f.resource WHERE f.owner=? AND r.location=? '
+                "AND r.kind='container' AND r.owned=1 AND r.status!='deleted'", (owner, name)))
+            for row in rows:
+                metadata = json.loads(row['metadata'])
+                identity = receipt.get('container_id')
+                if metadata.get('container_id') not in {None, identity}:
+                    raise ValueError('停止回执与原容器身份不一致。')
+                metadata.update(container_id=identity, resource_state=state,
+                                stop_confirmed_at=time.time())
+                db.execute('UPDATE resources SET metadata=?,status=?,touched=? WHERE id=?', (
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    'deleted' if state == 'missing' else 'ready', time.time(), row['id']))
+
     @contextmanager
     def lease(self, owner, resource_ids):
         token = uuid.uuid4().hex
@@ -466,6 +487,8 @@ def cancel_owned_containers(owner, root=None):
     if path.is_file():
         try:
             catalog = resource_catalog(directory)
+            for result in results:
+                catalog.record_container_stop(owner, result['container'], result)
             with catalog._db() as db:
                 saved = list(db.execute('SELECT r.location,r.metadata FROM resources r '
                     'JOIN resource_refs f ON r.id=f.resource WHERE f.owner=? '
@@ -479,8 +502,12 @@ def cancel_owned_containers(owner, root=None):
             if row['location'] in active_names:
                 continue
             try:
-                stop_recorded_container(row['location'], json.loads(row['metadata']), owner, directory)
-                results.append({'container': row['location'], 'stopped': True, 'recovered': True})
+                receipt = stop_recorded_container(
+                    row['location'], json.loads(row['metadata']), owner, directory)
+                result = {'container': row['location'], 'stopped': True, 'recovered': True,
+                          **(receipt or {})}
+                results.append(result)
+                catalog.record_container_stop(owner, row['location'], result)
             except Exception as exc:
                 results.append({'container': row['location'], 'stopped': False,
                                 'error': type(exc).__name__, 'recovered': True})
@@ -494,26 +521,51 @@ def stop_recorded_container(name, metadata, owner, root):
 
     identity = metadata.get('container_id')
     labels = ownership_labels(owner, root)
-    if (not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f]{64}', identity)
-            or metadata.get('labels') != labels):
+    if (not isinstance(name, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]*', name)
+            or (identity is not None and (
+                not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f]{64}', identity)))
+            or metadata.get('labels') != labels
+            or (identity is None and not re.fullmatch(
+                r'sha256:[0-9a-f]{64}', str(metadata.get('image', ''))))):
         raise ValueError('原容器身份不完整，不能按名称终止。')
     options = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
     def query(args):
         return subprocess.run([docker_executable(), *args], capture_output=True, text=True,
                               encoding='utf-8', errors='replace', timeout=5, **options)
-    inspected = query(['container', 'inspect', identity])
-    if inspected.returncode:
-        raise OSError('无法核验原任务容器。')
-    actual = json.loads(inspected.stdout)[0]
-    saved_labels = actual.get('Config', {}).get('Labels') or {}
-    if (actual.get('Id') != identity or actual.get('Name') != '/' + name
-            or any(saved_labels.get(key) != value for key, value in labels.items())
-            or (metadata.get('image') and actual.get('Image') != metadata['image'])):
-        raise ValueError('原容器归属已变化，未终止任何容器。')
-    if actual.get('State', {}).get('Running'):
-        result = query(['kill', identity])
-        if result.returncode:
+
+    def inspect(target):
+        inspected = query(['container', 'inspect', target])
+        if inspected.returncode:
+            error = (inspected.stderr + inspected.stdout).lower()
+            if 'no such container' in error or 'no such object' in error:
+                return None
+            raise OSError('无法核验原任务容器。')
+        actual = json.loads(inspected.stdout)[0]
+        actual_id = actual.get('Id')
+        saved_labels = actual.get('Config', {}).get('Labels') or {}
+        if (not isinstance(actual_id, str) or not re.fullmatch(r'[0-9a-f]{64}', actual_id)
+                or (identity and actual_id != identity) or actual.get('Name') != '/' + name
+                or any(saved_labels.get(key) != value for key, value in labels.items())
+                or (metadata.get('image') and actual.get('Image') != metadata['image'])):
+            raise ValueError('原容器归属已变化，未终止任何容器。')
+        if type(actual.get('State', {}).get('Running')) is not bool:
+            raise OSError('原任务容器运行状态不完整。')
+        return actual
+
+    # 创建命令可能未返回 ID；按预先登记的唯一名称只查询，标签和镜像均吻合后
+    # 固定实际 ID。Docker 明确报告不存在，与引擎无响应是不同的状态。
+    actual = inspect(identity or name)
+    if actual is None:
+        return {'stopped': True, 'resource_state': 'missing', 'container_id': identity}
+    identity = actual['Id']
+    if actual['State']['Running']:
+        query(['kill', identity])
+        # 即使 kill 报错，也可能是容器刚好自行退出；最终状态必须再次查询确认。
+        actual = inspect(identity)
+        if actual is not None and actual['State']['Running']:
             raise OSError('Docker 未确认原任务容器已停止。')
+    return {'stopped': True, 'resource_state': 'missing' if actual is None else 'stopped',
+            'container_id': identity}
 
 
 def release_task_resources(owner, *, root=None, completed=False, docker=None):

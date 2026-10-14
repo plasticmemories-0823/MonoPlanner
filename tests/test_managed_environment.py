@@ -210,8 +210,8 @@ class FakeDockerManager(ManagedEnvironments):
         self.image_counter += 1
         return image
 
-    def _stop_owned_container(self, name):
-        self.calls.append(['kill', name])
+    def _stop_owned_container(self, name, metadata, owner):
+        self.calls.append(['kill', metadata.get('container_id') or name])
 
     def _run(self, arguments, *, log, cancelled=None, timeout=60, check=True):
         from agent.execution.managed import _check_cancel

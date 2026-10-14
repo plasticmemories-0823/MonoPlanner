@@ -42,7 +42,7 @@ Preferences.key = lambda self: 'offline-fixture-not-a-real-key'
 
 
 class OfflinePreparation:
-    def status(self, repo):
+    def status(self, repo, *, verify=False):
         return {'status': 'ready', 'stage': 'ready', 'repo': repo,
                 'message': '离线环境样本，无下载和安装', 'mode': 'automatic'}
 

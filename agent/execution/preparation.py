@@ -45,12 +45,13 @@ class PreparationJobs:
                     'message': '旧版环境准备记录仅供保留，请重新准备环境。'}
         return None
 
-    def status(self, repo):
+    def status(self, repo, *, verify=False):
         repo = workspace_path(repo)
         binding = ProjectEnvironments(self.root).get(repo)
         if binding.get('image'):
-            return {'mode': 'manual', 'status': 'ready', 'stage': 'ready',
-                    'message': '使用已保存的高级环境配置', 'environment': binding}
+            value = {'mode': 'manual', 'status': 'ready', 'stage': 'ready',
+                     'message': '使用已保存的高级环境配置', 'environment': binding}
+            return self._verify(value) if verify else value
         value = self.catalog.environment_job(repo)
         if value:
             with self.lock:
@@ -58,15 +59,32 @@ class PreparationJobs:
                         and value['id'] not in self.workers):
                     return {**value, 'status': 'interrupted', 'stage': 'interrupted',
                             'message': '准备记录未能正常完成，现场已保留；请核对后明确重新准备。'}
+            if verify and (value['status'] == 'ready' or value.get('verification')):
+                return self.catalog.save_environment_job(self._verify(value))
             return value
         from agent.execution.managed import ManagedEnvironments
 
         ready = ManagedEnvironments(self.root).status(repo)
         if ready.get('state') == 'ready':
-            return {**ready, 'mode': 'auto', 'status': 'ready', 'stage': 'ready',
-                    'environment': {key: ready[key] for key in ('backend', 'image', 'runtime', 'managed')
-                                    if key in ready}}
+            value = {**ready, 'mode': 'auto', 'status': 'ready', 'stage': 'ready',
+                     'environment': {key: ready[key]
+                         for key in ('backend', 'image', 'runtime', 'managed') if key in ready}}
+            return self._verify(value) if verify else value
         return self._legacy(repo) or {**ready, 'mode': 'auto', 'status': 'idle', 'stage': 'checking'}
+
+    def _verify(self, value):
+        from agent.execution.managed import ManagedEnvironments
+
+        result = ManagedEnvironments(self.root).verify(value.get('environment') or {})
+        ready = result['state'] == 'ready'
+        value = {**value, 'verification': result,
+                 'status': 'ready' if ready else 'failed',
+                 'stage': 'ready' if ready else 'verification', 'message': result['message']}
+        if ready:
+            value.pop('error', None)
+        else:
+            value['error'] = result['message']
+        return value
 
     def start(self, repo, *, background=True, retry=False):
         repo = workspace_path(repo)
@@ -153,12 +171,16 @@ class PreparationJobs:
         results = cancel_owned_containers(value['owner'], self.root)
         if any(not result['stopped'] for result in results):
             raise EnvironmentRequired('环境准备容器停止未确认，现场已保留。')
+        # 旧进程已经退出时没有 worker 收尾，停止确认后同步作业，避免界面永久停在准备中。
+        if worker is None and value['status'] in {'preparing', 'interrupted'}:
+            self.catalog.save_environment_job({**value, 'status': 'cancelled',
+                'stage': 'cancelled', 'message': '环境准备已取消，现场已保留。'})
         return results
 
     def cancel(self, repo):
         repo = workspace_path(repo)
         value = self.catalog.environment_job(repo)
-        if value and value['status'] in {'preparing', 'interrupted', 'cancelled'}:
+        if value and value['status'] in {'preparing', 'interrupted', 'cancelled', 'failed'}:
             self._stop(value)
         return self.status(repo)
 
@@ -234,40 +256,114 @@ class PreparationJobs:
     def close(self):
         with self.lock:
             if self.closed:
-                return
+                return getattr(self, 'close_report', {
+                    'stopped': False, 'resources': [], 'errors': []})
             self.closed = True
+            self.close_report = {'stopped': False, 'resources': [], 'errors': []}
             workers = list(self.workers.items())
+        # 先阻止所有作业继续派发；不能因前一个 Docker 查询缓慢，延后其他作业的取消信号。
         for identity, worker in workers:
             worker['cancel'].set()
-            cancel_owned_containers('prepare:' + identity, self.root)
+        stopped = _close_preparation_resources(
+            self.root, {'prepare:' + identity for identity, _ in workers})
         if self.pool:
             self.pool.shutdown(wait=False, cancel_futures=False)
+        deadline = time.monotonic() + 2
         for _, worker in workers:
             try:
-                worker['future'].result(timeout=2)
+                worker['future'].result(timeout=max(0, deadline - time.monotonic()))
             except Exception:
                 pass
         with self.lock:
             if not self.workers:
                 self.lease.close()
+            self.close_report = {
+                **stopped, 'stopped': not self.workers and stopped['stopped'],
+            }
+            return self.close_report
 
 
-_services, _services_lock = {}, RLock()
+_services, _services_lock, _closed_roots = {}, RLock(), set()
 
 
 def jobs(root=None):
     root = current_root(root)
     with _services_lock:
         if root not in _services:
+            if root in _closed_roots:
+                raise EnvironmentRequired('环境准备服务正在关闭，请重新打开应用。')
             _services[root] = PreparationJobs(root)
         return _services[root]
 
 
+def _close_preparation_resources(root, owners=()):
+    """退出时只读取持久归属并停止原资源；不为历史准备重建管理者或工作线程。"""
+    owners, resources, errors = set(owners), [], []
+    if (root / 'resources.sqlite3').exists():
+        try:
+            with resource_catalog(root)._db() as db:
+                owners.update(row[0] for row in db.execute(
+                    'SELECT DISTINCT f.owner FROM resource_refs f '
+                    'JOIN resources r ON r.id=f.resource '
+                    "WHERE f.owner LIKE 'prepare:%' AND r.kind='container' "
+                    "AND r.owned=1 AND r.status!='deleted'"))
+        except Exception as exc:
+            errors.append({'scope': 'persistent_preparation_ownership',
+                           'error': type(exc).__name__})
+    for owner in sorted(owners):
+        try:
+            resources.extend(cancel_owned_containers(owner, root))
+        except Exception as exc:
+            errors.append({'owner': owner, 'error': type(exc).__name__})
+    return {'stopped': not errors and all(result['stopped'] for result in resources),
+            'resources': resources, 'errors': errors}
+
+
 def close_jobs(root):
+    root = Path(root).resolve()
     with _services_lock:
-        service = _services.pop(Path(root).resolve(), None)
+        _closed_roots.add(root)
+        service = _services.get(root)
     if service:
-        service.close()
+        return service.close()
+    return _close_preparation_resources(root)
+
+
+def cancel_owner(owner, root=None):
+    """退出时复用管理者或只检查原等待记录，不能为了暂停重新启动准备服务。"""
+    root = current_root(root)
+    with _services_lock:
+        service, closed = _services.get(root), root in _closed_roots
+    if service:
+        return service.cancel_owner(owner)
+    if not closed:
+        return jobs(root).cancel_owner(owner)
+    if not (root / 'resources.sqlite3').is_file():
+        return []
+    catalog = resource_catalog(root)
+    with catalog._db() as db:
+        rows = list(db.execute('SELECT j.value,w.token FROM environment_waiters w '
+            'JOIN environment_jobs j ON j.id=w.job WHERE w.owner=? '
+            "AND j.status IN ('preparing','interrupted','cancelled','failed')", (owner,)))
+    results = []
+    for row in rows:
+        value = json.loads(row['value'])
+        try:
+            if value.get('owner') != 'prepare:' + value['id']:
+                raise ValueError('准备作业归属不一致。')
+            resources = cancel_owned_containers(value['owner'], root)
+            if any(not result['stopped'] for result in resources):
+                raise EnvironmentRequired('环境准备容器停止未确认，现场已保留。')
+            # 整个服务已关闭，不再有其他等待者继续安装；只解除当前任务的等待关系。
+            catalog.detach_environment_waiter(value['id'], row['token'])
+            if value['status'] in {'preparing', 'interrupted'}:
+                catalog.save_environment_job({**value, 'status': 'cancelled',
+                    'stage': 'cancelled', 'message': '环境准备已取消，现场已保留。'})
+            results.append({'preparation_job': value['id'], 'stopped': True})
+        except Exception as exc:
+            results.append({'preparation_job': value.get('id'), 'stopped': False,
+                            'error': type(exc).__name__})
+    return results
 
 
 def active_count(root=None):

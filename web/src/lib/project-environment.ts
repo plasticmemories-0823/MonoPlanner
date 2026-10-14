@@ -2,7 +2,7 @@ export type ProjectRuntime = { python: string; conda_env: string };
 export type ProjectBinding = { image: string; runtime: ProjectRuntime };
 export type ProjectEnvironment = {
   mode: "auto" | "manual";
-  status: "idle" | "preparing" | "ready" | "failed" | "cancelled";
+  status: "idle" | "preparing" | "ready" | "failed" | "cancelled" | "interrupted";
   stage: string;
   message: string;
   updated_at?: string;
@@ -31,6 +31,7 @@ export class ProjectEnvironmentMonitor {
   private observer: Observer;
   private fetcher: typeof fetch;
   private interval: number;
+  private timeout: number;
 
   constructor(
     apiUrl: string,
@@ -38,6 +39,7 @@ export class ProjectEnvironmentMonitor {
     observer: Observer,
     fetcher: typeof fetch = fetch,
     interval = 1500,
+    timeout = 10000,
   ) {
     this.apiUrl = apiUrl;
     this.repo = repo;
@@ -45,11 +47,12 @@ export class ProjectEnvironmentMonitor {
     // 调用浏览器 fetch 时，不能将监视器实例绑定为其接收者。
     this.fetcher = (input, init) => fetcher(input, init);
     this.interval = interval;
+    this.timeout = timeout;
   }
 
-  refresh() {
+  refresh(verify = false) {
     if (this.mutating) return Promise.resolve();
-    return this.request();
+    return this.request(undefined, undefined, verify);
   }
 
   change(action: "prepare" | "automatic" | "cancel") {
@@ -82,7 +85,7 @@ export class ProjectEnvironmentMonitor {
     }
   }
 
-  private async request(path?: string, body?: object) {
+  private async request(path?: string, body?: object, verify = false) {
     if (this.disposed) return;
     clearTimeout(this.timer);
     this.controller?.abort();
@@ -90,12 +93,19 @@ export class ProjectEnvironmentMonitor {
     this.controller = controller;
     const revision = ++this.revision;
     const current = () => !this.disposed && revision === this.revision;
+    let timedOut = false;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeout);
     this.observer.error("");
     try {
+      const query = new URLSearchParams({ repo: this.repo });
+      if (verify) query.set("verify", "1");
       const response = await this.fetcher(
         path
           ? `${this.apiUrl}${path}`
-          : `${this.apiUrl}/workspace/environment?${new URLSearchParams({ repo: this.repo })}`,
+          : `${this.apiUrl}/workspace/environment?${query}`,
         {
           signal: controller.signal,
           cache: "no-store",
@@ -119,10 +129,14 @@ export class ProjectEnvironmentMonitor {
       if (value.status === "preparing")
         this.timer = setTimeout(() => void this.refresh(), this.interval);
     } catch (error) {
-      if (current() && !controller.signal.aborted)
+      if (current() && (timedOut || !controller.signal.aborted))
         this.observer.error(
-          error instanceof Error ? error.message : String(error),
+          timedOut
+            ? "环境请求超时，结果尚未确认。请重新连接读取状态；不会自动重新准备。"
+            : error instanceof Error ? error.message : String(error),
         );
+    } finally {
+      clearTimeout(deadline);
     }
   }
 }

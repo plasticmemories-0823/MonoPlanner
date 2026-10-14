@@ -23,6 +23,7 @@ internal sealed class DesktopWindow : Form
     private readonly string profile;
     private bool busy;
     private bool stopped;
+    private bool closing;
     private bool browserLost;
 
     // 桌面窗口和服务共用启动器端口；地址始终限制在本机回环。
@@ -135,15 +136,18 @@ internal sealed class DesktopWindow : Form
             if (stopped)
                 return;
             e.Cancel = true;
-            if (!busy)
-                RunService("Stop");
+            if (closing)
+                return;
+            closing = true;
+            Program.RequestClose();
+            RunService("Stop");
         };
 
         // 接收其他启动实例发来的窗口激活信号。
         focusTimer.Interval = 300;
         focusTimer.Tick += delegate
         {
-            if (!activate.WaitOne(0))
+            if (closing || !activate.WaitOne(0))
                 return;
             if (WindowState == FormWindowState.Minimized)
                 WindowState = FormWindowState.Normal;
@@ -162,7 +166,7 @@ internal sealed class DesktopWindow : Form
 
     private void RunService(string action)
     {
-        if (busy)
+        if ((busy && action != "Stop") || (closing && action != "Stop"))
             return;
         SetBusy(true);
         status.Text = action == "Stop" ? "正在停止服务…" : "正在准备工作区…";
@@ -179,36 +183,28 @@ internal sealed class DesktopWindow : Form
                 failure = error.Message;
             }
 
-            if (IsDisposed)
+            if (IsDisposed || (closing && action != "Stop"))
                 return;
             BeginInvoke(new Action(delegate
             {
+                if (closing && action != "Stop")
+                    return;
+                if (action == "Stop")
+                {
+                    if (failure != null)
+                        Program.RecordExitFailure(failure);
+                    stopped = true;
+                    Close();
+                    return;
+                }
                 if (failure != null)
                 {
                     SetBusy(false);
                     status.Text = "操作未完成";
-                    if (action == "Stop")
-                    {
-                        var closeWindow = MessageBox.Show(this,
-                            failure + "\n\n是否只关闭窗口，保留后台服务和任务？后台任务可能继续运行。",
-                            "MonoPlanner", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
-                            MessageBoxDefaultButton.Button2);
-                        if (closeWindow == DialogResult.Yes)
-                        {
-                            stopped = true;
-                            Close();
-                        }
-                        return;
-                    }
                     if (view.CoreWebView2 == null)
                         ShowError(failure);
                     else
                         MessageBox.Show(this, failure, "MonoPlanner", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                else if (action == "Stop")
-                {
-                    stopped = true;
-                    Close();
                 }
                 else
                     OpenWorkspace();
@@ -228,6 +224,8 @@ internal sealed class DesktopWindow : Form
 
     private void OpenWorkspace()
     {
+        if (closing || IsDisposed)
+            return;
         if (browserLost)
         {
             int position = Controls.GetChildIndex(view);
@@ -281,6 +279,8 @@ internal sealed class DesktopWindow : Form
 
             CoreWebView2Environment.CreateAsync(browser, profile).ContinueWith(environment =>
             {
+                if (closing || IsDisposed)
+                    return;
                 if (environment.IsFaulted)
                 {
                     SetBusy(false);
@@ -292,6 +292,8 @@ internal sealed class DesktopWindow : Form
                 {
                     view.EnsureCoreWebView2Async(environment.Result).ContinueWith(initialized =>
                     {
+                        if (closing || IsDisposed)
+                            return;
                         SetBusy(false);
                         if (initialized.IsFaulted)
                         {

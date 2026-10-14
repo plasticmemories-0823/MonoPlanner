@@ -4,6 +4,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from threading import Event
 import sqlite3
 import time
 import uuid
@@ -39,6 +40,7 @@ def identity(value):
 
 class ApplicationStore:
     def __init__(self, root):
+        self.closing = Event()
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / 'application.sqlite3'
@@ -247,6 +249,8 @@ class ApplicationStore:
         body = encode(command)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            if self.closing.is_set():
+                raise Conflict('MonoPlanner 正在退出，未接收新命令。')
             value = self._get(db, conversation, writable=True)
             old = db.execute('SELECT body,state FROM app_commands WHERE conversation=? AND id=?',
                              (conversation, command['id'])).fetchone()
@@ -357,6 +361,8 @@ class ApplicationStore:
         sources = ReadSources(self.root).get(conversation)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
+            if self.closing.is_set():
+                raise Conflict('MonoPlanner 正在退出，未创建新工作。')
             value = self._get(db, conversation, writable=True)
             current = self._work(db, value['work_id'])
             if current and current.get('input_id') == command_id:
@@ -610,8 +616,47 @@ class ApplicationStore:
             db.execute('UPDATE app_progress SET inflight=0,reported_seq=MAX(reported_seq,?) WHERE task_id=?',
                        (through, task))
 
+    def stop_pending(self, *, error='ApplicationClosing'):
+        """退出时结束未派发命令；保留用户原文，重启不得自动继续排队工作。"""
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute("SELECT conversation,id,kind FROM app_commands WHERE state='pending'").fetchall()
+            for row in rows:
+                db.execute("UPDATE app_commands SET state='failed' WHERE conversation=? AND id=?",
+                           (row['conversation'], row['id']))
+                self._event(db, row['conversation'], 'command_state', {
+                    'id': row['id'], 'state': 'failed', 'error': error,
+                })
+                if row['kind'] == 'message':
+                    value = self._get(db, row['conversation'])
+                    if value['chat_status'] == 'queued':
+                        value['chat_status'] = 'paused'
+                        if not value['work_id']:
+                            value['status'] = 'paused'
+                        self._put(db, value)
+                        self._event(db, row['conversation'], 'chat_state', {'status': 'paused'})
+            for row in db.execute('SELECT id FROM app_work_state').fetchall():
+                work = self._work(db, row['id'])
+                if work['status'] != 'queued':
+                    continue
+                work.update(status='paused', reason='应用退出，工作尚未派发；可明确继续。',
+                            updated_at=timestamp(), revision=work['revision'] + 1)
+                self._put_work_state(db, work)
+                value = self._get(db, work['conversation_id'])
+                value['status'] = 'paused'
+                self._put(db, value)
+                self._event(db, work['conversation_id'], 'work_state', {
+                    'task_id': work['task_id'], 'status': 'paused', 'reason': work['reason'],
+                    'revision': work['revision'],
+                })
+            db.execute('UPDATE app_progress SET reported_seq=pending_seq WHERE inflight=0')
+        return {'stopped': True}
+
     def recover_interrupted(self):
         """只分类已消失的执行者；不会重发请求、启动工作或推进原操作。"""
+        # 上次可能在磁盘已满时退出，无法保存停止回执。未派发原文仍保留，
+        # 但重新打开应用不能自动发起付费请求、准备环境或继续旧补充。
+        self.stop_pending(error='ServiceInterrupted')
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute("UPDATE app_calls SET state='unknown',error='ServiceInterrupted' WHERE state='sent'")

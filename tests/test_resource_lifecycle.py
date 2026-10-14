@@ -345,10 +345,13 @@ def test_persistent_cancel_verifies_id_owner_and_image_before_kill(tmp_path, mon
     actual = {'Id': identity, 'Name': '/owned', 'Image': 'sha256:' + 'b' * 64,
               'Config': {'Labels': labels}, 'State': {'Running': True}}
     run = Mock(side_effect=[SimpleNamespace(returncode=0, stdout=json.dumps([actual]), stderr=''),
-                           SimpleNamespace(returncode=0, stdout='', stderr='')])
+                           SimpleNamespace(returncode=0, stdout='', stderr=''),
+                           SimpleNamespace(returncode=0, stdout=json.dumps([
+                               {**actual, 'State': {'Running': False}}]), stderr='')])
     monkeypatch.setattr('subprocess.run', run)
     assert cancel_owned_containers(owner, tmp_path)[0]['stopped']
-    assert run.call_args_list[-1].args[0][-2:] == ['kill', identity]
+    assert run.call_args_list[-2].args[0][-2:] == ['kill', identity]
+    assert run.call_args_list[-1].args[0][-3:] == ['container', 'inspect', identity]
     assert all(call.kwargs['timeout'] == 5 for call in run.call_args_list)
 
 
@@ -363,6 +366,168 @@ def test_persistent_cancel_rejects_label_mismatch_without_kill(tmp_path, monkeyp
     monkeypatch.setattr('subprocess.run', run)
     assert not cancel_owned_containers('task:new', tmp_path)[0]['stopped']
     run.assert_not_called()
+
+
+@pytest.mark.parametrize('recorded_id', ['a' * 64, None])
+def test_missing_preparation_container_is_confirmed_and_ledger_is_reconciled(
+    tmp_path, monkeypatch, recorded_id
+):
+    from agent.storage.resources import ownership_labels
+
+    owner, name = 'prepare:missing', 'monoplanner-missing'
+    catalog = ResourceCatalog(tmp_path)
+    catalog.register('container:' + name, 'container', name, owner=owner, metadata={
+        'container_id': recorded_id, 'image': 'sha256:' + 'b' * 64,
+        'labels': ownership_labels(owner, tmp_path)})
+    query = Mock(return_value=SimpleNamespace(
+        returncode=1, stdout='', stderr='Error response from daemon: No such container'))
+    monkeypatch.setattr('subprocess.run', query)
+    result = cancel_owned_containers(owner, tmp_path)
+    assert result[0]['stopped'] and result[0]['resource_state'] == 'missing'
+    assert query.call_args.args[0][-3:] == ['container', 'inspect', recorded_id or name]
+    assert not catalog.usage()['resources']
+    # 同一确认不会在下一次明确重试时再次阻塞或重复查不存在的容器。
+    assert cancel_owned_containers(owner, tmp_path) == []
+    assert query.call_count == 1
+
+
+def test_created_container_without_returned_id_is_verified_before_stop(tmp_path, monkeypatch):
+    from agent.storage.resources import ownership_labels
+
+    owner, name, identity = 'prepare:created', 'monoplanner-created', 'a' * 64
+    labels = ownership_labels(owner, tmp_path)
+    catalog = ResourceCatalog(tmp_path)
+    catalog.register('container:' + name, 'container', name, owner=owner, metadata={
+        'container_id': None, 'image': 'sha256:' + 'b' * 64, 'labels': labels})
+    actual = {'Id': identity, 'Name': '/' + name, 'Image': 'sha256:' + 'b' * 64,
+              'Config': {'Labels': labels}, 'State': {'Running': True}}
+    query = Mock(side_effect=[
+        SimpleNamespace(returncode=0, stdout=json.dumps([actual]), stderr=''),
+        SimpleNamespace(returncode=0, stdout='', stderr=''),
+        SimpleNamespace(returncode=0, stdout=json.dumps([
+            {**actual, 'State': {'Running': False}}]), stderr=''),
+    ])
+    monkeypatch.setattr('subprocess.run', query)
+    assert cancel_owned_containers(owner, tmp_path)[0]['stopped']
+    assert [call.args[0][1:] for call in query.call_args_list] == [
+        ['container', 'inspect', name], ['kill', identity], ['container', 'inspect', identity]]
+    saved = catalog.usage()['resources'][0]['metadata']
+    assert saved['container_id'] == identity and saved['resource_state'] == 'stopped'
+
+
+@pytest.mark.parametrize('failure', ['engine', 'timeout', 'running', 'labels', 'image', 'state'])
+def test_stop_keeps_unknown_or_changed_container_protected(tmp_path, monkeypatch, failure):
+    import subprocess
+    from agent.storage.resources import ownership_labels
+
+    owner, name, identity = 'prepare:unknown', 'monoplanner-unknown', 'a' * 64
+    labels = ownership_labels(owner, tmp_path)
+    catalog = ResourceCatalog(tmp_path)
+    catalog.register('container:' + name, 'container', name, owner=owner, metadata={
+        'container_id': None, 'image': 'sha256:' + 'b' * 64, 'labels': labels})
+    actual = {'Id': identity, 'Name': '/' + name, 'Image': 'sha256:' + 'b' * 64,
+              'Config': {'Labels': labels}, 'State': {'Running': False}}
+    if failure == 'labels':
+        actual['Config']['Labels'] = {'com.monoplanner.owner': 'unrelated'}
+    elif failure == 'image':
+        actual['Image'] = 'sha256:' + 'c' * 64
+    elif failure == 'state':
+        actual['State'] = {}
+    elif failure == 'running':
+        actual['State']['Running'] = True
+    if failure == 'timeout':
+        query = Mock(side_effect=subprocess.TimeoutExpired('docker', 5))
+    elif failure == 'engine':
+        query = Mock(return_value=SimpleNamespace(returncode=1, stdout='',
+                                                  stderr='Cannot connect to Docker daemon'))
+    else:
+        query = Mock(return_value=SimpleNamespace(returncode=0,
+                                                  stdout=json.dumps([actual]), stderr=''))
+    monkeypatch.setattr('subprocess.run', query)
+    result = cancel_owned_containers(owner, tmp_path)
+    assert not result[0]['stopped']
+    saved = catalog.usage()['resources'][0]
+    assert saved['references'] == 1 and saved['metadata']['container_id'] is None
+    assert saved['status'] == 'ready'
+    assert query.call_count == (3 if failure == 'running' else 1)
+
+
+def test_preparation_pause_does_not_need_disk_to_stop_known_container(tmp_path, monkeypatch):
+    from agent.execution.managed import ManagedEnvironments
+    from agent.storage.resources import ownership_labels
+
+    owner, name, identity = 'prepare:disk-full', 'monoplanner-disk-full', 'a' * 64
+    labels = ownership_labels(owner, tmp_path)
+    metadata = {'container_id': identity, 'labels': labels, 'image': 'sha256:' + 'b' * 64}
+    actual = {'Id': identity, 'Name': '/' + name, 'Image': metadata['image'],
+              'Config': {'Labels': labels}, 'State': {'Running': True}}
+    query = Mock(side_effect=[
+        SimpleNamespace(returncode=0, stdout=json.dumps([actual]), stderr=''),
+        SimpleNamespace(returncode=0, stdout='', stderr=''),
+        SimpleNamespace(returncode=0, stdout=json.dumps([
+            {**actual, 'State': {'Running': False}}]), stderr=''),
+    ])
+    monkeypatch.setattr('subprocess.run', query)
+    monkeypatch.setattr('agent.storage.resources.resource_catalog',
+                        Mock(side_effect=OSError('disk is full')))
+    receipt = ManagedEnvironments(tmp_path)._stop_owned_container(name, metadata, owner)
+    assert receipt['stopped'] and receipt['resource_state'] == 'stopped'
+
+
+@pytest.mark.parametrize('state', ['missing', 'unknown', 'ready', 'wrong_id'])
+def test_explicit_environment_verification_only_inspects_and_reconciles_confirmed_missing_image(
+    tmp_path, monkeypatch, state
+):
+    from agent.execution.managed import ManagedEnvironments
+
+    image = 'sha256:' + 'a' * 64
+    catalog = ResourceCatalog(tmp_path)
+    catalog.register('image:' + image, 'image', image, owner='project:one')
+    if state in {'missing', 'unknown'}:
+        response = SimpleNamespace(returncode=1, stdout='', stderr=(
+            'No such image: original' if state == 'missing' else 'Cannot connect to daemon'))
+    else:
+        response = SimpleNamespace(returncode=0, stdout=json.dumps([{
+            'Id': image if state == 'ready' else 'sha256:' + 'b' * 64,
+            'Os': 'linux', 'Architecture': 'amd64'}]), stderr='')
+    query = Mock(return_value=response)
+    monkeypatch.setattr('subprocess.run', query)
+    result = ManagedEnvironments(tmp_path).verify({'image': image})
+    assert result['state'] == ('unknown' if state == 'wrong_id' else state)
+    assert query.call_args.args[0][-3:] == ['image', 'inspect', image]
+    assert 0 < query.call_args.kwargs['timeout'] <= 5
+    assert bool(catalog.usage()['resources']) is (state != 'missing')
+    assert query.call_count == 1
+    if state == 'missing':
+        query.return_value = SimpleNamespace(returncode=0, stdout=json.dumps([{
+            'Id': image, 'Os': 'linux', 'Architecture': 'amd64'}]), stderr='')
+        assert ManagedEnvironments(tmp_path).verify({'image': image})['state'] == 'ready'
+        assert catalog.usage()['resources'][0]['status'] == 'ready'
+
+
+def test_missing_existing_dependency_volume_is_not_recreated_during_verification(tmp_path, monkeypatch):
+    from agent.execution.managed import ManagedEnvironments
+    from agent.execution.docker import managed_dependencies
+
+    image = 'sha256:' + 'a' * 64
+    managed = {'node_modules': [{'relative': '.',
+                                'image_path': '/opt/monoplanner/node/node_modules'}]}
+    item = managed_dependencies(image, managed, root=tmp_path)[0]
+    folder = tmp_path / 'managed-volumes' / item['identity']
+    folder.mkdir(parents=True)
+    original = json.dumps({'status': 'completed', 'image': image, **item})
+    (folder / 'completion.json').write_text(original)
+    query = Mock(side_effect=[
+        SimpleNamespace(returncode=0, stdout=json.dumps([{
+            'Id': image, 'Os': 'linux', 'Architecture': 'amd64'}]), stderr=''),
+        SimpleNamespace(returncode=1, stdout='', stderr='No such volume: original'),
+    ])
+    monkeypatch.setattr('subprocess.run', query)
+    result = ManagedEnvironments(tmp_path).verify({'image': image, 'managed': managed})
+    assert result['state'] == 'missing'
+    assert [call.args[0][1:3] for call in query.call_args_list] == [
+        ['image', 'inspect'], ['volume', 'inspect']]
+    assert (folder / 'completion.json').read_text() == original
 
 
 def test_builder_cleanup_verifies_volume_labels_and_removes_exact_resources(tmp_path, monkeypatch):

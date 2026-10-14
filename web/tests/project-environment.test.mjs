@@ -18,7 +18,7 @@ const deferred = () => {
   });
   return { promise, resolve };
 };
-function fixture(t, fetcher) {
+function fixture(t, fetcher, timeout = 10000) {
   const states = [],
     errors = [],
     busy = [];
@@ -32,6 +32,7 @@ function fixture(t, fetcher) {
     },
     fetcher,
     5,
+    timeout,
   );
   t.after(() => monitor.dispose());
   return { monitor, states, errors, busy };
@@ -193,4 +194,35 @@ test("reconnect only retries a read, and preparation failures require explicit r
   assert.equal(calls.length, 2);
   assert.ok(calls.every((call) => !call.method));
   assert.equal(states[0].status, "failed");
+});
+
+test("explicit verification checks resources once while polling remains a plain read", async (t) => {
+  const calls = [];
+  const { monitor, states } = fixture(t, async (url, options) => {
+    calls.push({ url: new URL(url, "http://localhost"), options });
+    return response(status(calls.length === 1 ? "preparing" : "failed"));
+  });
+  await monitor.refresh(true);
+  await pause();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url.searchParams.get("verify"), "1");
+  assert.equal(calls[1].url.searchParams.has("verify"), false);
+  assert.ok(calls.every(({ options }) => !options.method));
+  assert.equal(states.at(-1).status, "failed");
+});
+
+test("timed out preparation releases busy state and never resends the operation", async (t) => {
+  const calls = [];
+  const { monitor, errors, busy } = fixture(t, async (_url, options) => {
+    calls.push(options);
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  }, 15);
+  await monitor.change("prepare");
+  await pause();
+  assert.equal(calls.length, 1);
+  assert.deepEqual(busy, [true, false]);
+  assert.match(errors.at(-1), /结果尚未确认/);
+  assert.equal(calls[0].signal.aborted, true);
 });

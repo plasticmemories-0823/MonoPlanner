@@ -25,6 +25,14 @@ $taskLogs = if ($taskPortable) {
 $taskMutex = $null
 $taskLockHeld = $false
 $taskClient = $null
+$taskCloseSignal = $null
+$taskProcessSnapshot = $null
+
+function Assert-StartupRequested {
+    if ($Action -ne 'Stop' -and $taskCloseSignal -and $taskCloseSignal.WaitOne(0)) {
+        throw [OperationCanceledException]::new('窗口正在退出，已取消启动。')
+    }
+}
 
 # 监听端口、进程归属与服务身份探测。
 function Get-Listener([int]$Port) {
@@ -33,8 +41,11 @@ function Get-Listener([int]$Port) {
 }
 
 function Test-ProjectProcess([int]$ProcessId) {
+    if ($null -eq $script:taskProcessSnapshot) {
+        $script:taskProcessSnapshot = @(Get-CimInstance Win32_Process)
+    }
     for ($depth = 0; $ProcessId -gt 0 -and $depth -lt 5; $depth++) {
-        $taskProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId"
+        $taskProcess = $script:taskProcessSnapshot | Where-Object ProcessId -eq $ProcessId | Select-Object -First 1
         if (-not $taskProcess) {
             return $false
         }
@@ -48,10 +59,121 @@ function Test-ProjectProcess([int]$ProcessId) {
     return $false
 }
 
+# 退出先封锁新操作并取消正在运行的请求；服务不可达也不阻止回收自有进程。
+function Request-BackendShutdown([int[]]$Owners) {
+    if ($Owners.Count -eq 0) {
+        return @{ shutdown = $true; termination_confirmed = $true; complete = $true }
+    }
+    $taskDeadline = [DateTime]::UtcNow.AddSeconds(6)
+    $taskReceipt = @{ shutdown = $false; termination_confirmed = $false; complete = $false }
+    do {
+        $taskRequest = New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Post, "http://127.0.0.1:$BackendPort/service/shutdown")
+        if ($env:MONOPLANER_SERVICE_TOKEN) {
+            $null = $taskRequest.Headers.TryAddWithoutValidation('X-MonoPlanner-Service', $env:MONOPLANER_SERVICE_TOKEN)
+        }
+        $taskRequest.Content = New-Object Net.Http.StringContent('{}', [Text.Encoding]::UTF8, 'application/json')
+        try {
+            $taskResponse = $taskClient.SendAsync($taskRequest).GetAwaiter().GetResult()
+            try {
+                if (-not $taskResponse.IsSuccessStatusCode) {
+                    throw "停止确认接口返回 HTTP $([int]$taskResponse.StatusCode)"
+                }
+                $taskReceipt = $taskResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+                if ($taskReceipt.termination_confirmed) {
+                    break
+                }
+            } finally {
+                $taskResponse.Dispose()
+            }
+        } catch {
+            return @{ shutdown = $false; termination_confirmed = $false; complete = $false;
+                error = $_.Exception.Message; requires_review = $true }
+        } finally {
+            $taskRequest.Dispose()
+        }
+    } while ([DateTime]::UtcNow.AddSeconds(3) -lt $taskDeadline)
+    return $taskReceipt
+}
+
+# 接管同一项目已存在的服务，保证桌面退出时不会留下脱离窗口的后台进程。
+function Initialize-DesktopJobType {
+    if ('MonoPlannerDesktopJob' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class MonoPlannerDesktopJob {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool member);
+    [DllImport("kernel32.dll")]
+    public static extern bool CloseHandle(IntPtr handle);
+}
+'@
+}
+
+function Join-DesktopLifetime([int[]]$Owners) {
+    if (-not $env:MONOPLANER_DESKTOP_JOB -or $Owners.Count -eq 0) {
+        return
+    }
+    Initialize-DesktopJobType
+    $taskJob = [MonoPlannerDesktopJob]::OpenJobObject(0x5, $false, $env:MONOPLANER_DESKTOP_JOB)
+    if ($taskJob -eq [IntPtr]::Zero) {
+        throw '桌面实例已退出，不能接管服务。'
+    }
+    try {
+        # 旧的无窗口服务只接管已核验的内部运行时；打开的用户软件保持独立。
+        $taskDocker = Get-Command docker.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $taskInternal = @($Owners)
+        for ($taskDepth = 0; $taskDepth -lt 8; $taskDepth++) {
+            $taskDockerParents = @($script:taskProcessSnapshot | Where-Object {
+                $_.Name -eq 'docker.exe' -and $_.ProcessId -in $taskInternal
+            } | ForEach-Object ProcessId)
+            $taskChildren = @($script:taskProcessSnapshot | Where-Object {
+                $_.ParentProcessId -in $taskInternal -and $_.ProcessId -notin $taskInternal -and (
+                    ($_.ExecutablePath -and $_.ExecutablePath.StartsWith(
+                        (Join-Path $taskProject 'launcher/runtime') + '\', [StringComparison]::OrdinalIgnoreCase) -and
+                        $_.Name -in @('python.exe', 'node.exe', 'git.exe', 'git-remote-https.exe')) -or
+                    ($taskDocker -and $_.ExecutablePath -eq $taskDocker.Source) -or
+                    ($_.Name -eq 'docker-buildx.exe' -and $_.ParentProcessId -in $taskDockerParents)
+                )
+            })
+            if ($taskChildren.Count -eq 0) { break }
+            $taskInternal += @($taskChildren.ProcessId)
+        }
+        foreach ($taskOwner in $taskInternal) {
+            $taskOriginal = $script:taskProcessSnapshot | Where-Object ProcessId -eq $taskOwner | Select-Object -First 1
+            if (-not $taskOriginal) { throw '服务身份记录已消失，不能接管。' }
+            $taskProcess = [Diagnostics.Process]::GetProcessById($taskOwner)
+            try {
+                $null = $taskProcess.Handle
+                if ([Math]::Abs(($taskProcess.StartTime.ToUniversalTime() - $taskOriginal.CreationDate.ToUniversalTime()).TotalMilliseconds) -ge 1) {
+                    throw '服务进程身份已变化，不能接管。'
+                }
+                $taskMember = $false
+                if (-not [MonoPlannerDesktopJob]::IsProcessInJob($taskProcess.Handle, $taskJob, [ref]$taskMember)) {
+                    throw '无法核验服务进程的桌面归属。'
+                }
+                if (-not $taskMember -and -not [MonoPlannerDesktopJob]::AssignProcessToJobObject($taskJob, $taskProcess.Handle)) {
+                    throw '无法接管已有服务；请先退出原实例。'
+                }
+            } finally {
+                $taskProcess.Dispose()
+            }
+        }
+    } finally {
+        $null = [MonoPlannerDesktopJob]::CloseHandle($taskJob)
+    }
+}
+
 function Get-ServiceText([int]$Port, [string]$Suffix) {
     $taskRequest = New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Get, "http://127.0.0.1:$Port$Suffix")
     if ($Port -eq $BackendPort) {
-        $null = $taskRequest.Headers.TryAddWithoutValidation('X-MonoPlanner-Service', $env:MONOPLANER_SERVICE_TOKEN)
+        if ($env:MONOPLANER_SERVICE_TOKEN) {
+            $null = $taskRequest.Headers.TryAddWithoutValidation('X-MonoPlanner-Service', $env:MONOPLANER_SERVICE_TOKEN)
+        }
     }
     try {
         $taskResponse = $taskClient.SendAsync($taskRequest).GetAwaiter().GetResult()
@@ -153,18 +275,19 @@ function Assert-BackendIdle {
 }
 
 function Stop-ProjectService([int[]]$Owners) {
+    $taskProcesses = @(Get-CimInstance Win32_Process)
+    $taskAllOwned = @()
     foreach ($taskOwner in $Owners) {
-        $taskRoot = Get-CimInstance Win32_Process -Filter "ProcessId=$taskOwner"
+        $taskRoot = $taskProcesses | Where-Object ProcessId -eq $taskOwner | Select-Object -First 1
         if (-not $taskRoot) {
             continue
         }
-        $taskParent = Get-CimInstance Win32_Process -Filter "ProcessId=$($taskRoot.ParentProcessId)"
+        $taskParent = $taskProcesses | Where-Object ProcessId -eq $taskRoot.ParentProcessId | Select-Object -First 1
         # 同时停止 langgraph 包装进程，防止它重新拉起工作进程。
         if ($taskParent -and $taskParent.CommandLine -and
             $taskParent.CommandLine.Contains((Join-Path $taskProject '.venv-web\Scripts\langgraph.exe'))) {
             $taskRoot = $taskParent
         }
-        $taskProcesses = @(Get-CimInstance Win32_Process)
         $taskOwned = @($taskRoot)
         for ($taskDepth = 0; $taskDepth -lt 8; $taskDepth++) {
             $taskChildren = @($taskProcesses | Where-Object {
@@ -175,12 +298,38 @@ function Stop-ProjectService([int[]]$Owners) {
             }
             $taskOwned += $taskChildren
         }
-        foreach ($taskProcess in @($taskOwned | Sort-Object CreationDate -Descending)) {
-            $taskCurrent = Get-CimInstance Win32_Process -Filter "ProcessId=$($taskProcess.ProcessId)"
-            if ($taskCurrent -and $taskCurrent.CreationDate -eq $taskProcess.CreationDate) {
-                Stop-Process -Id $taskCurrent.ProcessId -ErrorAction SilentlyContinue
+        $taskAllOwned += $taskOwned
+    }
+    $taskJob = [IntPtr]::Zero
+    if ($env:MONOPLANER_DESKTOP_JOB) {
+        Initialize-DesktopJobType
+        $taskJob = [MonoPlannerDesktopJob]::OpenJobObject(0x4, $false, $env:MONOPLANER_DESKTOP_JOB)
+        if ($taskJob -eq [IntPtr]::Zero) { throw '无法核验桌面服务组。' }
+    }
+    try {
+        foreach ($taskProcess in @($taskAllOwned | Sort-Object ProcessId -Unique | Sort-Object CreationDate -Descending)) {
+            $taskCurrent = Get-Process -Id $taskProcess.ProcessId -ErrorAction SilentlyContinue
+            if (-not $taskCurrent) { continue }
+            try {
+                # 持有进程句柄并核验创建时间，避免 PID 重用后误停其他进程。
+                $null = $taskCurrent.Handle
+                if ($taskJob -ne [IntPtr]::Zero -and $taskProcess.ProcessId -notin $Owners) {
+                    $taskMember = $false
+                    if (-not [MonoPlannerDesktopJob]::IsProcessInJob($taskCurrent.Handle, $taskJob, [ref]$taskMember)) {
+                        throw '无法核验子进程归属。'
+                    }
+                    if (-not $taskMember) { continue }
+                }
+                if ([Math]::Abs(($taskCurrent.StartTime.ToUniversalTime() - $taskProcess.CreationDate.ToUniversalTime()).TotalMilliseconds) -lt 1) {
+                    $taskCurrent.Kill()
+                    $null = $taskCurrent.WaitForExit(500)
+                }
+            } finally {
+                $taskCurrent.Dispose()
             }
         }
+    } finally {
+        if ($taskJob -ne [IntPtr]::Zero) { $null = [MonoPlannerDesktopJob]::CloseHandle($taskJob) }
     }
 }
 
@@ -191,6 +340,7 @@ function Start-ServiceProcess(
     [string]$Directory,
     [string]$Name
 ) {
+    Assert-StartupRequested
     $taskQuoted = @($Arguments | ForEach-Object {
             '"' + $_.Replace('"', '\"') + '"'
         })
@@ -202,6 +352,7 @@ function Start-ServiceProcess(
 function Wait-Service([string]$Kind, [int]$Port, $Process) {
     $taskDeadline = [DateTime]::UtcNow.AddSeconds($StartupTimeout)
     do {
+        Assert-StartupRequested
         if (Test-Ready $Kind $Port) {
             return
         }
@@ -215,7 +366,20 @@ function Wait-Service([string]$Kind, [int]$Port, $Process) {
 
 # 获取项目启动锁并建立本次运行日志。
 try {
-    New-Item -ItemType Directory -Path $taskLogs -Force | Out-Null
+    if ($env:MONOPLANER_START_GATE) {
+        $taskGate = [Threading.EventWaitHandle]::OpenExisting($env:MONOPLANER_START_GATE)
+        try {
+            if (-not $taskGate.WaitOne(5000)) { throw '桌面未接管服务控制器，已停止启动。' }
+        } finally {
+            $taskGate.Dispose()
+        }
+    }
+    if ($env:MONOPLANER_CLOSE_SIGNAL) {
+        $taskCloseSignal = [Threading.EventWaitHandle]::OpenExisting($env:MONOPLANER_CLOSE_SIGNAL)
+    }
+    Assert-StartupRequested
+    try { New-Item -ItemType Directory -Path $taskLogs -Force | Out-Null }
+    catch { if ($Action -ne 'Stop') { throw } }
     $taskHash = [Security.Cryptography.SHA256]::Create()
     try {
         $taskKey = [BitConverter]::ToString($taskHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($taskProject.ToLowerInvariant()))).Replace('-', '')
@@ -224,7 +388,11 @@ try {
     }
     $taskMutex = New-Object Threading.Mutex($false, "Local\MonoPlaner-$taskKey")
     try {
-        $taskLockHeld = $taskMutex.WaitOne($StartupTimeout * 1000)
+        $taskLockDeadline = [DateTime]::UtcNow.AddSeconds($(if ($Action -eq 'Stop') { 3 } else { $StartupTimeout }))
+        do {
+            Assert-StartupRequested
+            $taskLockHeld = $taskMutex.WaitOne(100)
+        } while (-not $taskLockHeld -and [DateTime]::UtcNow -lt $taskLockDeadline)
     } catch [Threading.AbandonedMutexException] {
         $taskLockHeld = $true
     }
@@ -232,7 +400,9 @@ try {
         throw '另一个启动器仍在启动服务，请稍后再试。'
     }
     $taskRunLogs = Join-Path $taskLogs ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
-    New-Item -ItemType Directory -Path $taskRunLogs | Out-Null
+    if ($Action -ne 'Stop') {
+        New-Item -ItemType Directory -Path $taskRunLogs | Out-Null
+    }
 
     # 选择源码或便携发行版的运行时路径。
     $taskBackend = Join-Path $taskProject '.venv-web/Scripts/python.exe'
@@ -263,13 +433,15 @@ try {
     # 使用当前用户加密的实例凭证；不要通过命令行或 URL 传递。
     Add-Type -AssemblyName System.Security
     $taskAccessDirectory = Join-Path $taskData 'service-access'
-    New-Item -ItemType Directory -Path $taskAccessDirectory -Force | Out-Null
+    if ($Action -ne 'Stop') {
+        New-Item -ItemType Directory -Path $taskAccessDirectory -Force | Out-Null
+    }
     $taskAccessFile = Join-Path $taskAccessDirectory "$taskKey-$BackendPort-$FrontendPort.dpapi"
     if (Test-Path -LiteralPath $taskAccessFile) {
         $taskPlain = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($taskAccessFile), $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)
         $env:MONOPLANER_SERVICE_TOKEN = [Text.Encoding]::UTF8.GetString($taskPlain)
         [Array]::Clear($taskPlain, 0, $taskPlain.Length)
-    } else {
+    } elseif ($Action -ne 'Stop') {
         $taskRandom = New-Object byte[] 32
         $taskGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
         try {
@@ -304,24 +476,36 @@ try {
     $taskClient.Timeout = [TimeSpan]::FromSeconds(3)
     $taskBackendPids = @(Get-Listener $BackendPort)
     $taskFrontendPids = @(Get-Listener $FrontendPort)
+    $taskForeignPids = @()
     foreach ($taskOwner in @($taskBackendPids) + @($taskFrontendPids)) {
         if (-not (Test-ProjectProcess $taskOwner)) {
-            throw '启动端口被其他程序占用；不会关闭或替换该程序。'
+            if ($Action -ne 'Stop') {
+                throw '启动端口被其他程序占用；不会关闭或替换该程序。'
+            }
+            $taskForeignPids += $taskOwner
         }
     }
+    $taskBackendPids = @($taskBackendPids | Where-Object { $_ -notin $taskForeignPids })
+    $taskFrontendPids = @($taskFrontendPids | Where-Object { $_ -notin $taskForeignPids })
     if ($Action -ne 'Start') {
-        Assert-BackendIdle
+        $taskShutdown = Request-BackendShutdown $taskBackendPids
         Stop-ProjectService (@($taskFrontendPids) + @($taskBackendPids))
         if ($Action -eq 'Stop') {
-            @{
-                stopped = $true;
-                project = $taskProject
-            } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskLogs 'latest.json') -Encoding UTF8
+            $taskRemaining = @(@(Get-Listener $FrontendPort) + @(Get-Listener $BackendPort) |
+                Where-Object { $null -ne $_ -and $_ -notin $taskForeignPids })
+            $taskStopResult = @{ stopped = ($taskRemaining.Count -eq 0); project = $taskProject;
+                shutdown = $taskShutdown; foreign_pids_preserved = $taskForeignPids }
+            try {
+                $taskStopResult | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $taskLogs 'latest.json') -Encoding UTF8
+            } catch { Write-Warning '停止回执无法保存；原任务记录仍需核对。' }
+            if ($taskRemaining.Count -gt 0) { throw '本实例仍有服务未停止。' }
+            if ($taskForeignPids.Count -gt 0) { throw '已停止本实例服务；端口上的其他程序已保留。' }
             exit 0
         }
         $taskFrontendPids = @()
         $taskBackendPids = @()
     }
+    Assert-StartupRequested
 
     # 校验运行时与源码版本，仅在任务空闲时替换过期服务。
     if (-not (Test-Path -LiteralPath $taskBackend)) {
@@ -355,6 +539,7 @@ try {
             $taskBackendPids = @()
         }
     }
+    Join-DesktopLifetime (@($taskFrontendPids) + @($taskBackendPids))
 
     # 先启动后端，再准备与启动前端。
     $env:PYTHONUTF8 = '1'
@@ -442,5 +627,8 @@ try {
     }
     if ($taskMutex) {
         $taskMutex.Dispose()
+    }
+    if ($taskCloseSignal) {
+        $taskCloseSignal.Dispose()
     }
 }

@@ -197,14 +197,15 @@ routes = build_routes(_LazyStore(), _LazyScheduler())
 async def lifespan(app):
     global _service
     service = await asyncio.to_thread(get_service)
-    await asyncio.to_thread(service.start)
+    from agent.application.shutdown import watch_desktop_close
+
+    close_watcher = watch_desktop_close(service.shutdown)
     try:
+        await asyncio.to_thread(service.start)
         yield
     finally:
+        close_watcher()
         await asyncio.to_thread(service.close)
-        from agent.execution.preparation import close_jobs
-
-        await asyncio.to_thread(close_jobs, service.store.root)
         with _lock:
             if _service is service:
                 _service = None

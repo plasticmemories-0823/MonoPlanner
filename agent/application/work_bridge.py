@@ -159,10 +159,10 @@ def pause_work(task_id, command_id, *, root=None):
     # 取消登记可独立于模型连接及文件写入执行，避免排在同一工作队列后面。
     control.interrupt(root, task_id, "pause", command_id)
     from agent.storage.resources import cancel_owned_containers
-    from agent.execution.preparation import jobs
+    from agent.execution.preparation import cancel_owner
 
     try:
-        result = jobs(root).cancel_owner("task:" + task_id)
+        result = cancel_owner("task:" + task_id, root=root)
     except Exception as exc:
         # 安装台账不可写时仍须继续终止本任务的已登记容器。
         result = [{"preparation_stop": True, "stopped": False,

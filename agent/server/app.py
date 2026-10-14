@@ -30,7 +30,8 @@ async def project_environment(request: Request):
     try:
         if request.method == 'GET':
             result = await asyncio.to_thread(
-                lambda: jobs().status(request.query_params.get('repo', ''))
+                lambda: jobs().status(request.query_params.get('repo', ''),
+                                      verify=request.query_params.get('verify') == '1')
             )
         else:
             raw = await request.body()
@@ -52,6 +53,8 @@ async def project_environment(request: Request):
             else:
 
                 def change():
+                    if value['action'] != 'cancel':
+                        get_service().ensure_dispatch_available()
                     service = jobs()
                     return (service.retry if value['action'] == 'prepare' else service.cancel)(
                         value['repo']
@@ -86,6 +89,23 @@ async def service_status(request: Request):
         }, headers={'Cache-Control': 'no-store'})
     except Exception:
         return JSONResponse({'error': 'Cannot confirm whether tasks are idle'}, status_code=503)
+
+
+async def service_shutdown(request: Request):
+    """认证后的桌面控制请求只启动一次停止过程，不接收任意 PID 或命令。"""
+    try:
+        raw = await request.body()
+        if len(raw) > 8192 or json.loads(raw) != {}:
+            raise ValueError('Shutdown accepts no arguments')
+    except (ValueError, TypeError):
+        return JSONResponse({'error': 'Shutdown accepts an empty JSON object'}, status_code=400)
+    shutdown = get_service().shutdown
+    shutdown.start()
+    # 不把终止工作排进工作线程池；超时后返回真实未确认项目，让启动器限时收尾。
+    deadline = asyncio.get_running_loop().time() + 2
+    while not shutdown.status()['complete'] and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.025)
+    return JSONResponse(shutdown.status(), headers={'Cache-Control': 'no-store'})
 
 
 async def service_reconcile(request: Request):
@@ -231,6 +251,7 @@ app = Starlette(
         Route('/resources/project', resources, methods=['POST']),
         Route('/service', service, methods=['GET']),
         Route('/service/status', service_status, methods=['GET']),
+        Route('/service/shutdown', service_shutdown, methods=['POST']),
         Route('/service/reconcile', service_reconcile, methods=['POST']),
         Route('/execution/images', execution_images, methods=['GET']),
         Route('/workspace/execution', project_execution, methods=['GET', 'POST']),

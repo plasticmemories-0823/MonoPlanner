@@ -282,8 +282,10 @@ def test_environment_route_constructors_and_filesystem_work_stay_off_async_loop(
         else:
             pytest.fail(operation + ' must run in a worker thread, not the ASGI event loop')
 
-    def status(path):
+    def status(path, *, verify=False):
         off_loop('status')
+        if verify:
+            off_loop('verify_resources')
         assert path == str(repo)
         return {'mode': 'auto', 'status': 'idle'}
 
@@ -314,13 +316,16 @@ def test_environment_route_constructors_and_filesystem_work_stay_off_async_loop(
     monkeypatch.setattr(server_app, 'ProjectEnvironments', GuardedProjectEnvironments)
     with TestClient(server_app.app) as client:
         assert client.get('/workspace/environment', params={'repo': str(repo)}).status_code == 200
+        assert client.get('/workspace/environment', params={
+            'repo': str(repo), 'verify': '1'}).status_code == 200
         for action in ('prepare', 'cancel', 'automatic'):
             response = client.post(
                 '/workspace/environment', json={'repo': str(repo), 'action': action}
             )
             assert response.status_code == 200
-    assert observed.count('jobs_constructor') == 4
-    assert observed.count('status') == 2
+    assert observed.count('jobs_constructor') == 5
+    assert observed.count('status') == 3
+    assert observed.count('verify_resources') == 1
     assert observed.count('retry') == observed.count('cancel') == 1
     assert (
         observed.count('project_preferences_constructor') == observed.count('save_automatic') == 1
