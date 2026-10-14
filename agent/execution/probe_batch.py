@@ -8,6 +8,7 @@ from pathlib import Path
 
 from agent.execution.docker import DockerEnvironment
 from agent.source.snapshots import SourceSnapshot
+from agent.source.errors import SourceStorageError, source_storage_boundary
 
 
 class ProbeBatch:
@@ -23,6 +24,7 @@ class ProbeBatch:
         self.closed = False
         self.stats = {}
 
+    @source_storage_boundary
     def _start(self, version, timeout):
         started = time.monotonic()
         self.folder = self.directory / ('session-' + uuid.uuid4().hex)
@@ -69,6 +71,7 @@ class ProbeBatch:
         self.stats['setup_seconds'] = time.monotonic() - started
         self._save_stats()
 
+    @source_storage_boundary
     def _save_stats(self):
         (self.folder / 'session.json').write_text(
             json.dumps(self.stats, ensure_ascii=False, indent=2), encoding='utf-8'
@@ -138,15 +141,18 @@ class ProbeBatch:
             self._finish_session()
             raise
         finally:
-            for name, source in (('stdout', stdout), ('stderr', stderr)):
-                if source.is_symlink() or not source.resolve().is_relative_to(
-                    self.runtime.resolve()
-                ):
-                    self._finish_session()
-                    raise ValueError('Probe log escaped its own runtime')
-                raw = source.read_bytes() if source.exists() else b''
-                (directory / (name + '.log')).write_bytes(raw)
-                data[name] = raw.decode('utf-8', errors='replace')
+            try:
+                for name, source in (('stdout', stdout), ('stderr', stderr)):
+                    if source.is_symlink() or not source.resolve().is_relative_to(
+                        self.runtime.resolve()
+                    ):
+                        self._finish_session()
+                        raise ValueError('Probe log escaped its own runtime')
+                    raw = source.read_bytes() if source.exists() else b''
+                    (directory / (name + '.log')).write_bytes(raw)
+                    data[name] = raw.decode('utf-8', errors='replace')
+            except OSError as exc:
+                raise SourceStorageError(exc.errno, str(exc), exc.filename) from exc
             self.stats['command_seconds'] += time.monotonic() - started
             self._save_stats()
         integrity = self.snapshot.verify_integrity()

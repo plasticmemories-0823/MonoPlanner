@@ -6,6 +6,7 @@ python -m uvicorn tests.fixtures.application_server:app --host 127.0.0.1 --port 
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 from threading import Event, Lock
 from types import SimpleNamespace
@@ -46,6 +47,7 @@ class OfflinePreparation:
                 'message': '离线环境样本，无下载和安装', 'mode': 'automatic'}
 
     start = status
+    retry = status
     cancel = status
 
     def cancel_owner(self, owner):
@@ -119,7 +121,7 @@ class OfflineChat:
         if isinstance(last, ToolMessage):
             return response('已完成查询：' + last.content[:400])
         text = str(last.content)
-        if '开始工作' in text:
+        if '开始工作' in text or '准备失败工作' in text:
             return response('已保存任务，将在独立工作流程中执行。', 'start_work')
         if '查询进度' in text:
             return response('', 'get_work_status')
@@ -159,17 +161,25 @@ _guard = Lock()
 
 
 def pause(task, command):
+    native_action({'kind': 'pause_signalled', 'task': task})
     with _guard:
         signal = _signals.setdefault(task, Event())
     signal.set()
 
 
 def work(job, emit, controls):
+    native_action({'kind': 'work_started', 'task': job['task_id']})
+    if '准备失败工作' in job['request']:
+        return {'status': 'preparation_failed', 'applied_inputs': [],
+                'stop_reason': '开工准备失败：离线模拟磁盘空间不足'}
     with _guard:
         signal = Event()
         _signals[job['task_id']] = signal
     applied = []
     for index in range(160):
+        if (state_root() / 'fixture-storage-failure').is_file():
+            _failed_writes.set()
+            emit('work_state', {'status': 'executing', 'reason': '触发离线记录失败'})
         pending = controls()
         for item in pending:
             if item['id'] in applied:
@@ -195,6 +205,20 @@ def work(job, emit, controls):
 
 
 store = ApplicationStore(state_root())
+_failed_writes = Event()
+
+
+def fail_when_requested(method):
+    def call(*args, **kwargs):
+        if _failed_writes.is_set():
+            raise sqlite3.OperationalError('database or disk is full')
+        return method(*args, **kwargs)
+    return call
+
+
+# 故障由独立测试目录中的标记触发，只注入记录写入失败；读取及受管取消仍走真实代码。
+for _name in ('work_state', 'submit', 'record_event', 'command_state', 'chat_state', 'publish'):
+    setattr(store, _name, fail_when_requested(getattr(store, _name)))
 service = Scheduler(store, model_factory=lambda settings: OfflineChat(), title_factory=OfflineTitle,
                     work_factory=work, pause_callback=pause, supplement_callback=lambda *args: None,
                     prepare_callback=lambda repo: {'status': 'ready', 'repo': repo})

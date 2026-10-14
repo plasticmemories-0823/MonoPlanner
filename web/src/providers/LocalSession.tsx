@@ -1,11 +1,17 @@
 "use client";
-import { useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { connectLocalSession } from "@/lib/local-session";
+import { readStorageFailure } from "@/lib/conversation-api";
+import type { StorageFailure } from "@/lib/conversation-types";
+
+const ServiceHealth = createContext<StorageFailure | null>(null);
+export const useInitialServiceHealth = () => useContext(ServiceHealth);
 
 export function LocalSession({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  const [storageError, setStorageError] = useState<StorageFailure | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     for (const key of ["lg:chat:apiKey", "lg:chat:apiKeyHost"])
@@ -16,11 +22,11 @@ export function LocalSession({ children }: { children: ReactNode }) {
       }
     // 移除过时的连接设置，不保留其值。
     const url = new URL(location.href);
-    for (const key of ["apiUrl", "assistantId", "authScheme"])
-      url.searchParams.delete(key);
+    for (const key of ["apiUrl", "assistantId", "authScheme"]) url.searchParams.delete(key);
     history.replaceState(history.state, "", url);
     connectLocalSession(controller.signal)
-      .then(() => {
+      .then((service) => {
+        setStorageError(readStorageFailure(service.storage_error));
         setReady(true);
         setError("");
       })
@@ -43,5 +49,5 @@ export function LocalSession({ children }: { children: ReactNode }) {
         )}
       </div>
     );
-  return children;
+  return <ServiceHealth.Provider value={storageError}>{children}</ServiceHealth.Provider>;
 }

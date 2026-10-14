@@ -54,6 +54,8 @@ def code_key(root=None):
         'agent/storage/disk_space.py',
         'agent/application/work_bridge.py',
         'agent/source/__init__.py',
+        'agent/source/errors.py',
+        'agent/source/artifacts.py',
         'agent/storage/__init__.py',
         'agent/task/__init__.py',
         'agent/task/budget.py',
@@ -372,5 +374,7 @@ def run(loop, history, text, budget, verify_command, acceptance):
     finally:
         from agent.source.lifecycle import close
 
-        close(loop)
-        loop.history_store.close()
+        try:
+            close(loop)
+        finally:
+            loop.history_store.close()

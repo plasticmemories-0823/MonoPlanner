@@ -37,7 +37,10 @@ class ServiceIdentityTests(unittest.TestCase):
             value = client.get('/service')
             self.assertEqual(value.status_code, 200)
             self.assertEqual(value.headers['cache-control'], 'no-store')
-            self.assertEqual(set(value.json()), {'product', 'project_id', 'version', 'source_hash'})
+            self.assertEqual(set(value.json()), {
+                'product', 'project_id', 'version', 'source_hash', 'storage_error',
+            })
+            self.assertIsNone(value.json()['storage_error'])
             self.assertEqual(value.json()['product'], 'MonoPlanner')
             self.assertEqual(len(value.json()['source_hash']), 64)
         with tempfile.TemporaryDirectory() as folder:

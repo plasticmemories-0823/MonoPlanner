@@ -1,4 +1,25 @@
-import type { ConversationSnapshot } from "./conversation-types";
+import type { ConversationSnapshot, StorageFailure } from "./conversation-types";
+
+/** 仅识别公开的存储健康码，内部错误正文不能进入界面。 */
+export function readStorageFailure(value: unknown): StorageFailure | null {
+  if (!value || typeof value !== "object") return null;
+  const fault = value as Partial<StorageFailure>;
+  if (fault.code !== "storage_unavailable" || fault.dispatch_suspended !== true) return null;
+  return {
+    code: "storage_unavailable",
+    message: "本地记录写入失败，已停止派发；可请求紧急暂停，不能直接恢复。",
+    operation: typeof fault.operation === "string" ? fault.operation.slice(0, 80) : "",
+    dispatch_suspended: true,
+  };
+}
+
+export class StorageRequestError extends Error {
+  readonly storageError: StorageFailure;
+  constructor(fault: StorageFailure) {
+    super(fault.message);
+    this.storageError = fault;
+  }
+}
 
 export async function requestJson<T>(
   url: string,
@@ -10,8 +31,11 @@ export async function requestJson<T>(
     : AbortSignal.timeout(15_000);
   const response = await fetcher(url, { ...init, signal, cache: "no-store" });
   const value = await response.json();
-  if (!response.ok)
+  if (!response.ok) {
+    const fault = readStorageFailure(value.storage_error);
+    if (fault) throw new StorageRequestError(fault);
     throw new Error(value.error || value.detail || "本地服务暂时不可用，请保留输入并重新连接。");
+  }
   return value as T;
 }
 
@@ -23,6 +47,7 @@ type EventConnection = {
 type Observer = {
   snapshot(value: ConversationSnapshot): void;
   error(message: string): void;
+  storageError?(value: StorageFailure | null): void;
 };
 
 /** 一个会话只有一条事件连接和一个快照读取；事件从不直接拼接聊天内容。 */
@@ -69,6 +94,16 @@ export class ConversationMonitor {
       `${this.apiUrl}/conversations/${this.threadId}/events?after=${this.cursor}`,
     );
     this.connection = connection;
+    connection.addEventListener("health", (event) => {
+      if (this.disposed || this.connection !== connection) return;
+      try {
+        const value = JSON.parse(event.data);
+        if (Object.hasOwn(value, "storage_error"))
+          this.observer.storageError?.(readStorageFailure(value.storage_error));
+      } catch {
+        this.observer.error("无法读取服务健康状态，请重新连接核对。");
+      }
+    });
     connection.addEventListener("update", (event) => {
       if (this.disposed || this.connection !== connection) return;
       try {
@@ -131,8 +166,12 @@ export class ConversationMonitor {
         this.readOnly = snapshot.read_only;
         this.cursor = Math.max(this.cursor, snapshot.event_cursor);
         this.observer.snapshot(snapshot);
+        if (Object.hasOwn(snapshot, "storage_error"))
+          this.observer.storageError?.(readStorageFailure(snapshot.storage_error));
         this.observer.error("");
       } catch (error) {
+        if (!this.disposed && !controller.signal.aborted && error instanceof StorageRequestError)
+          this.observer.storageError?.(error.storageError);
         if (!this.disposed && !controller.signal.aborted)
           this.observer.error(
             error instanceof Error ? error.message : "无法读取会话状态，请重新连接。",

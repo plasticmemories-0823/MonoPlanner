@@ -12,7 +12,13 @@ import React, {
 import { useQueryState } from "nuqs";
 import { localApiUrl } from "@/lib/local-service";
 import { connectLocalSession } from "@/lib/local-session";
-import { ConversationMonitor, requestJson } from "@/lib/conversation-api";
+import {
+  ConversationMonitor,
+  requestJson,
+  readStorageFailure,
+  StorageRequestError,
+} from "@/lib/conversation-api";
+import { useInitialServiceHealth } from "./LocalSession";
 import {
   emptySnapshot,
   isWorking,
@@ -20,6 +26,7 @@ import {
   type ConversationSnapshot,
   type ConversationCommand,
   type CommandReceipt,
+  type StorageFailure,
 } from "@/lib/conversation-types";
 import { useThreads } from "./Thread";
 
@@ -30,6 +37,7 @@ type StreamContextType = {
   isLoading: boolean;
   workRunning: boolean;
   error: Error | undefined;
+  storageError: StorageFailure | null;
   preparingThread: boolean;
   ensureThread: (firstMessage?: string, repo?: string) => Promise<string>;
   command: (value: ConversationCommand, threadId?: string) => Promise<CommandReceipt>;
@@ -46,6 +54,8 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   const [view, setView] = useState<{ thread: string; snapshot: ConversationSnapshot }>();
   const [connectionError, setConnectionError] = useState<{ thread: string; message: string }>();
   const [preparingThread, setPreparingThread] = useState(false);
+  const initialHealth = useInitialServiceHealth();
+  const [storageError, setStorageError] = useState<StorageFailure | null>(initialHealth);
   const selected = useRef(threadId);
   const setup = useRef<Promise<string> | null>(null);
   const creation = useRef<{ id: string; repo: string; owner: string | null } | null>(null);
@@ -99,6 +109,7 @@ export function StreamProvider({ children }: { children: ReactNode }) {
       error(message) {
         setConnectionError({ thread: threadId, message });
       },
+      storageError: setStorageError,
     });
     monitor.current = next;
     void next.start();
@@ -109,15 +120,22 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   }, [apiUrl, threadId, updateTitle, getThreads]);
 
   async function createConversation(repo = "", firstMessage?: string) {
+    if (storageError) throw new StorageRequestError(storageError);
     const expected = selected.current;
     if (creation.current?.repo !== repo || creation.current.owner !== expected)
       creation.current = { id: crypto.randomUUID(), repo, owner: expected };
     const draft = creation.current;
-    const created = await requestJson<Conversation>(`${apiUrl}/conversations`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: draft.id, repo }),
-    });
+    let created: Conversation;
+    try {
+      created = await requestJson<Conversation>(`${apiUrl}/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: draft.id, repo }),
+      });
+    } catch (error) {
+      if (error instanceof StorageRequestError) setStorageError(error.storageError);
+      throw error;
+    }
     if (creation.current?.id === draft.id) creation.current = null;
     upsertThread(created, firstMessage);
     if (selected.current !== expected)
@@ -155,20 +173,26 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     if (!target) throw new Error("请先创建对话。");
     if (target === latest.current.thread_id && latest.current.read_only)
       throw new Error("旧版会话仅供查看，请新建对话继续。");
-    const receipt = await requestJson<CommandReceipt>(
-      `${apiUrl}/conversations/${target}/commands`,
-      {
+    if (storageError && value.kind !== "pause") throw new StorageRequestError(storageError);
+    let receipt: CommandReceipt;
+    try {
+      receipt = await requestJson<CommandReceipt>(`${apiUrl}/conversations/${target}/commands`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(value),
-      },
-    );
+      });
+    } catch (error) {
+      if (error instanceof StorageRequestError) setStorageError(error.storageError);
+      throw error;
+    }
+    if (receipt.storage_error) setStorageError(readStorageFailure(receipt.storage_error));
     if (selected.current === target) await monitor.current?.refresh();
     void getThreads();
     return receipt;
   }
 
   async function selectWorkspace(repo: string) {
+    if (storageError) throw new StorageRequestError(storageError);
     const current = latest.current;
     let target = selected.current;
     if (target && current.repo !== repo && current.work) {
@@ -186,7 +210,9 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     reconnecting.current = controller;
     const target = selected.current || "";
     try {
-      await connectLocalSession(controller.signal);
+      const service = await connectLocalSession(controller.signal);
+      if (Object.hasOwn(service, "storage_error"))
+        setStorageError(readStorageFailure(service.storage_error));
       if (selected.current === target) await monitor.current?.start();
       await getThreads();
     } catch (error) {
@@ -201,15 +227,16 @@ export function StreamProvider({ children }: { children: ReactNode }) {
   }
 
   const message = connectionError?.thread === threadId ? connectionError.message : "";
-  const workRunning = isWorking(values.work?.status);
+  const workRunning = !storageError && isWorking(values.work?.status);
   return (
     <StreamContext.Provider
       value={{
         apiUrl,
         values,
         messages: values.messages,
-        isLoading: isWorking(values.chat_status) || workRunning,
+        isLoading: !storageError && (isWorking(values.chat_status) || workRunning),
         workRunning,
+        storageError,
         error: message ? new Error(message) : undefined,
         preparingThread,
         ensureThread,

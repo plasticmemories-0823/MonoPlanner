@@ -310,7 +310,25 @@ class Chatbot:
         mixed_write = len(calls) != 1 and any(call['name'] in {
             'start_work', 'run_existing', 'open_file', 'launch_application', 'request_file_operation',
         } for call in calls)
+        from agent.task.control import current
+        from agent.model.errors import ModelInterrupted
+
+        stopped = None
+
+        def save_result(index, call, result):
+            message = message_to_dict(ToolMessage(content=encode(result), name=call['name'],
+                                                  tool_call_id=call['id']))
+            self.store.model_message(conversation, lane,
+                                      state['call_id'] + ':tool:' + str(index), message)
+
         for index, call in enumerate(calls):
+            signal = current()
+            if signal and signal.kind:
+                stopped = signal.kind
+                # 只标记尚未进入执行器的调用；此前真实结果保持原件并维持完整配对。
+                save_result(index, call, {'status': 'cancelled', 'actions_executed': False,
+                                         'reason': 'Stopped before tool dispatch'})
+                continue
             name, args = call['name'], call['args']
             try:
                 if mixed_write:
@@ -362,12 +380,11 @@ class Chatbot:
                                               state['call_id'] + '-' + str(index))
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 result = {'error': str(exc), 'actions_executed': False}
-            message = message_to_dict(ToolMessage(content=encode(result), name=name,
-                                                  tool_call_id=call['id']))
-            self.store.model_message(conversation, lane,
-                                      state['call_id'] + ':tool:' + str(index), message)
+            save_result(index, call, result)
             waiting_approval = waiting_approval or (
                 isinstance(result, dict) and result.get('status') == 'awaiting_approval')
+        if stopped:
+            raise ModelInterrupted(stopped, sent=False)
         return {'done': handed_off or waiting_approval, 'waiting_approval': waiting_approval}
 
     def _invoke_tool(self, conversation, call, operation):

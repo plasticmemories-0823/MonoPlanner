@@ -116,6 +116,8 @@ class Preparation:
             self.jobs.append(
                 {'version': active['version'], 'status': 'error', 'error': type(exc).__name__}
             )
+            if isinstance(exc, OSError):
+                raise
             return None
         meta = {
             k: v
@@ -150,11 +152,13 @@ class Preparation:
         started = time.monotonic()
         self.cancel()
         self.pool.shutdown(wait=True, cancel_futures=True)
-        if self.probes is not None:
-            self.probes.finish()
-        self.collect(version, archive)
-        self.closed = True
-        self.close_seconds = time.monotonic() - started
+        try:
+            if self.probes is not None:
+                self.probes.finish()
+            self.collect(version, archive)
+        finally:
+            self.closed = True
+            self.close_seconds = time.monotonic() - started
 
     def cancel(self):
         if self.active is not None:

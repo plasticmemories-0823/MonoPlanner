@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ConversationMonitor, requestJson } from "../src/lib/conversation-api.ts";
+import {
+  ConversationMonitor,
+  requestJson,
+  readStorageFailure,
+  StorageRequestError,
+} from "../src/lib/conversation-api.ts";
 
 const delay = (ms = 100) => new Promise((resolve) => setTimeout(resolve, ms));
 const snapshot = (cursor, text = "已收到") => ({
@@ -39,6 +44,7 @@ class Connection {
 function fixture(fetcher) {
   const applied = [],
     errors = [],
+    health = [],
     connections = [];
   const monitor = new ConversationMonitor(
     "/api",
@@ -46,6 +52,7 @@ function fixture(fetcher) {
     {
       snapshot: (value) => applied.push(value),
       error: (value) => errors.push(value),
+      storageError: (value) => health.push(value),
     },
     fetcher,
     (url) => {
@@ -54,8 +61,62 @@ function fixture(fetcher) {
       return connection;
     },
   );
-  return { monitor, applied, errors, connections };
+  return { monitor, applied, errors, health, connections };
 }
+
+const storageFault = {
+  code: "storage_unavailable",
+  dispatch_suspended: true,
+  operation: "work_state",
+  message: "internal diagnostic must not become public text",
+};
+
+test("a storage rejection retains its health fact without retrying a command", async () => {
+  let calls = 0;
+  await assert.rejects(
+    requestJson("/commands", { method: "POST" }, async () => {
+      calls++;
+      return Response.json({ storage_error: storageFault }, { status: 503 });
+    }),
+    (error) => {
+      assert.ok(error instanceof StorageRequestError);
+      assert.equal(error.storageError.dispatch_suspended, true);
+      assert.match(error.message, /记录写入失败/);
+      assert.ok(!error.message.includes("internal diagnostic"));
+      return true;
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(readStorageFailure({ code: "different", dispatch_suspended: true }), null);
+});
+
+test("storage health events do not require a writable event cursor or replace public messages", async () => {
+  const value = fixture(async () => Response.json(snapshot(12)));
+  await value.monitor.start();
+  value.connections[0].listeners.get("health")({
+    data: JSON.stringify({ storage_error: storageFault }),
+  });
+  assert.equal(value.health.at(-1).code, "storage_unavailable");
+  assert.equal(value.applied.length, 1);
+  value.monitor.dispose();
+  value.connections[0].listeners.get("health")({ data: JSON.stringify({ storage_error: null }) });
+  assert.equal(value.health.length, 1, "a disposed stream cannot change current service health");
+});
+
+test("failed snapshot reads surface storage failure and retain the last valid conversation", async () => {
+  let calls = 0;
+  const value = fixture(async () =>
+    ++calls === 1
+      ? Response.json(snapshot(9))
+      : Response.json({ storage_error: storageFault }, { status: 503 }),
+  );
+  await value.monitor.start();
+  await value.monitor.refresh();
+  assert.equal(value.applied.length, 1);
+  assert.equal(value.health.at(-1).dispatch_suspended, true);
+  assert.equal(calls, 2);
+  value.monitor.dispose();
+});
 
 test("one event subscription invalidates one authoritative snapshot without merging work text", async () => {
   let calls = 0,

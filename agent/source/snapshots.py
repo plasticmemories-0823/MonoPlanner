@@ -17,6 +17,8 @@ import uuid
 
 from agent.execution.docker import DockerEnvironment
 from agent.execution.local import LocalEnvironment
+from agent.source.artifacts import generated_records, generated_archive
+from agent.source.errors import source_storage_boundary
 
 
 _DERIVED_DIRS = {
@@ -96,11 +98,15 @@ def _reason(relative):
     return None
 
 
-def _inspect_file(path):
+def _inspect_file(path, cancel=None):
+    from agent.storage.resources import owner_cancelled
+
     digest, previous = hashlib.sha256(), b""
     private = False
     with path.open("rb") as stream:
         while chunk := stream.read(1024 * 1024):
+            if owner_cancelled() or (cancel is not None and cancel.is_set()):
+                raise InterruptedError('源码哈希检查已中断。')
             digest.update(chunk)
             data = previous + chunk
             private = private or any(line in _PRIVATE_MARKERS for line in data.splitlines())
@@ -127,18 +133,7 @@ def _safe_file(root, relative):
 # 源码发现与版本控制文件选择
 # ========================================================================
 def _generated_records(directory):
-    """按程序产物组合识别记录根，不把任意同名用户目录都视作缓存。"""
-    directory = Path(directory)
-    signatures = (
-        ('history.sqlite3', 'state.json'),
-        ('application.sqlite3', 'application-records'),
-        ('application.sqlite3', 'resources.sqlite3'),
-        ('conversations.sqlite3', 'tasks'),
-        ('before-source.zip', 'baseline.json'),
-        ('evaluated-source.zip', 'source-sha256.json', 'trials'),
-        ('checksums.json', 'portable-manifest.json', 'MonoPlanner.exe'),
-    )
-    return any(all((directory / name).exists() for name in group) for group in signatures)
+    return generated_records(directory)
 
 
 def _walk(root, preserve_files=(), ignored_directories=(), cancel=None, check_projects=False):
@@ -180,7 +175,11 @@ def _walk(root, preserve_files=(), ignored_directories=(), cancel=None, check_pr
         for name in files:
             if owner_cancelled() or (cancel is not None and cancel.is_set()):
                 raise InterruptedError('源码扫描已中断。')
-            yield (parent / name).relative_to(root), None
+            relative = (parent / name).relative_to(root)
+            skip = ('monoplanner_generated_archive'
+                    if relative not in preserve_files and not _reason(relative)
+                    and generated_archive(_safe_file(root, relative)) else None)
+            yield relative, skip
 
 
 def _selected_files(root, runtime_files=(), cancel=None):
@@ -275,7 +274,10 @@ def _selected_files(root, runtime_files=(), cancel=None):
                         record_root = parent
                         break
             if record_root is None:
-                retained.append((relative, None, relative in tracked))
+                skip = ('monoplanner_generated_archive'
+                        if relative not in tracked and not _reason(relative)
+                        and generated_archive(_safe_file(root, relative)) else None)
+                retained.append((relative, skip, relative in tracked))
             else:
                 generated.add(record_root)
         return "git", retained + [
@@ -290,7 +292,16 @@ def _selected_files(root, runtime_files=(), cancel=None):
 
 
 def _save(path, payload):
-    Path(path).write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    path = Path(path)
+    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        with temporary.open('x', encoding='utf-8') as stream:
+            stream.write(json.dumps(payload, ensure_ascii=True, indent=2))
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 # ========================================================================
@@ -305,6 +316,7 @@ class SourceSnapshot:
     excluded_files: dict[str, str] = field(default_factory=dict)
 
     @classmethod
+    @source_storage_boundary
     def capture(cls, repo_root, destination, excluded_roots=(), runtime_files=(), cancel=None):
         source = Path(repo_root).expanduser().resolve()
         destination = Path(destination).expanduser().resolve()
@@ -372,13 +384,13 @@ class SourceSnapshot:
                     skip = "deleted_tracked_file"
                 if skip:
                     manifest["excluded"].append({"path": relative.as_posix(), "reason": skip})
-                    if path.is_file():
+                    if path.is_file() and not skip.startswith('monoplanner_generated_'):
                         safe = _safe_file(source, relative)
-                        manifest["excluded_files"][relative.as_posix()] = _inspect_file(safe)[0]
+                        manifest["excluded_files"][relative.as_posix()] = _inspect_file(safe, cancel)[0]
                     continue
                 path = _safe_file(source, relative)
                 before = path.stat()
-                sha, private = _inspect_file(path)
+                sha, private = _inspect_file(path, cancel)
                 if private:
                     manifest["excluded"].append(
                         {"path": relative.as_posix(), "reason": "private_key_content"}
@@ -392,7 +404,7 @@ class SourceSnapshot:
                         check_cancel()
                         output.write(chunk)
                 shutil.copystat(path, target)
-                copied_sha, copied_private = _inspect_file(target)
+                copied_sha, copied_private = _inspect_file(target, cancel)
                 after = path.stat()
                 if copied_private:
                     # 此文件是在快照内部新建的，不能删除源码数据。
@@ -426,7 +438,11 @@ class SourceSnapshot:
             )
         except Exception as exc:
             manifest.update(status="failed", error=f"{type(exc).__name__}: {exc}")
-            _save(manifest_path, manifest)
+            try:
+                _save(manifest_path, manifest)
+            except OSError:
+                # 写失败说明也失败时，保留上一份原子清单和最初异常，不能截断原件。
+                pass
             raise
 
     @contextmanager

@@ -91,7 +91,9 @@ export function Thread() {
   const [sending, setSending] = useState(false);
   const [sendKind, setSendKind] = useState<"message" | "supplement">("message");
   const acceptsSupplement =
-    !stream.values.read_only && canSupplementWork(stream.values.work?.status);
+    !stream.values.read_only &&
+    !stream.storageError &&
+    canSupplementWork(stream.values.work?.status);
   const currentSendKind = acceptsSupplement ? sendKind : "message";
   const pendingCommand = useRef<{
     id: string;
@@ -149,7 +151,14 @@ export function Thread() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || stream.preparingThread || sending || stream.values.read_only) return;
+    if (
+      !input.trim() ||
+      stream.preparingThread ||
+      sending ||
+      stream.values.read_only ||
+      stream.storageError
+    )
+      return;
     setFirstTokenReceived(false);
     setSending(true);
     const text = input;
@@ -286,8 +295,16 @@ export function Thread() {
                     threadId={threadId}
                     running={isLoading}
                     eventCursor={stream.values.event_cursor}
-                    readOnly={stream.values.read_only}
+                    readOnly={stream.values.read_only || Boolean(stream.storageError)}
                   />
+                  {stream.storageError && (
+                    <p
+                      role="alert"
+                      className="text-destructive text-sm"
+                    >
+                      {stream.storageError.message}
+                    </p>
+                  )}
                   {activity.error && (
                     <p className="text-muted-foreground text-sm">
                       {activity.error}
@@ -369,7 +386,11 @@ export function Thread() {
                             apiUrl={stream.apiUrl}
                             repo={repo}
                             onChange={setRepo}
-                            disabled={stream.preparingThread || stream.values.read_only}
+                            disabled={
+                              stream.preparingThread ||
+                              stream.values.read_only ||
+                              Boolean(stream.storageError)
+                            }
                             onSelect={stream.selectWorkspace}
                             hasWork={Boolean(stream.values.work)}
                             working={stream.workRunning}
@@ -384,7 +405,7 @@ export function Thread() {
                                 running={isLoading}
                                 ensureThread={stream.ensureThread}
                                 eventCursor={stream.values.event_cursor}
-                                readOnly={stream.values.read_only}
+                                readOnly={stream.values.read_only || Boolean(stream.storageError)}
                               />
                             }
                             menuItems={
@@ -393,7 +414,11 @@ export function Thread() {
                                   apiUrl={stream.apiUrl}
                                   threadId={threadId}
                                   ensureThread={stream.ensureThread}
-                                  disabled={isLoading || stream.values.read_only}
+                                  disabled={
+                                    isLoading ||
+                                    stream.values.read_only ||
+                                    Boolean(stream.storageError)
+                                  }
                                 />
                                 <Resources apiUrl={stream.apiUrl} />
                               </>
@@ -414,7 +439,7 @@ export function Thread() {
                               <option value="supplement">补充工作要求</option>
                             </select>
                           )}
-                          {isLoading && (
+                          {(isLoading || (stream.storageError && threadId)) && (
                             <Button
                               type="button"
                               variant="outline"
@@ -422,11 +447,23 @@ export function Thread() {
                               className="rounded-full"
                               onClick={pause}
                               disabled={pauseRequested}
-                              aria-label={pauseRequested ? "正在暂停" : "暂停"}
+                              aria-label={
+                                pauseRequested
+                                  ? "正在暂停"
+                                  : stream.storageError
+                                    ? "紧急暂停"
+                                    : "暂停"
+                              }
                             >
-                              <LoaderCircle className="size-4 animate-spin" />
+                              <LoaderCircle
+                                className={cn("size-4", !stream.storageError && "animate-spin")}
+                              />
                               <span className="hidden sm:inline">
-                                {pauseRequested ? "正在暂停" : "暂停"}
+                                {pauseRequested
+                                  ? "正在暂停"
+                                  : stream.storageError
+                                    ? "紧急暂停"
+                                    : "暂停"}
                               </span>
                             </Button>
                           )}
@@ -438,13 +475,10 @@ export function Thread() {
                               !input.trim() ||
                               stream.preparingThread ||
                               sending ||
-                              stream.values.read_only
+                              stream.values.read_only ||
+                              Boolean(stream.storageError)
                             }
-                            aria-label={
-                              currentSendKind === "supplement"
-                                ? "发送补充要求"
-                                : "发送"
-                            }
+                            aria-label={currentSendKind === "supplement" ? "发送补充要求" : "发送"}
                             title={
                               currentSendKind === "supplement"
                                 ? "发送补充要求"
@@ -517,13 +551,16 @@ export function Thread() {
                               isLoading ? "animate-pulse bg-emerald-500" : "bg-muted-foreground/50",
                             )}
                           />
-                          {isLoading
-                            ? stream.workRunning
-                              ? "工作进行中，聊天不会打断任务"
-                              : "正在回复"
-                            : statusLabel(stream.values.status)}
+                          {stream.storageError
+                            ? "记录写入失败 · 已停止派发，执行状态待核对"
+                            : isLoading
+                              ? stream.workRunning
+                                ? "工作进行中，聊天不会打断任务"
+                                : "正在回复"
+                              : statusLabel(stream.values.status)}
                         </span>
-                        {!stream.workRunning &&
+                        {!stream.storageError &&
+                          !stream.workRunning &&
                           ["paused", "awaiting_user", "output_limit_reached"].includes(
                             stream.values.work?.status || stream.values.status || "",
                           ) && (

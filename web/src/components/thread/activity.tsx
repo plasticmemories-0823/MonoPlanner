@@ -16,7 +16,11 @@ export function useActivity() {
     [stream.values.usage, stream.workRunning],
   );
   return {
-    items: stream.values.activities || [],
+    items: (stream.values.activities || []).map((item) =>
+      stream.storageError && item.status === "running"
+        ? { ...item, status: "unknown", label: "记录写入失败，状态待核对" }
+        : item,
+    ),
     error: stream.error?.message || "",
     usage,
     groups: stream.values.usage || {},

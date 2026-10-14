@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import { readStorageFailure } from "@/lib/conversation-api";
 import {
   allowedRequest,
   backendUrl,
@@ -11,16 +12,10 @@ import {
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-async function forward(
-  request: Request,
-  context: { params: Promise<{ path: string[] }> },
-) {
+async function forward(request: Request, context: { params: Promise<{ path: string[] }> }) {
   const mutable = !["GET", "HEAD"].includes(request.method);
   if (!allowedRequest(request, mutable))
-    return Response.json(
-      { error: "Cross-site request denied" },
-      { status: 403 },
-    );
+    return Response.json({ error: "Cross-site request denied" }, { status: 403 });
   try {
     if (!validSession((await cookies()).get(SESSION_COOKIE)?.value))
       return Response.json({ error: "请重新连接本地服务。" }, { status: 401 });
@@ -57,20 +52,14 @@ async function forward(
       }
       if (
         size &&
-        !request.headers
-          .get("content-type")
-          ?.toLowerCase()
-          .startsWith("application/json")
+        !request.headers.get("content-type")?.toLowerCase().startsWith("application/json")
       )
-        return Response.json(
-          { error: "JSON request required" },
-          { status: 415 },
-        );
+        return Response.json({ error: "JSON request required" }, { status: 415 });
       body = Buffer.concat(chunks);
     }
     const headers = new Headers({
       "X-MonoPlanner-Service": instanceToken(),
-      "Origin": new URL(request.url).origin,
+      Origin: new URL(request.url).origin,
     });
     for (const key of ["content-type", "accept", "last-event-id"])
       if (request.headers.has(key)) headers.set(key, request.headers.get(key)!);
@@ -95,18 +84,22 @@ async function forward(
       "content-security-policy",
       "referrer-policy",
     ])
-      if (upstream.headers.has(key))
-        output.set(key, upstream.headers.get(key)!);
+      if (upstream.headers.has(key)) output.set(key, upstream.headers.get(key)!);
     // 不向浏览器传递后端 Cookie、凭据、重定向地址或内部错误正文。
     if (upstream.status >= 500) {
-      await upstream.body?.cancel();
+      const value = await upstream.json().catch(() => null);
+      const fault = readStorageFailure(value?.storage_error);
+      if (fault)
+        return Response.json(
+          { error: fault.message, storage_error: fault },
+          { status: upstream.status, headers: output },
+        );
       return Response.json(
         { error: "本地服务暂时不可用；请检查启动日志后重新连接。" },
         { status: upstream.status },
       );
     }
-    if (!upstream.body)
-      return new Response(null, { status: upstream.status, headers: output });
+    if (!upstream.body) return new Response(null, { status: upstream.status, headers: output });
     const reader = upstream.body.getReader();
     return new Response(
       new ReadableStream({

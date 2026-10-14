@@ -2,6 +2,7 @@
 
 from agent.model.errors import ModelRequestNotSent
 from agent.source.preparation import Preparation
+from agent.source.errors import source_storage_boundary
 
 
 def collect(loop):
@@ -22,6 +23,8 @@ def collect(loop):
     except Exception as exc:
         loop.preparation_errors.append(type(exc).__name__)
         loop.executor.prepared = None
+        if isinstance(exc, OSError):
+            raise
 
 
 def begin(loop):
@@ -47,6 +50,8 @@ def close(loop):
             prep.close(loop.evidence.current, loop.history_store)
         except Exception as exc:
             loop.preparation_errors.append(type(exc).__name__)
+            if isinstance(exc, OSError):
+                raise
     if hasattr(loop, 'state') and loop.state:
         loop.state['source_performance'] = {
             'optimized': loop.optimize_source,
@@ -94,6 +99,7 @@ def configure_lookups(loop):
     loop.executor.exploration.sync()
 
 
+@source_storage_boundary
 def record_lookup(loop, step, row, directory):
     if row['status'] != 'succeeded' or step.op not in {'read', 'search'}:
         return

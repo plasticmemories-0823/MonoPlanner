@@ -4,6 +4,7 @@ from langchain_core.messages import ToolMessage, message_to_dict
 import json
 from agent.source import lifecycle as source_runtime
 from agent.source.snapshots import SourceSnapshot
+from agent.source.errors import SourceStorageError
 from agent.task.contracts import WorkRequest
 from agent.acceptance.contracts import VerificationSpec
 from agent.acceptance.final import verify_final
@@ -82,6 +83,9 @@ def _execute_pending(self):
                 )
             )
             source_runtime.record_lookup(self, step, row, directory)
+        except SourceStorageError:
+            # 宿主源码副本/证据写入失败必须停止，不能作为项目失败交回模型再复制。
+            raise
         except Exception as exc:
             row = {"status": "failed", "data": {"error": f"{type(exc).__name__}: {exc}"}}
         after = (

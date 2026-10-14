@@ -8,7 +8,8 @@ from pathlib import Path, PurePosixPath
 from threading import RLock
 from types import MappingProxyType
 
-from agent.source.snapshots import SourceSnapshot, _safe_file
+from agent.source.snapshots import SourceSnapshot, _safe_file, _save
+from agent.source.errors import source_storage_boundary
 
 
 def digest(value):
@@ -75,6 +76,7 @@ class SourceView:
                 self.cache_bytes += len(raw)
         return raw
 
+    @source_storage_boundary
     def export(self, destination, *, cancel=None):
         """隔离调查只使用归档字节生成副本，不使用实时文件。"""
         from agent.storage.resources import owner_cancelled, preflight_space
@@ -93,42 +95,41 @@ class SourceView:
         destination.mkdir(parents=True, exist_ok=False)
         target = destination / 'source'
         target.mkdir()
-        for name in self.files:
-            if owner_cancelled() or (cancel is not None and cancel.is_set()):
-                from concurrent.futures import CancelledError
-
-                raise CancelledError()
-            raw = self.read_bytes(name)
-            path = target / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open('xb') as stream:
-                for offset in range(0, len(raw), 1024 * 1024):
-                    if owner_cancelled() or (cancel is not None and cancel.is_set()):
-                        from concurrent.futures import CancelledError
-
-                        raise CancelledError()
-                    stream.write(raw[offset : offset + 1024 * 1024])
-            if self.baseline is not None and name in self.baseline.files:
-                original = _safe_file(self.baseline.root, Path(name))
-                path.chmod(original.stat().st_mode)
         payload = {'files': dict(self.files), 'excluded_files': dict(self.excluded)}
         sha = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
         ).hexdigest()
         manifest = destination / 'manifest.json'
-        manifest.write_text(
-            json.dumps(
-                {
-                    **payload,
-                    'root': str(target.resolve()),
-                    'digest': sha,
-                    'status': 'captured',
-                    'source_version': self.version,
-                    'origin': 'SourceVersions archived bytes; no live workspace read',
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding='utf-8',
-        )
+        record = {'root': str(target.resolve()), 'source_root': str(self.origin_root),
+                  'status': 'capturing', 'source_version': self.version, 'digest': sha,
+                  **payload,
+                  'excluded': [], 'notes': [],
+                  'origin': 'SourceVersions archived bytes; no live workspace read'}
+        _save(manifest, record)
+        try:
+            for name in self.files:
+                if owner_cancelled() or (cancel is not None and cancel.is_set()):
+                    from concurrent.futures import CancelledError
+
+                    raise CancelledError()
+                raw = self.read_bytes(name)
+                path = target / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open('xb') as stream:
+                    for offset in range(0, len(raw), 1024 * 1024):
+                        if owner_cancelled() or (cancel is not None and cancel.is_set()):
+                            from concurrent.futures import CancelledError
+
+                            raise CancelledError()
+                        stream.write(raw[offset : offset + 1024 * 1024])
+                if self.baseline is not None and name in self.baseline.files:
+                    original = _safe_file(self.baseline.root, Path(name))
+                    path.chmod(original.stat().st_mode)
+            _save(manifest, {**record, 'status': 'captured'})
+        except Exception as exc:
+            try:
+                _save(manifest, {**record, 'status': 'failed', 'error': type(exc).__name__})
+            except OSError:
+                pass
+            raise
         return SourceSnapshot(target, dict(self.files), sha, manifest, dict(self.excluded))

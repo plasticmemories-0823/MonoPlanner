@@ -53,6 +53,11 @@ class PreparationJobs:
                     'message': '使用已保存的高级环境配置', 'environment': binding}
         value = self.catalog.environment_job(repo)
         if value:
+            with self.lock:
+                if (value['status'] == 'preparing' and self.pool is not None
+                        and value['id'] not in self.workers):
+                    return {**value, 'status': 'interrupted', 'stage': 'interrupted',
+                            'message': '准备记录未能正常完成，现场已保留；请核对后明确重新准备。'}
             return value
         from agent.execution.managed import ManagedEnvironments
 
@@ -63,7 +68,7 @@ class PreparationJobs:
                                     if key in ready}}
         return self._legacy(repo) or {**ready, 'mode': 'auto', 'status': 'idle', 'stage': 'checking'}
 
-    def start(self, repo, *, background=True):
+    def start(self, repo, *, background=True, retry=False):
         repo = workspace_path(repo)
         if ProjectEnvironments(self.root).get(repo).get('image'):
             return self.status(repo)
@@ -77,12 +82,16 @@ class PreparationJobs:
                 if background and not existing.get('background'):
                     existing = self.catalog.save_environment_job({**existing, 'background': True})
                 return existing
-            if any(not worker['future'].done() for worker in self.workers.values()):
-                raise EnvironmentRequired('已有一个项目正在准备环境，请稍后重试。')
-            if existing and existing['status'] == 'interrupted':
+            if existing and existing['status'] in {'failed', 'cancelled', 'interrupted', 'preparing'}:
+                if not retry:
+                    return existing
                 results = cancel_owned_containers(existing['owner'], self.root)
                 if any(not result['stopped'] for result in results):
                     raise EnvironmentRequired('上次准备容器停止未确认，不能创建新环境。')
+            elif not retry and self._legacy(repo):
+                raise EnvironmentRequired('旧版准备记录仅供保留，请明确点击重新准备环境。')
+            if any(not worker['future'].done() for worker in self.workers.values()):
+                raise EnvironmentRequired('已有一个项目正在准备环境，请稍后重试。')
             identity = uuid.uuid4().hex
             value = self.catalog.save_environment_job({
                 'id': identity, 'repo': repo, 'owner': 'prepare:' + identity,
@@ -94,6 +103,10 @@ class PreparationJobs:
             self.workers[identity] = {'future': future, 'cancel': cancel}
             future.add_done_callback(lambda _: self._finished(identity))
             return value
+
+    def retry(self, repo):
+        """仅显式用户操作可重新准备失败或中断的环境。"""
+        return self.start(repo, retry=True)
 
     def _finished(self, identity):
         with self.lock:

@@ -98,7 +98,7 @@ class ProbePreparationTests(unittest.TestCase):
             worker.take(view.version)
         self.assertEqual((outside / 'private.txt').read_text(), 'outside')
 
-    def test_unfinished_copy_is_optional_and_job_queue_is_bounded(self):
+    def test_unfinished_copy_is_awaited_and_job_queue_is_bounded(self):
         view = self.view()
         worker = self.worker()
         entered, release = Event(), Event()
@@ -114,16 +114,13 @@ class ProbePreparationTests(unittest.TestCase):
             future = worker.active['future']
             for i in range(20):
                 worker.start(view)
-                self.assertIsNone(worker.take(view.version))
             self.assertIs(worker.active['future'], future)
             self.assertEqual(build.call_count, 1)
-            self.assertTrue(worker.active['cancel'].is_set())
-            worker.cancel()
-            self.assertTrue(worker.active['cancel'].is_set())
+            self.assertFalse(worker.active['cancel'].is_set())
             release.set()
             with self.assertRaises(CancelledError):
                 future.result(timeout=5)
-            worker.finish()
+            self.assertIsNone(worker.take(view.version))
             self.assertIsNone(worker.active)
 
     def test_cancelled_copy_can_be_prepared_again_on_a_later_request(self):
@@ -174,8 +171,10 @@ class ProbePreparationTests(unittest.TestCase):
         ) as copy:
             preparation.start(view)
             self.assertTrue(entered.wait(5))
+            pending = preparation.probes.active['future']
             self.assertIsNone(preparation.probes.take(view.version))
-            self.assertTrue(preparation.probes.active['future'].cancelled())
+            self.assertTrue(pending.cancelled())
+            self.assertIsNone(preparation.probes.active)
             self.assertEqual(copy.call_count, 0)
             release.set()
             preparation.close(view.version)

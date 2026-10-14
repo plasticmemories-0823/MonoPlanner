@@ -464,11 +464,17 @@ def cancel_owned_containers(owner, root=None):
     path = Path(directory) / 'resources.sqlite3'
     active_names = {key[2] for key, _ in selected}
     if path.is_file():
-        catalog = resource_catalog(directory)
-        with catalog._db() as db:
-            saved = list(db.execute('SELECT r.location,r.metadata FROM resources r '
-                'JOIN resource_refs f ON r.id=f.resource WHERE f.owner=? '
-                "AND r.kind='container' AND r.owned=1 AND r.status!='deleted'", (owner,)))
+        try:
+            catalog = resource_catalog(directory)
+            with catalog._db() as db:
+                saved = list(db.execute('SELECT r.location,r.metadata FROM resources r '
+                    'JOIN resource_refs f ON r.id=f.resource WHERE f.owner=? '
+                    "AND r.kind='container' AND r.owned=1 AND r.status!='deleted'", (owner,)))
+        except Exception as exc:
+            # 当前进程已执行的终止回执不能因台账故障丢失；没有身份就不能猜杀别的容器。
+            results.append({'stopped': False, 'error': type(exc).__name__,
+                            'recovered': True, 'scope': 'persistent_container_ownership'})
+            return results
         for row in saved:
             if row['location'] in active_names:
                 continue

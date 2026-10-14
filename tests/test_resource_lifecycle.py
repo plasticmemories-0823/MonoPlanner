@@ -14,6 +14,28 @@ from agent.storage.resources import (
 )
 
 
+def test_pause_keeps_active_stop_receipt_when_persistent_catalog_is_unreadable(tmp_path, monkeypatch):
+    import sqlite3
+    import agent.storage.resources as resources
+
+    (tmp_path / 'resources.sqlite3').write_bytes(b'fixture')
+    stopped = Mock(return_value={'stopped': True, 'receipt': 'saved'})
+    token = register_active_container('task:disk-full', 'known-current', stopped, root=tmp_path)
+    try:
+        monkeypatch.setattr(resources, 'resource_catalog', Mock(
+            side_effect=sqlite3.OperationalError('database or disk is full')))
+        recovered = Mock()
+        monkeypatch.setattr(resources, 'stop_recorded_container', recovered)
+        result = cancel_owned_containers('task:disk-full', tmp_path)
+    finally:
+        unregister_active_container(token)
+    stopped.assert_called_once()
+    recovered.assert_not_called()
+    assert result[0] == {'container': 'known-current', 'stopped': True, 'receipt': 'saved'}
+    assert result[1]['stopped'] is False
+    assert result[1]['error'] == 'OperationalError'
+
+
 def test_references_and_leases_protect_shared_resource(tmp_path):
     catalog = ResourceCatalog(tmp_path)
     folder = tmp_path / 'temporary'
@@ -220,7 +242,8 @@ def test_non_git_source_excludes_generated_record_signatures_not_generic_names(t
     archive = repo / 'renamed-archive'
     archive.mkdir(parents=True)
     (archive / 'history.sqlite3').write_bytes(b'archive')
-    (archive / 'state.json').write_text('{}')
+    (archive / 'state.json').write_text(json.dumps({
+        'format': 'task-history-reference', 'database': 'history.sqlite3'}))
     (archive / 'private-copy.py').write_text('history material')
     ordinary = repo / 'validation'
     ordinary.mkdir()
@@ -258,7 +281,8 @@ def test_git_root_does_not_copy_untracked_product_archive(tmp_path):
     archive = repo / 'saved'
     archive.mkdir()
     (archive / 'history.sqlite3').write_bytes(b'archive')
-    (archive / 'state.json').write_text('{}')
+    (archive / 'state.json').write_text(json.dumps({
+        'format': 'task-history-reference', 'database': 'history.sqlite3'}))
     snapshot = SourceSnapshot.capture(repo, tmp_path / 'snapshot')
     assert set(snapshot.files) == {'main.py'}
 

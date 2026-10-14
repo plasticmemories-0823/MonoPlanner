@@ -211,6 +211,7 @@ def test_environment_routes_are_authenticated_read_only_on_get_and_strict_on_act
     service = SimpleNamespace(
         status=Mock(return_value={'status': 'needed', 'mode': 'auto'}),
         start=Mock(return_value={'status': 'preparing', 'mode': 'auto'}),
+        retry=Mock(return_value={'status': 'preparing', 'mode': 'auto'}),
         cancel=Mock(return_value={'status': 'cancelled', 'mode': 'auto'}),
     )
     monkeypatch.setattr(preparation, 'jobs', lambda: service)
@@ -225,6 +226,7 @@ def test_environment_routes_are_authenticated_read_only_on_get_and_strict_on_act
         )
     service.status.assert_not_called()
     service.start.assert_not_called()
+    service.retry.assert_not_called()
     with TestClient(app) as client:
         response = client.get('/workspace/environment', params={'repo': str(repo)})
         assert response.status_code == 200 and response.json()['status'] == 'needed'
@@ -256,7 +258,8 @@ def test_environment_routes_are_authenticated_read_only_on_get_and_strict_on_act
             ).status_code
             == 200
         )
-    service.start.assert_called_once_with(str(repo))
+    service.start.assert_not_called()
+    service.retry.assert_called_once_with(str(repo))
     service.cancel.assert_called_once_with(str(repo))
 
 
@@ -284,8 +287,8 @@ def test_environment_route_constructors_and_filesystem_work_stay_off_async_loop(
         assert path == str(repo)
         return {'mode': 'auto', 'status': 'idle'}
 
-    def start(path):
-        off_loop('start')
+    def retry(path):
+        off_loop('retry')
         assert path == str(repo)
         return {'mode': 'auto', 'status': 'preparing'}
 
@@ -296,7 +299,7 @@ def test_environment_route_constructors_and_filesystem_work_stay_off_async_loop(
 
     def service():
         off_loop('jobs_constructor')
-        return SimpleNamespace(status=status, start=start, cancel=cancel)
+        return SimpleNamespace(status=status, retry=retry, cancel=cancel)
 
     class GuardedProjectEnvironments(ProjectEnvironments):
         def __init__(self, *args, **kwargs):
@@ -318,7 +321,7 @@ def test_environment_route_constructors_and_filesystem_work_stay_off_async_loop(
             assert response.status_code == 200
     assert observed.count('jobs_constructor') == 4
     assert observed.count('status') == 2
-    assert observed.count('start') == observed.count('cancel') == 1
+    assert observed.count('retry') == observed.count('cancel') == 1
     assert (
         observed.count('project_preferences_constructor') == observed.count('save_automatic') == 1
     )

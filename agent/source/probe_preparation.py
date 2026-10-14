@@ -1,6 +1,6 @@
 """模型请求等待期间，最多准备一个不可变的调查副本。"""
 
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, TimeoutError
 from contextvars import copy_context
 import hashlib
 import os
@@ -63,6 +63,10 @@ class ProbePreparation:
 
     def start(self, view):
         if self.active is not None:
+            future = self.active['future']
+            if future.done() and not future.cancelled() and future.exception() is not None:
+                self._finish('stale')
+                return
             if self.active['version'] == view.version and not self.active['cancel'].is_set():
                 return
             self.cancel()
@@ -88,7 +92,7 @@ class ProbePreparation:
             self.jobs.append(
                 {'version': active['version'], 'status': 'error', 'error': type(exc).__name__}
             )
-            if status == 'consumed':
+            if status == 'consumed' or isinstance(exc, OSError):
                 raise
             return None
         self.jobs.append({k: v for k, v in result.items() if k != 'snapshot'} | {'status': status})
@@ -103,10 +107,24 @@ class ProbePreparation:
     def take(self, version):
         if self.active is None:
             return None
-        if not self.active['future'].done():
-            # 避免重复复制，与同步后备流程争用资源。
-            self.cancel()
-            return None
+        future = self.active['future']
+        if not future.running() and not future.done() and future.cancel():
+            # 尚未开始的排队副本没有写盘，可以交给同步路径；已运行副本必须等待或中止。
+            return self._finish('unused')
+        from agent.storage.resources import owner_cancelled
+
+        while not future.done():
+            if owner_cancelled():
+                self.cancel()
+            try:
+                future.result(timeout=0.05)
+            except TimeoutError:
+                continue
+            except Exception:
+                break  # 统一由 _finish 保存状态并传递异常，不另建副本。
+        if owner_cancelled():
+            self._finish('unused')
+            raise CancelledError()
         if self.active['version'] != version or self.active['cancel'].is_set():
             self._finish('stale')
             return None

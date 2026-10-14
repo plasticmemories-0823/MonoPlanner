@@ -48,6 +48,12 @@ export type Activity = {
 };
 
 export type UsageKind = "chat" | "work" | "progress" | "title";
+export type StorageFailure = {
+  code: "storage_unavailable";
+  message: string;
+  operation: string;
+  dispatch_suspended: true;
+};
 export type ConversationSnapshot = {
   thread_id: string;
   status: string;
@@ -64,6 +70,7 @@ export type ConversationSnapshot = {
   updated_at?: string;
   event_cursor: number;
   read_only: boolean;
+  storage_error?: StorageFailure | null;
 };
 
 export type ConversationCommand = {
@@ -80,7 +87,26 @@ export type CommandReceipt = {
   applied: boolean;
   status: string;
   event_cursor: number;
+  recorded?: boolean;
+  control_requested?: boolean;
+  termination_confirmed?: boolean;
+  message?: string;
+  storage_error?: StorageFailure | null;
 };
+
+export function commandNotice(kind: "pause" | "resume", receipt: CommandReceipt) {
+  if (receipt.recorded === false || receipt.received === false)
+    return {
+      warning: true,
+      message: receipt.control_requested
+        ? "已请求终止，但记录写入失败；终止结果待核对，不能直接恢复。"
+        : "控制请求未确认，记录尚未保存；请核对现场，不会自动重发。",
+    };
+  return {
+    warning: false,
+    message: kind === "pause" ? "已发送暂停，正在终止当前操作并保存现场" : "继续请求已保存",
+  };
+}
 
 export function emptySnapshot(): ConversationSnapshot {
   return {

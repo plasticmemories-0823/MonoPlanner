@@ -1,5 +1,6 @@
 """将独立工作执行者接入现有内核；聊天和汇报不参与工作历史。"""
 
+import errno
 import json
 from pathlib import Path
 from threading import RLock
@@ -160,7 +161,12 @@ def pause_work(task_id, command_id, *, root=None):
     from agent.storage.resources import cancel_owned_containers
     from agent.execution.preparation import jobs
 
-    result = jobs(root).cancel_owner("task:" + task_id)
+    try:
+        result = jobs(root).cancel_owner("task:" + task_id)
+    except Exception as exc:
+        # 安装台账不可写时仍须继续终止本任务的已登记容器。
+        result = [{"preparation_stop": True, "stopped": False,
+                   "error": type(exc).__name__}]
     result.extend(cancel_owned_containers("task:" + task_id, root=root))
     evidence = {
         "task_id": task_id, "command_id": command_id, "time": time.time(),
@@ -247,7 +253,16 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
     environment = None
     result = None
     owned_model = None
+    runner = None
+    # 旧检查点的环境/恢复失败不能降级成一次新的准备失败。
+    fresh = not any((directory / name).exists() for name in (
+        "history.sqlite3", "state.json", "existing/state.json",
+    ))
+    preparing = True
     try:
+        failed_path = directory / "preparation-failed.json"
+        if failed_path.exists():
+            return json.loads(failed_path.read_text(encoding="utf-8"))
         if (directory / "hard-interruption.json").exists():
             return {"status": "execution_unknown", "applied_inputs": [],
                     "stop_reason": "上次操作被强制中止；请先核对保留现场。"}
@@ -306,6 +321,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
             else:
                 environment.start()
             if data.get("kind") == "existing":
+                preparing = False
                 result = _existing(data, environment, directory, owner, emit)
                 return result
             settings = data.get("settings", data.get("runtime_settings", {}))
@@ -324,6 +340,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                 history, data["request"], StepBudget(**data.get("budget", {"max_steps": 1000})),
                 verify_command=data.get("verify_command"), acceptance=data.get("acceptance"),
             )
+            preparing = False
             result["applied_inputs"] = list(runner.state.get("applied_inputs", []))
             if owner["interrupted_operation"]:
                 result.update(
@@ -353,6 +370,34 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                 "applied_inputs": result["applied_inputs"],
             })
             return result
+    except Exception as exc:
+        # 只在首次执行前归类准备失败。已有工作状态、模型请求及实际操作的
+        # 记录故障仍交给上层按关键故障处理，不能伪称只是复制未完成。
+        if not fresh or not preparing or (runner is not None and runner.state):
+            raise
+        from agent.execution.projects import EnvironmentRequired
+        from agent.source.artifacts import ArtifactScopeError
+        from agent.source.snapshots import SnapshotError
+
+        if isinstance(exc, OSError) and (
+            exc.errno == errno.ENOSPC or getattr(exc, "winerror", None) == 112
+            or str(exc).startswith("磁盘空间不足：")
+        ):
+            detail = "保存环境或源码时磁盘空间不足。"
+        elif isinstance(exc, (EnvironmentRequired, SnapshotError, ArtifactScopeError)):
+            detail = str(exc)[:1000]
+        elif isinstance(exc, InterruptedError):
+            detail = "环境或源码准备已中止。"
+        else:
+            detail = "环境或源码准备失败（" + type(exc).__name__ + "）。"
+        result = {
+            "status": "preparation_failed", "task_id": task_id, "applied_inputs": [],
+            "stop_reason": detail + " 已停止，未开始项目代码执行；原现场保留，不会自动重试。",
+            "error_type": type(exc).__name__,
+        }
+        # 若连这份小记录也无法提交，继续抛出存储故障；不能宣称已保存。
+        save(directory / "preparation-failed.json", result)
+        return result
     finally:
         try:
             if environment is not None:

@@ -20,6 +20,7 @@ from agent.execution.managed_plan import (
     safe_path,
 )
 from agent.storage.preferences import private_path
+from agent.source.artifacts import generated_records, generated_archive
 
 
 def project_files(root, under=Path('.')):
@@ -80,6 +81,10 @@ def project_files(root, under=Path('.')):
         return decision is True
 
     def visit(folder, rules):
+        relative_folder = folder.relative_to(root)
+        if not any(name.is_relative_to(relative_folder) for name in tracked):
+            if generated_records(folder):
+                return
         if folder != start:
             ignore = folder / '.gitignore'
             if ignore.is_file():
@@ -104,6 +109,8 @@ def project_files(root, under=Path('.')):
                 yield from visit(path, rules)
             elif not ignored(path, rules):
                 safe_path(root, relative)
+                if relative not in tracked and generated_archive(path):
+                    continue
                 yield relative
 
     yield from visit(start, inherited)
@@ -112,6 +119,7 @@ def project_files(root, under=Path('.')):
 def collect(plan, cancelled=None):
     """先按文件元数据核算边界，再读取内容；不会复制到安装目录。"""
     selected = {name: '依赖声明或明确引用的文件' for name in plan.files} if plan.projects else {}
+    discovered_sources = set()
     roots = {name: '项目明确声明的本地包' for name in plan.source_projects}
     for project in plan.projects:
         if project.get('has_package') or project.get('needs_source'):
@@ -129,6 +137,7 @@ def collect(plan, cancelled=None):
 
                 raise PreparationCancelled('环境准备已取消，尚未开始复制安装资料。')
             selected.setdefault(relative.as_posix(), reason)
+            discovered_sources.add(relative.as_posix())
             if len(selected) > MAX_FILES:
                 raise PreparationError(
                     f'安装资料过多：{relative.as_posix()}，超过 {MAX_FILES:,} 个文件的限制。'
@@ -142,6 +151,11 @@ def collect(plan, cancelled=None):
 
             raise PreparationCancelled('环境准备已取消，尚未开始复制安装资料。')
         path = safe_path(plan.root, name)
+        if name not in discovered_sources:
+            parents = [path.parent, *path.parent.parents]
+            if any(generated_records(parent) for parent in parents
+                   if parent.is_relative_to(plan.root)) or generated_archive(path):
+                raise PreparationError(f'明确引用的安装资料是程序运行归档，请核对项目配置：{name}')
         if excluded(Path(name)) or private_path(path):
             raise PreparationError(f'明确引用的安装资料属于受保护文件：{name}')
         size = path.stat().st_size

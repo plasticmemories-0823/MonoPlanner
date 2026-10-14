@@ -114,11 +114,29 @@ def test_failure_is_saved_redacted_and_explicit_retry_can_succeed(job_fixture):
     assert failed['status'] == 'failed'
     assert 'PRIVATE_AUTH_TOKEN' not in json.dumps(failed)
     fixture.behavior['error'] = None
-    second = fixture.jobs.start(fixture.repos[0])
+    assert fixture.jobs.start(fixture.repos[0])['id'] == failed['id']
+    with pytest.raises(EnvironmentRequired):
+        fixture.jobs.wait(fixture.repos[0])
+    assert len(fixture.calls) == 1
+    second = fixture.jobs.retry(fixture.repos[0])
     assert second['id'] != failed['id']
     settled(fixture.jobs)
     assert fixture.jobs.status(fixture.repos[0])['status'] == 'ready'
     assert len(fixture.calls) == 2
+
+
+@pytest.mark.parametrize('status', ['cancelled', 'interrupted', 'preparing'])
+def test_stopped_or_unconfirmed_preparation_is_not_automatically_recreated(job_fixture, status):
+    fixture = job_fixture
+    saved = fixture.jobs.catalog.save_environment_job({
+        'id': 'old', 'repo': str(fixture.repos[0]), 'owner': 'prepare:old', 'mode': 'auto',
+        'status': status, 'stage': status, 'message': 'saved'})
+    assert fixture.jobs.start(fixture.repos[0])['id'] == saved['id']
+    with pytest.raises(EnvironmentRequired):
+        fixture.jobs.wait(fixture.repos[0])
+    assert not fixture.calls
+    if status == 'preparing':
+        assert fixture.jobs.status(fixture.repos[0])['status'] == 'interrupted'
 
 
 def test_wait_cancel_detaches_without_canceling_other_conversations(job_fixture):

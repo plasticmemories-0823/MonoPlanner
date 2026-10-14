@@ -13,6 +13,14 @@ from agent.application.store import Conflict, identity
 
 
 def build_routes(store, scheduler):
+    def health():
+        return scheduler.storage_error() if hasattr(scheduler, 'storage_error') else None
+
+    def storage_failure(operation, error):
+        if hasattr(scheduler, 'storage_failed'):
+            return scheduler.storage_failed(operation, error)
+        return None
+
     def response(value, status=200):
         return JSONResponse(value, status_code=status, headers={'Cache-Control': 'no-store'})
 
@@ -25,8 +33,10 @@ def build_routes(store, scheduler):
             return response({'error': 'Conversation does not exist'}, 404)
         except (ValueError, TypeError) as exc:
             return response({'error': str(exc)}, 400)
-        except (OSError, sqlite3.Error):
-            return response({'error': '本地记录操作未完成，已保留现场；请核对后重试。'}, 503)
+        except (OSError, sqlite3.Error) as exc:
+            fault = storage_failure('api_record', exc)
+            return response({'error': (fault or {}).get('message', '本地记录操作未完成，请核对后重试。'),
+                             'storage_error': fault}, 503)
 
     async def conversations(request):
         async def run():
@@ -34,6 +44,8 @@ def build_routes(store, scheduler):
                 rows = await asyncio.to_thread(store.list)
                 return response({'conversations': rows, 'legacy_read_only': True})
             value = await request.json()
+            if hasattr(scheduler, 'ensure_dispatch_available'):
+                scheduler.ensure_dispatch_available()
             if not isinstance(value, dict) or set(value) - {'id', 'repo', 'runtime_settings'}:
                 raise ValueError('Invalid conversation fields')
             created = await asyncio.to_thread(store.create, value.get('id'),
@@ -43,7 +55,8 @@ def build_routes(store, scheduler):
 
     async def snapshot(request):
         async def run():
-            return response(await asyncio.to_thread(store.snapshot, request.path_params['conversation']))
+            value = await asyncio.to_thread(store.snapshot, request.path_params['conversation'])
+            return response({**value, 'storage_error': health()})
         return await guarded(run)
 
     async def commands(request):
@@ -51,6 +64,8 @@ def build_routes(store, scheduler):
             conversation = identity(request.path_params['conversation'])
             command = await request.json()
             result = await asyncio.to_thread(scheduler.submit, conversation, command)
+            if result.get('recorded') is False:
+                return response(result, 202)
             current = await asyncio.to_thread(store.snapshot, conversation)
             return response({**result, 'status': current['status'],
                              'event_cursor': current['event_cursor']}, 202)
@@ -83,16 +98,29 @@ def build_routes(store, scheduler):
             async def stream():
                 cursor, batch = after, first
                 idle = 0
+                previous_health = None
                 while not await request.is_disconnected():
                     for event in batch['events']:
                         yield ('id: ' + str(event['seq']) + '\nevent: update\ndata: '
                                + json.dumps(event, ensure_ascii=False) + '\n\n')
                     cursor = batch['cursor']
+                    current_health = health()
+                    if current_health != previous_health:
+                        yield ('event: health\ndata: ' + json.dumps(
+                            {'storage_error': current_health}, ensure_ascii=False) + '\n\n')
+                        previous_health = current_health
                     idle += 1
                     if idle % 20 == 0:
                         yield ': heartbeat\n\n'
                     await asyncio.sleep(0 if batch['more'] else 0.5)
-                    batch = await asyncio.to_thread(store.events, conversation, cursor)
+                    if current_health:
+                        batch = {'events': [], 'cursor': cursor, 'more': False}
+                        continue
+                    try:
+                        batch = await asyncio.to_thread(store.events, conversation, cursor)
+                    except (OSError, sqlite3.Error) as exc:
+                        storage_failure('event_record_read', exc)
+                        batch = {'events': [], 'cursor': cursor, 'more': False}
             return StreamingResponse(stream(), media_type='text/event-stream', headers={
                 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no',
             })

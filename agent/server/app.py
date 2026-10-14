@@ -25,6 +25,7 @@ from agent.application.api import routes as application_routes, lifespan, get_se
 async def project_environment(request: Request):
     """仅允许经过认证的准备操作；GET 不安装依赖，也不调用模型。"""
     from agent.execution.preparation import jobs
+    from agent.application.scheduler import StorageUnavailable
 
     try:
         if request.method == 'GET':
@@ -43,6 +44,8 @@ async def project_environment(request: Request):
                 or value['action'] not in {'prepare', 'automatic', 'cancel'}
             ):
                 raise ValueError('请选择准备环境、自动模式或取消')
+            if value['action'] != 'cancel':
+                get_service().ensure_dispatch_available()
             if value['action'] == 'automatic':
                 await asyncio.to_thread(lambda: ProjectEnvironments().automatic(value['repo']))
                 result = await asyncio.to_thread(lambda: jobs().status(value['repo']))
@@ -50,12 +53,15 @@ async def project_environment(request: Request):
 
                 def change():
                     service = jobs()
-                    return (service.start if value['action'] == 'prepare' else service.cancel)(
+                    return (service.retry if value['action'] == 'prepare' else service.cancel)(
                         value['repo']
                     )
 
                 result = await asyncio.to_thread(change)
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+    except StorageUnavailable as exc:
+        return JSONResponse({'error': str(exc), 'storage_error': get_service().storage_error()},
+                            status_code=503, headers={'Cache-Control': 'no-store'})
     except (ValueError, OSError, KeyError, TypeError) as exc:
         return JSONResponse(
             {'error': str(exc)}, status_code=400, headers={'Cache-Control': 'no-store'}
@@ -66,19 +72,17 @@ LOADED_SERVICE = service_identity()
 
 
 async def service(request: Request):
-    return JSONResponse(LOADED_SERVICE, headers={'Cache-Control': 'no-store'})
+    return JSONResponse({**LOADED_SERVICE, 'storage_error': get_service().storage_error()},
+                        headers={'Cache-Control': 'no-store'})
 
 
 async def service_status(request: Request):
-    from agent.execution.preparation import active_count
     try:
         state = await asyncio.to_thread(get_service().status)
-        preparing = await asyncio.to_thread(active_count)
         active = sum(state.get(name, 0) for name in (
             'running_work', 'running_chat', 'running_progress', 'running_title', 'running_control'))
         return JSONResponse({
             **state, 'queue': {'n_running': active, 'n_pending': state.get('pending', 0)},
-            'environment_preparations': preparing,
         }, headers={'Cache-Control': 'no-store'})
     except Exception:
         return JSONResponse({'error': 'Cannot confirm whether tasks are idle'}, status_code=503)

@@ -14,7 +14,7 @@ from agent.storage.usage import summarize
 
 ACTIVE = {'queued', 'running', 'needs_plan', 'executing', 'pausing'}
 TERMINAL = {'verified_success', 'task_blocked', 'task_cancelled', 'chat_complete',
-            'existing_complete', 'stalled', 'budget_exhausted'}
+            'existing_complete', 'stalled', 'budget_exhausted', 'preparation_failed'}
 UNKNOWN = {'model_request_unknown', 'execution_unknown', 'state_conflict'}
 RESUMABLE = {'paused', 'awaiting_user', 'output_limit_reached'}
 SUPPLEMENTABLE = (ACTIVE - {'pausing'}) | {'paused', 'awaiting_user'}

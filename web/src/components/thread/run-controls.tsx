@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useStreamContext } from "@/providers/Stream";
+import { commandNotice } from "@/lib/conversation-types";
 
 export function statusLabel(status?: string) {
   return (
@@ -13,6 +14,8 @@ export function statusLabel(status?: string) {
         chat_complete: "回复完成",
         verified_success: "实际验收通过",
         existing_complete: "已有任务已结束",
+        preparation_failed: "开工准备失败",
+        control_unconfirmed: "已请求终止，结果待核对",
         paused: "已暂停",
         awaiting_user: "等待补充或继续",
         task_blocked: "任务受阻",
@@ -54,9 +57,13 @@ export function useRunControls(
     if (kind === "pause") setPauseRequested(true);
     if (pending.current?.kind !== kind) pending.current = { kind, id: crypto.randomUUID() };
     try {
-      await stream.command(pending.current, threadId);
-      pending.current = null;
-      toast.success(kind === "pause" ? "已发送暂停，正在终止当前操作并保存现场" : "继续请求已保存");
+      const receipt = await stream.command(pending.current, threadId);
+      const notice = commandNotice(kind, receipt);
+      if (notice.warning) toast.warning(notice.message);
+      else {
+        pending.current = null;
+        toast.success(notice.message);
+      }
     } catch (error) {
       // 结果不明时保留同一命令编号，显式重试不会重复执行。
       toast.error(error instanceof Error ? error.message : "请求结果未确认，请重新连接后核对。");
@@ -68,6 +75,7 @@ export function useRunControls(
   return {
     pause: () => control("pause"),
     resume: () => control("resume"),
-    pauseRequested: pauseRequested || stream.values.work?.status === "pausing",
+    pauseRequested:
+      pauseRequested || (!stream.storageError && stream.values.work?.status === "pausing"),
   };
 }
