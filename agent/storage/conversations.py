@@ -1,4 +1,5 @@
-"""Durable, idempotent input mailbox; task checkpoints still own execution."""
+"""持久化且幂等的输入信箱；执行仍由任务检查点管理。"""
+
 from contextlib import closing, contextmanager
 import json
 from pathlib import Path
@@ -10,10 +11,11 @@ from agent.storage.activity import checked
 
 class ConversationStore:
     def __init__(self, root):
-        self.path = Path(root)/'conversations.sqlite3'
+        self.path = Path(root) / 'conversations.sqlite3'
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
-            db.executescript('''
+            db.executescript(
+                '''
                 CREATE TABLE IF NOT EXISTS sessions (
                     thread TEXT PRIMARY KEY, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS inputs (
@@ -24,7 +26,8 @@ class ConversationStore:
                     thread TEXT PRIMARY KEY, visibility TEXT NOT NULL DEFAULT 'active');
                 CREATE TABLE IF NOT EXISTS conversation_titles (
                     thread TEXT PRIMARY KEY, data TEXT NOT NULL);
-            ''')
+            '''
+            )
 
     @contextmanager
     def connection(self):
@@ -40,24 +43,43 @@ class ConversationStore:
 
     def session(self, thread):
         with self.connection() as db:
-            row = db.execute('SELECT data FROM sessions WHERE thread=?', (self.thread(thread),)).fetchone()
+            row = db.execute(
+                'SELECT data FROM sessions WHERE thread=?', (self.thread(thread),)
+            ).fetchone()
             return json.loads(row['data']) if row else None
 
     def error_is_settled(self, task):
-        """Read the failed checkpoint without restoring or changing execution."""
-        if not isinstance(task, str) or len(task) != 32 or any(c not in '0123456789abcdef' for c in task):
+        """只读取失败检查点，不恢复或改变执行。"""
+        if (
+            not isinstance(task, str)
+            or len(task) != 32
+            or any(c not in '0123456789abcdef' for c in task)
+        ):
             return False
-        root = self.path.parent/'tasks'/task
+        root = self.path.parent / 'tasks' / task
         try:
-            with closing(sqlite3.connect((root/'history.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
-                row = db.execute('SELECT path,sha256 FROM commits ORDER BY seq DESC LIMIT 1').fetchone()
+            with closing(
+                sqlite3.connect((root / 'history.sqlite3').as_uri() + '?mode=ro', uri=True)
+            ) as db:
+                row = db.execute(
+                    'SELECT path,sha256 FROM commits ORDER BY seq DESC LIMIT 1'
+                ).fetchone()
             state = checked(root, *row)['state'] if row else {}
-            unknown = ('request_pending', 'running_step', 'verification_running', 'acceptance_running',
-                       'assistant_running', 'web_running', 'web_request_pending')
-            return (state.get('status') == 'runtime_error'
-                    and not any(state.get(key) for key in unknown)
-                    and not state.get('budget', {}).get('unknown_usage_steps', 0)
-                    and (state.get('compaction_pending') or {}).get('stage') != 'committing')
+            unknown = (
+                'request_pending',
+                'running_step',
+                'verification_running',
+                'acceptance_running',
+                'assistant_running',
+                'web_running',
+                'web_request_pending',
+            )
+            return (
+                state.get('status') == 'runtime_error'
+                and not any(state.get(key) for key in unknown)
+                and not state.get('budget', {}).get('unknown_usage_steps', 0)
+                and (state.get('compaction_pending') or {}).get('stage') != 'committing'
+            )
         except (OSError, ValueError, sqlite3.Error, KeyError):
             return False
 
@@ -65,40 +87,65 @@ class ConversationStore:
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             self.require_available(db, self.thread(thread))
-            first = not db.execute('SELECT 1 FROM sessions WHERE thread=?', (self.thread(thread),)).fetchone()
-            db.execute('INSERT INTO sessions VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET data=excluded.data',
-                       (self.thread(thread), json.dumps(value, ensure_ascii=False)))
+            first = not db.execute(
+                'SELECT 1 FROM sessions WHERE thread=?', (self.thread(thread),)
+            ).fetchone()
+            db.execute(
+                'INSERT INTO sessions VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET data=excluded.data',
+                (self.thread(thread), json.dumps(value, ensure_ascii=False)),
+            )
             if first and title_request:
-                db.execute('INSERT OR IGNORE INTO conversation_titles VALUES (?,?)',
-                           (self.thread(thread), json.dumps(title_request, ensure_ascii=False)))
+                db.execute(
+                    'INSERT OR IGNORE INTO conversation_titles VALUES (?,?)',
+                    (self.thread(thread), json.dumps(title_request, ensure_ascii=False)),
+                )
                 return True
         return False
 
     def enqueue(self, thread, identity, kind, text=''):
         thread = self.thread(thread)
-        if kind not in {'message', 'pause', 'resume'} or not isinstance(identity, str) or not identity:
+        if (
+            kind not in {'message', 'pause', 'resume'}
+            or not isinstance(identity, str)
+            or not identity
+        ):
             raise ValueError('Invalid control kind or message ID')
         if not isinstance(text, str) or (kind == 'message' and not text.strip()):
             raise ValueError('A message requires non-empty text')
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             self.require_available(db, thread)
-            old = db.execute('SELECT * FROM inputs WHERE thread=? AND id=?', (thread, identity)).fetchone()
+            old = db.execute(
+                'SELECT * FROM inputs WHERE thread=? AND id=?', (thread, identity)
+            ).fetchone()
             if old and (old['kind'], old['text']) != (kind, text):
                 raise ValueError('Message ID was already used for different content')
-            db.execute('INSERT OR IGNORE INTO inputs(thread,id,kind,text) VALUES (?,?,?,?)',
-                       (thread, identity, kind, text))
-            return dict(db.execute('SELECT * FROM inputs WHERE thread=? AND id=?', (thread, identity)).fetchone())
+            db.execute(
+                'INSERT OR IGNORE INTO inputs(thread,id,kind,text) VALUES (?,?,?,?)',
+                (thread, identity, kind, text),
+            )
+            return dict(
+                db.execute(
+                    'SELECT * FROM inputs WHERE thread=? AND id=?', (thread, identity)
+                ).fetchone()
+            )
 
     def pending(self, thread):
         with self.connection() as db:
-            return [dict(row) for row in db.execute(
-                'SELECT * FROM inputs WHERE thread=? AND applied=0 ORDER BY seq', (self.thread(thread),))]
+            return [
+                dict(row)
+                for row in db.execute(
+                    'SELECT * FROM inputs WHERE thread=? AND applied=0 ORDER BY seq',
+                    (self.thread(thread),),
+                )
+            ]
 
     def acknowledge(self, thread, identities):
         with self.connection() as db:
-            db.executemany('UPDATE inputs SET applied=1 WHERE thread=? AND id=?',
-                           [(self.thread(thread), identity) for identity in identities])
+            db.executemany(
+                'UPDATE inputs SET applied=1 WHERE thread=? AND id=?',
+                [(self.thread(thread), identity) for identity in identities],
+            )
 
     def visibility(self):
         with self.connection() as db:
@@ -106,14 +153,26 @@ class ConversationStore:
 
     def pending_deletions(self):
         with self.connection() as db:
-            rows = db.execute('SELECT thread,data FROM sessions JOIN presentation USING(thread) '
-                              'WHERE visibility=?', ('purging',))
+            rows = db.execute(
+                'SELECT thread,data FROM sessions JOIN presentation USING(thread) '
+                'WHERE visibility=?',
+                ('purging',),
+            )
             result = []
             for row in rows:
                 session = json.loads(row['data'])
                 messages = session.get('public_messages', [])
-                title = messages[0]['data']['content'] if messages else session.get('request', '删除未完成的对话')
-                result.append({'thread_id': row['thread'], 'title': title[:200] if isinstance(title, str) else '删除未完成的对话'})
+                title = (
+                    messages[0]['data']['content']
+                    if messages
+                    else session.get('request', '删除未完成的对话')
+                )
+                result.append(
+                    {
+                        'thread_id': row['thread'],
+                        'title': title[:200] if isinstance(title, str) else '删除未完成的对话',
+                    }
+                )
             return result
 
     @staticmethod
@@ -131,9 +190,15 @@ class ConversationStore:
             self.require_available(db, thread)
             row = db.execute('SELECT data FROM sessions WHERE thread=?', (thread,)).fetchone()
             session = json.loads(row['data']) if row else {}
-            pending = db.execute('SELECT 1 FROM inputs WHERE thread=? AND applied=0 LIMIT 1', (thread,)).fetchone()
-            if visibility != 'active' and (session.get('status') in {'needs_plan', 'executing'} or pending):
+            pending = db.execute(
+                'SELECT 1 FROM inputs WHERE thread=? AND applied=0 LIMIT 1', (thread,)
+            ).fetchone()
+            if visibility != 'active' and (
+                session.get('status') in {'needs_plan', 'executing'} or pending
+            ):
                 raise ValueError('请先暂停任务，并等待当前请求或操作结束。')
-            db.execute('INSERT INTO presentation VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET visibility=excluded.visibility',
-                       (thread, visibility))
+            db.execute(
+                'INSERT INTO presentation VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET visibility=excluded.visibility',
+                (thread, visibility),
+            )
         return {'thread_id': thread, 'visibility': visibility}

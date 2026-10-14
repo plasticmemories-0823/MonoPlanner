@@ -1,4 +1,5 @@
-"""Attack cases exercise production gates; no model or external service is called."""
+"""攻击用例验证生产门控；不调用模型或外部服务。"""
+
 from unittest.mock import patch
 
 import httpx
@@ -29,13 +30,17 @@ def guarded():
         async def chunks():
             yield b'first\n'
             yield b'second\n'
+
         return StreamingResponse(chunks(), media_type='text/event-stream')
 
-    app = Starlette(middleware=[Middleware(InstanceAccess)], routes=[
-        Route('/settings', endpoint, methods=['GET', 'POST']),
-        Route('/threads', endpoint, methods=['POST']),
-        Route('/stream', stream),
-    ])
+    app = Starlette(
+        middleware=[Middleware(InstanceAccess)],
+        routes=[
+            Route('/settings', endpoint, methods=['GET', 'POST']),
+            Route('/threads', endpoint, methods=['POST']),
+            Route('/stream', stream),
+        ],
+    )
     with RawClient(app, base_url='http://127.0.0.1:2024') as client:
         yield client, calls
 
@@ -48,14 +53,24 @@ def test_no_credentials_cannot_read_or_mutate_and_health_is_minimal(guarded):
     assert not calls
 
 
-@pytest.mark.parametrize('headers', [
-    {'Origin': 'https://attacker.example'}, {'Origin': 'null'},
-    {'Host': 'attacker.example:2024'}, {'Host': '127.0.0.1:9999'},
-    {'Origin': 'http://127.0.0.1:3000/forged'},
-])
+@pytest.mark.parametrize(
+    'headers',
+    [
+        {'Origin': 'https://attacker.example'},
+        {'Origin': 'null'},
+        {'Host': 'attacker.example:2024'},
+        {'Host': '127.0.0.1:9999'},
+        {'Origin': 'http://127.0.0.1:3000/forged'},
+    ],
+)
 def test_host_and_origin_cannot_bypass_authentication(guarded, headers):
     client, calls = guarded
-    assert client.post('/threads', json={}, headers={'X-MonoPlanner-Service': TOKEN, **headers}).status_code == 403
+    assert (
+        client.post(
+            '/threads', json={}, headers={'X-MonoPlanner-Service': TOKEN, **headers}
+        ).status_code
+        == 403
+    )
     assert not calls
 
 
@@ -63,14 +78,35 @@ def test_body_type_size_and_chunked_requests_checked_before_execution(guarded):
     client, calls = guarded
     headers = {'X-MonoPlanner-Service': TOKEN}
     assert client.post('/threads', content='{}', headers=headers).status_code == 415
-    assert client.post('/threads', content=(b'x' * 1024 for _ in range(MAX_BODY // 1024 + 1)),
-                       headers={**headers, 'Content-Type': 'application/json'}).status_code == 413
+    assert (
+        client.post(
+            '/threads',
+            content=(b'x' * 1024 for _ in range(MAX_BODY // 1024 + 1)),
+            headers={**headers, 'Content-Type': 'application/json'},
+        ).status_code
+        == 413
+    )
     assert not calls
     assert client.post('/threads', json={}, headers=headers).status_code == 200
     assert calls == ['/threads']
 
 
-@pytest.mark.parametrize('path', ['/docs', '/info', '/metrics', '/openapi.json', '/mcp', '/a2a', '/store/items', '/webhooks', '/studio', '/runs/crons', '/threads/one/runs/crons'])
+@pytest.mark.parametrize(
+    'path',
+    [
+        '/docs',
+        '/info',
+        '/metrics',
+        '/openapi.json',
+        '/mcp',
+        '/a2a',
+        '/store/items',
+        '/webhooks',
+        '/studio',
+        '/runs/crons',
+        '/threads/one/runs/crons',
+    ],
+)
 def test_unused_routes_remain_closed(guarded, path):
     client, calls = guarded
     assert client.get(path, headers={'X-MonoPlanner-Service': TOKEN}).status_code == 404
@@ -90,9 +126,11 @@ def test_stream_is_not_buffered_or_rewritten_by_backend_gate(guarded):
 
 def test_public_connection_is_pinned_with_original_tls_identity():
     requests = []
+
     def respond(request):
         requests.append(request)
         return httpx.Response(200, text='page')
+
     dns = [(0, 0, 0, '', ('93.184.216.34', 443))]
     with patch('agent.execution.public_http.socket.getaddrinfo', return_value=dns) as resolve:
         with httpx.Client(transport=PublicTransport(httpx.MockTransport(respond))) as client:
@@ -106,9 +144,13 @@ def test_public_connection_is_pinned_with_original_tls_identity():
 
 def test_rebinding_or_mixed_private_dns_never_connects():
     requests = []
-    with patch('agent.execution.public_http.socket.getaddrinfo', return_value=[
-            (0, 0, 0, '', ('93.184.216.34', 443)), (0, 0, 0, '', ('127.0.0.1', 443))]):
-        with httpx.Client(transport=PublicTransport(httpx.MockTransport(lambda r: requests.append(r)))) as client:
+    with patch(
+        'agent.execution.public_http.socket.getaddrinfo',
+        return_value=[(0, 0, 0, '', ('93.184.216.34', 443)), (0, 0, 0, '', ('127.0.0.1', 443))],
+    ):
+        with httpx.Client(
+            transport=PublicTransport(httpx.MockTransport(lambda r: requests.append(r)))
+        ) as client:
             with pytest.raises(ValueError, match='Private'):
                 client.get('https://example.com')
     assert not requests
@@ -116,4 +158,8 @@ def test_rebinding_or_mixed_private_dns_never_connects():
 
 def test_acceptance_cannot_default_to_host_execution(tmp_path):
     with pytest.raises(ValueError, match='host fallback is disabled'):
-        AcceptanceRun(tmp_path, VerificationSpec(('target',), command='echo unreachable'), tmp_path/'records')
+        AcceptanceRun(
+            tmp_path,
+            VerificationSpec(('target',), command='echo unreachable'),
+            tmp_path / 'records',
+        )

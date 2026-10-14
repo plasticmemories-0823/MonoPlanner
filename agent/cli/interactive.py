@@ -22,9 +22,7 @@ SESSION_HELP = (
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
-        description="在工作区使用 MonoPlanner 连续对话。"
-    )
+    parser = argparse.ArgumentParser(description="在工作区使用 MonoPlanner 连续对话。")
     parser.add_argument("--repo", help="目标工作区目录；省略时使用上次保存的仓库")
     parser.add_argument(
         "--check-workspace",
@@ -37,7 +35,9 @@ def parse_args(argv=None):
         default=1000,
         help="每条需求最多调用模型的次数",
     )
-    parser.add_argument("--verify-command", help="验收命令，在目标仓库运行；交互模式仅用于下一条需求")
+    parser.add_argument(
+        "--verify-command", help="验收命令，在目标仓库运行；交互模式仅用于下一条需求"
+    )
     parser.add_argument("--acceptance", help="补充验收要求；交互模式仅用于下一条需求")
     args = parser.parse_args(argv)
     if args.max_steps <= 0:
@@ -90,13 +90,19 @@ def load_model():
     """输入第一条自然语言需求时才读取密钥、创建模型。"""
     settings = load_settings()
     from agent.model.client import create_model
+
     return create_model(settings)
 
 
 def create_workspace_agent(model, environment):
     from agent.server.runtime import ConversationRunner
-    return ConversationRunner(model, str(environment.repo_root), yield_boundary=False,
-                              state_dir=state_root()/'tasks'/uuid.uuid4().hex)
+
+    return ConversationRunner(
+        model,
+        str(environment.repo_root),
+        yield_boundary=False,
+        state_dir=state_root() / 'tasks' / uuid.uuid4().hex,
+    )
 
 
 def run_one_turn(agent, history, text, max_steps, verify_command=None, acceptance=None):
@@ -115,14 +121,21 @@ def run_one_turn(agent, history, text, max_steps, verify_command=None, acceptanc
         if result['status'] != 'chat_complete':
             print(f"\n程序：{result['final_report']}")
     from langchain_core.messages import AIMessage
+
     for message in result.get('messages', []):
         if isinstance(message, AIMessage) and message not in history:
             print(message.text)
-    for key, label in (("patch_path", "候选补丁"), ("plan_path", "当前计划"), ("history_dir", "任务记录")):
+    for key, label in (
+        ("patch_path", "候选补丁"),
+        ("plan_path", "当前计划"),
+        ("history_dir", "任务记录"),
+    ):
         if result.get(key):
             print(f"[{label}] {result[key]}")
-    print(f"[预算] 模型调用 {budget.used_steps}/{budget.max_steps}；"
-          f"已报告 Token {budget.reported_tokens}；未报告用量 {budget.unknown_usage_steps} 次")
+    print(
+        f"[预算] 模型调用 {budget.used_steps}/{budget.max_steps}；"
+        f"已报告 Token {budget.reported_tokens}；未报告用量 {budget.unknown_usage_steps} 次"
+    )
     return result
 
 
@@ -198,8 +211,12 @@ def run_session(
                 model = load_model()
             agent = create_workspace_agent(model, environment)
             result = run_one_turn(
-                agent, messages, text, max_steps,
-                verify_command=current_command, acceptance=current_acceptance,
+                agent,
+                messages,
+                text,
+                max_steps,
+                verify_command=current_command,
+                acceptance=current_acceptance,
             )
             messages = result["messages"]
 
@@ -212,6 +229,7 @@ def run_session(
 
 def check_workspace(environment):
     from agent.model.tools import WORK_SCHEMA
+
     if WORK_SCHEMA.get("type") != "object":
         raise ValueError("计划 Schema 必须是 JSON 对象")
     print(f"工作区：{environment.repo_root}")

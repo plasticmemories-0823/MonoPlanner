@@ -1,4 +1,5 @@
-"""A saved work handoff survives missing environment and ordinary chat."""
+"""已保存的工作交接在环境缺失或普通聊天后仍可恢复。"""
+
 import json
 import unittest
 from unittest.mock import patch
@@ -12,15 +13,15 @@ class WorkPreparationResumeTests(unittest.TestCase):
     invoke = fixtures.ConversationTests.invoke
 
     def remove_environment(self):
-        path = self.root/'runs/project-environments.json'
+        path = self.root / 'runs/project-environments.json'
         self.configuration = path.read_bytes()
         path.unlink()
 
     def configure_environment(self):
-        (self.root/'runs/project-environments.json').write_bytes(self.configuration)
+        (self.root / 'runs/project-environments.json').write_bytes(self.configuration)
 
     def checkpoint(self, result):
-        archive = LocalHistory(self.root/'runs/tasks'/result['task_id'])
+        archive = LocalHistory(self.root / 'runs/tasks' / result['task_id'])
         try:
             with archive.lease():
                 return archive.load()
@@ -34,8 +35,13 @@ class WorkPreparationResumeTests(unittest.TestCase):
 
     def test_environment_resume_prepares_work_without_repeating_chat_decision(self):
         self.remove_environment()
-        model = fixtures.ScriptedModel([fixtures.start_reply(), fixtures.investigation(['first.py']),
-                                       fixtures.text_reply('The inspected source is saved.')])
+        model = fixtures.ScriptedModel(
+            [
+                fixtures.start_reply(),
+                fixtures.investigation(['first.py']),
+                fixtures.text_reply('The inspected source is saved.'),
+            ]
+        )
         missing = self.invoke(model, 'Directly inspect first.py.')
         self.assertEqual(missing['status'], 'awaiting_user')
         self.assertEqual(len(model.calls), 1)
@@ -50,16 +56,26 @@ class WorkPreparationResumeTests(unittest.TestCase):
         self.assertNotIn('general assistant', model.calls[1][0].content)
         state = self.checkpoint(resumed)
         self.assertFalse(state.get('coding_preparation_pending'))
-        self.assertEqual(state['execution_binding']['image'], 'sha256:'+'1'*64)
-        self.assertEqual(len(list((self.root/'runs/tasks'/resumed['task_id']).glob('plans/*/*/result.json'))), 1)
+        self.assertEqual(state['execution_binding']['image'], 'sha256:' + '1' * 64)
+        self.assertEqual(
+            len(
+                list((self.root / 'runs/tasks' / resumed['task_id']).glob('plans/*/*/result.json'))
+            ),
+            1,
+        )
         history = state['chat_history']
-        self.assertEqual(sum(m['type'] == 'tool' and m['data']['name'] == 'start_work' for m in history), 1)
+        self.assertEqual(
+            sum(m['type'] == 'tool' and m['data']['name'] == 'start_work' for m in history), 1
+        )
 
     def test_resume_without_configuration_never_calls_model_or_starts_docker(self):
         self.remove_environment()
         model = fixtures.ScriptedModel([fixtures.start_reply()])
         missing = self.invoke(model, 'Directly inspect first.py.')
-        with patch('agent.execution.task_docker.TaskDocker.start', side_effect=AssertionError('No environment')):
+        with patch(
+            'agent.execution.task_docker.TaskDocker.start',
+            side_effect=AssertionError('No environment'),
+        ):
             again = self.resume(model)
             repeated = self.resume(model, 'resume-again')
         self.assertEqual(again['status'], 'awaiting_user')
@@ -70,11 +86,20 @@ class WorkPreparationResumeTests(unittest.TestCase):
 
     def test_ordinary_chat_retains_handoff_and_does_not_start_work(self):
         self.remove_environment()
-        model = fixtures.ScriptedModel([fixtures.start_reply(), fixtures.text_reply('Environment setup is pending.'),
-                                       fixtures.investigation(['first.py']), fixtures.text_reply('Read complete.')])
+        model = fixtures.ScriptedModel(
+            [
+                fixtures.start_reply(),
+                fixtures.text_reply('Environment setup is pending.'),
+                fixtures.investigation(['first.py']),
+                fixtures.text_reply('Read complete.'),
+            ]
+        )
         missing = self.invoke(model, 'Directly inspect first.py.')
         self.configure_environment()
-        with patch('agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('Chat must stay chat')):
+        with patch(
+            'agent.server.runtime.ConversationRunner.activate',
+            side_effect=AssertionError('Chat must stay chat'),
+        ):
             chatted = self.invoke(model, 'What is the current status?', 'question')
         self.assertEqual(chatted['task_id'], missing['task_id'])
         self.assertEqual(chatted['status'], 'awaiting_user')
@@ -87,13 +112,19 @@ class WorkPreparationResumeTests(unittest.TestCase):
 
     def test_pause_before_preparation_preserves_handoff_until_explicit_resume(self):
         self.remove_environment()
-        model = fixtures.ScriptedModel([fixtures.start_reply(), fixtures.investigation(['first.py']),
-                                       fixtures.text_reply('Read complete.')])
+        model = fixtures.ScriptedModel(
+            [
+                fixtures.start_reply(),
+                fixtures.investigation(['first.py']),
+                fixtures.text_reply('Read complete.'),
+            ]
+        )
         missing = self.invoke(model, 'Directly inspect first.py.')
         self.configure_environment()
         self.store.enqueue(self.thread, 'pause', 'pause')
-        with patch('agent.server.graph.model_factory', return_value=model), \
-                patch('agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('Paused')):
+        with patch('agent.server.graph.model_factory', return_value=model), patch(
+            'agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('Paused')
+        ):
             paused = self.compiled.invoke({'messages': []}, self.config)
         self.assertEqual(paused['status'], 'paused')
         self.assertEqual(len(model.calls), 1)

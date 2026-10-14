@@ -1,4 +1,5 @@
-"""Preparation jobs share work without sharing model or source execution."""
+"""环境准备任务可共享准备工作，但不共享模型或源码执行。"""
+
 import json
 import sys
 import threading
@@ -15,13 +16,16 @@ from agent.storage.preferences import atomic_write
 
 @pytest.fixture
 def job_fixture(tmp_path, monkeypatch):
-    root = tmp_path/'state'
-    repos = [tmp_path/f'project-{i}' for i in range(3)]
+    root = tmp_path / 'state'
+    repos = [tmp_path / f'project-{i}' for i in range(3)]
     for repo in repos:
         repo.mkdir()
     entered, release, calls, ready = threading.Event(), threading.Event(), [], {}
-    binding = {'backend': 'docker', 'image': 'sha256:' + 'a' * 64,
-               'runtime': {'python': '/usr/local/bin/python', 'conda_env': ''}}
+    binding = {
+        'backend': 'docker',
+        'image': 'sha256:' + 'a' * 64,
+        'runtime': {'python': '/usr/local/bin/python', 'conda_env': ''},
+    }
     behavior = {'error': None, 'block': True}
 
     class FakeManaged:
@@ -29,14 +33,17 @@ def job_fixture(tmp_path, monkeypatch):
             assert selected_root == root
 
         def status(self, repo):
-            return ({'state': 'ready', 'stage': 'ready', 'environment': ready[repo]}
-                    if repo in ready else {'state': 'needs_preparation', 'stage': 'checking'})
+            return (
+                {'state': 'ready', 'stage': 'ready', 'environment': ready[repo]}
+                if repo in ready
+                else {'state': 'needs_preparation', 'stage': 'checking'}
+            )
 
         def prepare(self, repo, *, progress, cancelled):
             calls.append(repo)
             entered.set()
             progress({'stage': 'installing', 'message': '正在安装项目依赖'})
-            while behavior['block'] and not release.wait(.01):
+            while behavior['block'] and not release.wait(0.01):
                 if cancelled():
                     raise PreparationCancelled('cancelled')
             if behavior['error']:
@@ -44,10 +51,21 @@ def job_fixture(tmp_path, monkeypatch):
             ready[repo] = dict(binding)
             return binding
 
-    monkeypatch.setitem(sys.modules, 'agent.execution.managed', SimpleNamespace(ManagedEnvironments=FakeManaged))
+    monkeypatch.setitem(
+        sys.modules, 'agent.execution.managed', SimpleNamespace(ManagedEnvironments=FakeManaged)
+    )
     jobs = PreparationJobs(root)
-    yield SimpleNamespace(root=root, repos=repos, jobs=jobs, binding=binding, entered=entered,
-        release=release, calls=calls, ready=ready, behavior=behavior)
+    yield SimpleNamespace(
+        root=root,
+        repos=repos,
+        jobs=jobs,
+        binding=binding,
+        entered=entered,
+        release=release,
+        calls=calls,
+        ready=ready,
+        behavior=behavior,
+    )
     release.set()
     jobs.close()
 
@@ -58,7 +76,7 @@ def settled(jobs, timeout=3):
         with jobs.lock:
             if not jobs.jobs:
                 return
-        time.sleep(.01)
+        time.sleep(0.01)
     pytest.fail('Environment jobs did not finish')
 
 
@@ -138,7 +156,9 @@ def test_close_cancels_all_workers_and_joins_threads(job_fixture):
 
 def test_orphaned_preparation_never_replays_on_status(job_fixture):
     fixture = job_fixture
-    fixture.jobs._save(str(fixture.repos[0]), {'status': 'preparing', 'id': 'old', 'stage': 'installing'})
+    fixture.jobs._save(
+        str(fixture.repos[0]), {'status': 'preparing', 'id': 'old', 'stage': 'installing'}
+    )
     result = fixture.jobs.status(fixture.repos[0])
     assert result['status'] == 'failed' and result['stage'] == 'interrupted'
     assert fixture.calls == []
@@ -147,7 +167,9 @@ def test_orphaned_preparation_never_replays_on_status(job_fixture):
 def test_manual_binding_wins_and_automatic_reset_does_not_change_frozen_copy(job_fixture):
     fixture = job_fixture
     repo = str(fixture.repos[0])
-    atomic_write(ProjectEnvironments(fixture.root).path, json.dumps({repo: fixture.binding}).encode())
+    atomic_write(
+        ProjectEnvironments(fixture.root).path, json.dumps({repo: fixture.binding}).encode()
+    )
     frozen = dict(fixture.binding)
     assert fixture.jobs.wait(repo) == frozen
     assert not fixture.calls
@@ -160,6 +182,8 @@ def test_latest_manual_binding_overrides_old_failed_preparation(job_fixture):
     fixture = job_fixture
     repo = str(fixture.repos[0])
     fixture.jobs._save(repo, {'status': 'failed', 'error': 'old dependency failure'})
-    atomic_write(ProjectEnvironments(fixture.root).path, json.dumps({repo: fixture.binding}).encode())
+    atomic_write(
+        ProjectEnvironments(fixture.root).path, json.dumps({repo: fixture.binding}).encode()
+    )
     assert fixture.jobs.wait(repo) == fixture.binding
     assert not fixture.calls

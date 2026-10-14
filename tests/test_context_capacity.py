@@ -1,4 +1,5 @@
-"""Token capacity includes output reservation without discarding retained history."""
+"""Token 容量计入输出预留，同时保留已有历史记录。"""
+
 import copy
 import json
 import unittest
@@ -37,8 +38,10 @@ class ContextCapacityTests(unittest.TestCase):
         self.assertEqual(state, admitted)
 
     def test_retained_reasoning_counts_towards_capacity(self):
-        messages = [HumanMessage(content='task'), AIMessage(content='done',
-                    additional_kwargs={'reasoning_content': 'x' * 4000000})]
+        messages = [
+            HumanMessage(content='task'),
+            AIMessage(content='done', additional_kwargs={'reasoning_content': 'x' * 4000000}),
+        ]
         state = {}
         with self.assertRaisesRegex(ModelRequestNotSent, '1000000 tokens'):
             admit(state, messages, [submit_plan], {'max_tokens': 65536})

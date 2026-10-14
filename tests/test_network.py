@@ -28,36 +28,60 @@ def registry_settings(settings):
 
 @unittest.skipUnless(os.name == "nt", "Windows 系统代理读取")
 class WindowsProxyTests(unittest.TestCase):
+    def test_deepseek_stays_direct_when_system_proxy_is_enabled(self):
+        settings = {"ProxyEnable": 1, "ProxyServer": "127.0.0.1:1", "ProxyOverride": ""}
+        with registry_settings(settings), patch.dict(
+            os.environ, {"HTTPS_PROXY": "http://127.0.0.1:2"}
+        ):
+            self.assertIsNone(
+                system_proxy_for(httpx.URL("https://api.deepseek.com/beta/chat/completions"))
+            )
+            self.assertEqual(
+                system_proxy_for(httpx.URL("https://api.deepseek.com.example.org")),
+                "http://127.0.0.1:1",
+            )
+
     def test_disabled_system_proxy_ignores_inherited_proxy_without_changing_env(self):
         settings = {"ProxyEnable": 0, "ProxyServer": "127.0.0.1:8888"}
-        with patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:1",
-                                     "HTTPS_PROXY": "http://127.0.0.1:1",
-                                     "ALL_PROXY": "http://127.0.0.1:1"}):
+        with patch.dict(
+            os.environ,
+            {
+                "HTTP_PROXY": "http://127.0.0.1:1",
+                "HTTPS_PROXY": "http://127.0.0.1:1",
+                "ALL_PROXY": "http://127.0.0.1:1",
+            },
+        ):
             before = dict(os.environ)
             with registry_settings(settings):
                 self.assertIsNone(system_proxy_for(httpx.URL("https://api.deepseek.com/models")))
             self.assertEqual(dict(os.environ), before)
 
     def test_enabled_system_proxy_uses_current_address_for_each_protocol(self):
-        settings = {"ProxyEnable": 1, "ProxyServer": "127.0.0.1:8888",
-                    "ProxyOverride": ""}
+        settings = {"ProxyEnable": 1, "ProxyServer": "127.0.0.1:8888", "ProxyOverride": ""}
         with registry_settings(settings):
-            self.assertEqual(system_proxy_for(httpx.URL("https://example.com")),
-                             "http://127.0.0.1:8888")
+            self.assertEqual(
+                system_proxy_for(httpx.URL("https://example.com")), "http://127.0.0.1:8888"
+            )
             settings["ProxyServer"] = "http=127.0.0.1:8111;https=127.0.0.1:8222"
-            self.assertEqual(system_proxy_for(httpx.URL("http://example.com")),
-                             "http://127.0.0.1:8111")
-            self.assertEqual(system_proxy_for(httpx.URL("https://example.com")),
-                             "http://127.0.0.1:8222")
+            self.assertEqual(
+                system_proxy_for(httpx.URL("http://example.com")), "http://127.0.0.1:8111"
+            )
+            self.assertEqual(
+                system_proxy_for(httpx.URL("https://example.com")), "http://127.0.0.1:8222"
+            )
 
     def test_bypass_comes_from_windows_settings_not_inherited_no_proxy(self):
-        settings = {"ProxyEnable": 1, "ProxyServer": "127.0.0.1:8888",
-                    "ProxyOverride": "*.internal;<local>"}
+        settings = {
+            "ProxyEnable": 1,
+            "ProxyServer": "127.0.0.1:8888",
+            "ProxyOverride": "*.internal;<local>",
+        }
         with registry_settings(settings), patch.dict(os.environ, {"NO_PROXY": "example.com"}):
             self.assertIsNone(system_proxy_for(httpx.URL("http://service.internal")))
             self.assertIsNone(system_proxy_for(httpx.URL("http://printer")))
-            self.assertEqual(system_proxy_for(httpx.URL("https://example.com")),
-                             "http://127.0.0.1:8888")
+            self.assertEqual(
+                system_proxy_for(httpx.URL("https://example.com")), "http://127.0.0.1:8888"
+            )
 
 
 @contextmanager
@@ -90,11 +114,15 @@ def recording_server(label):
 
 class HttpRoutingTests(unittest.TestCase):
     def test_same_client_switches_direct_proxy_direct_using_real_sockets(self):
-        with recording_server("origin") as (origin, direct_paths), \
-                recording_server("proxy") as (proxy, proxy_paths), \
-                patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:1"}), \
-                patch("agent.model.network.system_proxy_for", side_effect=[None, proxy, None]):
-            with httpx.Client(transport=SystemProxyTransport(), trust_env=False, timeout=2) as client:
+        with recording_server("origin") as (origin, direct_paths), recording_server("proxy") as (
+            proxy,
+            proxy_paths,
+        ), patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:1"}), patch(
+            "agent.model.network.system_proxy_for", side_effect=[None, proxy, None]
+        ):
+            with httpx.Client(
+                transport=SystemProxyTransport(), trust_env=False, timeout=2
+            ) as client:
                 bodies = [client.get(f"{origin}/{step}").text for step in (1, 2, 3)]
             self.assertEqual(bodies, ["origin", "proxy", "origin"])
             self.assertEqual(direct_paths, ["/1", "/3"])
@@ -104,9 +132,11 @@ class HttpRoutingTests(unittest.TestCase):
         def unavailable(request):
             raise httpx.ConnectError("offline proxy is unavailable", request=request)
 
-        with patch("agent.model.network.system_proxy_for", return_value="http://127.0.0.1:1"), \
-                patch("agent.model.network.httpx.HTTPTransport",
-                      return_value=httpx.MockTransport(unavailable)) as factory:
+        with patch(
+            "agent.model.network.system_proxy_for", return_value="http://127.0.0.1:1"
+        ), patch(
+            "agent.model.network.httpx.HTTPTransport", return_value=httpx.MockTransport(unavailable)
+        ) as factory:
             with httpx.Client(transport=SystemProxyTransport(), trust_env=False) as client:
                 with self.assertRaises(httpx.ConnectError):
                     client.get("https://example.com")
@@ -124,15 +154,16 @@ class HttpRoutingTests(unittest.TestCase):
             def close(self):
                 self.closed = True
 
-        with patch("agent.model.network.system_proxy_for", side_effect=[None, "http://localhost:8", None]), \
-                patch("agent.model.network.httpx.HTTPTransport", Transport):
+        with patch(
+            "agent.model.network.system_proxy_for", side_effect=[None, "http://localhost:8", None]
+        ), patch("agent.model.network.httpx.HTTPTransport", Transport):
             with httpx.Client(transport=SystemProxyTransport(), trust_env=False) as client:
                 for _ in range(3):
                     client.get("https://example.com")
             self.assertEqual(len(created), 2)
             self.assertTrue(all(transport.closed for transport in created))
 
-    def test_real_sdk_uses_dynamic_transport_and_keeps_authentication_and_payload(self):
+    def test_real_sdk_stays_direct_and_keeps_authentication_and_payload(self):
         routes, requests = [], []
 
         def transport(**kwargs):
@@ -140,18 +171,29 @@ class HttpRoutingTests(unittest.TestCase):
 
             def respond(request):
                 requests.append(request)
-                return httpx.Response(200, json={
-                    "id": "offline", "object": "chat.completion", "created": 0,
-                    "model": "deepseek-flash",
-                    "choices": [{"index": 0, "finish_reason": "stop",
-                                 "message": {"role": "assistant", "content": "OK"}}],
-                    "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
-                })
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "offline",
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": "deepseek-flash",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "finish_reason": "stop",
+                                "message": {"role": "assistant", "content": "OK"},
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+                    },
+                )
+
             return httpx.MockTransport(respond)
 
-        with patch("agent.model.network.system_proxy_for", side_effect=[None, "http://localhost:8"]), \
-                patch("agent.model.network.httpx.HTTPTransport", side_effect=transport), \
-                patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:1"}):
+        with registry_settings({"ProxyEnable": 1, "ProxyServer": "127.0.0.1:1"}), patch(
+            "agent.model.network.httpx.HTTPTransport", side_effect=transport
+        ), patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:1"}):
             model = create_model({"model_name": "deepseek-flash", "api_key": "offline-placeholder"})
             try:
                 for _ in range(2):
@@ -161,19 +203,24 @@ class HttpRoutingTests(unittest.TestCase):
             finally:
                 model.client.http_client.close()
                 asyncio.run(model.client.http_async_client.aclose())
-        self.assertEqual(routes, [None, "http://localhost:8"])
+        self.assertEqual(routes, [None])
         self.assertTrue(all(r.url.host == "api.deepseek.com" for r in requests))
-        self.assertTrue(all(r.headers["authorization"] == "Bearer offline-placeholder" for r in requests))
+        self.assertTrue(
+            all(r.headers["authorization"] == "Bearer offline-placeholder" for r in requests)
+        )
 
 
 class AsyncHttpRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_async_client_also_follows_switch_without_inherited_proxy(self):
-        with recording_server("origin") as (origin, direct_paths), \
-                recording_server("proxy") as (proxy, proxy_paths), \
-                patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:1"}), \
-                patch("agent.model.network.system_proxy_for", side_effect=[None, proxy, None]):
-            async with httpx.AsyncClient(transport=AsyncSystemProxyTransport(),
-                                         trust_env=False, timeout=2) as client:
+        with recording_server("origin") as (origin, direct_paths), recording_server("proxy") as (
+            proxy,
+            proxy_paths,
+        ), patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:1"}), patch(
+            "agent.model.network.system_proxy_for", side_effect=[None, proxy, None]
+        ):
+            async with httpx.AsyncClient(
+                transport=AsyncSystemProxyTransport(), trust_env=False, timeout=2
+            ) as client:
                 bodies = [(await client.get(f"{origin}/{step}")).text for step in (1, 2, 3)]
             self.assertEqual(bodies, ["origin", "proxy", "origin"])
             self.assertEqual(direct_paths, ["/1", "/3"])

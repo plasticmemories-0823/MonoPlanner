@@ -1,4 +1,4 @@
-"""Acceptance uses its selected execution backend for both command kinds."""
+"""两种命令的验收都使用所选执行后端。"""
 
 import json
 from pathlib import Path
@@ -27,13 +27,17 @@ class VerificationBackendTests(unittest.TestCase):
         self.backend = Mock()
         self.backend.python_executable = "/container/python"
         self.backend.host_to_container.side_effect = lambda path: (
-            "/testbed" if Path(path) == self.repo
+            "/testbed"
+            if Path(path) == self.repo
             else "/evidence/" + Path(path).relative_to(self.base).as_posix()
         )
 
     def runner(self, command=None):
-        spec = VerificationSpec(("计算结果应为 42",), command=command,
-                                test_code=None if command is not None else TEST_CODE)
+        spec = VerificationSpec(
+            ("计算结果应为 42",),
+            command=command,
+            test_code=None if command is not None else TEST_CODE,
+        )
         return AcceptanceRun(self.repo, spec, self.base / "evidence", environment=self.backend)
 
     @patch("agent.acceptance.runner.subprocess.Popen")
@@ -61,17 +65,32 @@ class VerificationBackendTests(unittest.TestCase):
             self.assertEqual(command[-2], "/testbed")
             self.assertTrue(command[-3].startswith("/evidence/"))
             self.assertFalse(kwargs["shell"])
-            # Renaming succeeds on Windows only if no outer stream holds the file.
+            # Windows 上只有外部流未占用文件时，重命名才会成功。
             stdout = kwargs["stdout_path"]
             stdout.rename(stdout.with_suffix(".empty"))
             stdout.write_text("CONTAINER_OUTPUT", encoding="utf-8")
-            (runner.artifact_dir / "final.tests.json").write_text(json.dumps({
-                "status": "passed", "tests_run": 1, "failures": 0, "errors": 0,
-                "skipped": 0, "expected_failures": 0, "unexpected_successes": 0,
-                "test_ids": ["agent_acceptance_tests.Acceptance.test_answer"],
-                "test_results": [{"id": "agent_acceptance_tests.Acceptance.test_answer",
-                                  "status": "passed", "detail": ""}],
-            }), encoding="utf-8")
+            (runner.artifact_dir / "final.tests.json").write_text(
+                json.dumps(
+                    {
+                        "status": "passed",
+                        "tests_run": 1,
+                        "failures": 0,
+                        "errors": 0,
+                        "skipped": 0,
+                        "expected_failures": 0,
+                        "unexpected_successes": 0,
+                        "test_ids": ["agent_acceptance_tests.Acceptance.test_answer"],
+                        "test_results": [
+                            {
+                                "id": "agent_acceptance_tests.Acceptance.test_answer",
+                                "status": "passed",
+                                "detail": "",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             return {"exit_code": 0, "timed_out": False}
 
         self.backend.run_process.side_effect = execute
@@ -83,7 +102,9 @@ class VerificationBackendTests(unittest.TestCase):
 
     def test_backend_error_cannot_be_overridden_by_zero_exit(self):
         self.backend.run_process.return_value = {
-            "exit_code": 0, "timed_out": False, "error": "missing process record",
+            "exit_code": 0,
+            "timed_out": False,
+            "error": "missing process record",
         }
         result = self.runner(command="echo ok").run("final")
         self.assertEqual(result["status"], "error")
@@ -102,6 +123,7 @@ class VerificationBackendTests(unittest.TestCase):
         def execute(command, **kwargs):
             kwargs["stdout_path"].write_text("BEFORE_TIMEOUT", encoding="utf-8")
             return {"exit_code": 124, "timed_out": True, "process_cleanup_confirmed": False}
+
         self.backend.run_process.side_effect = execute
         result = self.runner(command="sleep 100").run("final")
         self.assertEqual(result["status"], "error")

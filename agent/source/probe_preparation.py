@@ -1,4 +1,5 @@
-"""Prepare at most one immutable probe copy while a model request is pending."""
+"""模型请求等待期间，最多准备一个不可变的调查副本。"""
+
 from concurrent.futures import CancelledError
 import hashlib
 import os
@@ -12,16 +13,19 @@ import uuid
 def prepare_copy(view, directory, cancel):
     started = time.monotonic()
     snapshot = view.export(directory, cancel=cancel)
-    return {'snapshot': snapshot, 'version': view.version,
-            'started': started, 'ended': time.monotonic()}
+    return {
+        'snapshot': snapshot,
+        'version': view.version,
+        'started': started,
+        'ended': time.monotonic(),
+    }
 
 
 def validate_copy(snapshot):
-    """Hash the complete fresh tree without resolving every parent repeatedly.
+    """计算完整新目录树的哈希，避免反复解析每个父目录。
 
-    No files, including generated files, may appear before the first command.
-    Reject links before descending; the normal post-command audit is unchanged.
-    """
+    首条命令执行前不得出现任何新增文件，包括生成文件。
+    遍历子目录前拒绝链接；命令执行后的常规审计保持不变。"""
     root = snapshot.root
     if not root.is_dir() or root.resolve() != root:
         raise ValueError('Prepared probe source integrity failed')
@@ -31,8 +35,10 @@ def validate_copy(snapshot):
         with os.scandir(folder) as entries:
             for entry in entries:
                 info = entry.stat(follow_symlinks=False)
-                if stat.S_ISLNK(info.st_mode) or (getattr(info, 'st_file_attributes', 0)
-                        & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)):
+                if stat.S_ISLNK(info.st_mode) or (
+                    getattr(info, 'st_file_attributes', 0)
+                    & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)
+                ):
                     raise ValueError('Prepared probe source integrity failed: link')
                 name = relative / entry.name
                 if stat.S_ISDIR(info.st_mode):
@@ -47,7 +53,8 @@ def validate_copy(snapshot):
 
 
 class ProbePreparation:
-    """Shares the source worker; only the owner consumes the completed copy."""
+    """复用源码工作线程；只有所属执行者使用准备完成的副本。"""
+
     def __init__(self, pool, directory):
         self.pool, self.directory = pool, Path(directory)
         self.active = None
@@ -63,8 +70,11 @@ class ProbePreparation:
             self._finish('stale')
         cancel = Event()
         directory = self.directory / ('copy-' + uuid.uuid4().hex)
-        self.active = {'version': view.version, 'cancel': cancel,
-                       'future': self.pool.submit(prepare_copy, view, directory, cancel)}
+        self.active = {
+            'version': view.version,
+            'cancel': cancel,
+            'future': self.pool.submit(prepare_copy, view, directory, cancel),
+        }
 
     def _finish(self, status):
         active, self.active = self.active, None
@@ -74,8 +84,9 @@ class ProbePreparation:
             self.jobs.append({'version': active['version'], 'status': 'cancelled'})
             return None
         except Exception as exc:
-            self.jobs.append({'version': active['version'], 'status': 'error',
-                              'error': type(exc).__name__})
+            self.jobs.append(
+                {'version': active['version'], 'status': 'error', 'error': type(exc).__name__}
+            )
             if status == 'consumed':
                 raise
             return None
@@ -86,7 +97,7 @@ class ProbePreparation:
         if self.active is None:
             return None
         if not self.active['future'].done():
-            # Do not compete with the synchronous fallback by copying twice.
+            # 避免重复复制，与同步后备流程争用资源。
             self.cancel()
             return None
         if self.active['version'] != version or self.active['cancel'].is_set():

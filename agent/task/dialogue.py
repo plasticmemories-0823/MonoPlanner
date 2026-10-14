@@ -1,4 +1,5 @@
-"""Public replies and user steering at completed request/operation boundaries."""
+"""在请求或操作完成后的边界处理公开回复与用户引导。"""
+
 from dataclasses import dataclass
 import json
 from langchain_core.messages import HumanMessage, ToolMessage, message_to_dict, messages_from_dict
@@ -44,7 +45,9 @@ def publish(loop, response):
     replies = loop.state.setdefault('public_replies', [])
     if not any(row['id'] == identity for row in replies):
         replies.append({'id': identity, 'content': content})
-        loop.state.setdefault('public_events', []).append({'id': identity, 'type': 'ai', 'content': content})
+        loop.state.setdefault('public_events', []).append(
+            {'id': identity, 'type': 'ai', 'content': content}
+        )
         loop.persist('public_reply', {'id': identity})
 
 
@@ -52,8 +55,11 @@ def accept_text(loop, response):
     loop.state['history'].append(response)
     publish(loop, response)
     active = bool(loop.state['plan_count'] or loop.state.get('acceptance_draft'))
-    loop.state.update(response_pending=None, status='awaiting_user' if active else 'chat_complete',
-                      reason='Text reply does not establish actual acceptance')
+    loop.state.update(
+        response_pending=None,
+        status='awaiting_user' if active else 'chat_complete',
+        reason='Text reply does not establish actual acceptance',
+    )
     loop.persist('text_reply_saved')
 
 
@@ -63,9 +69,17 @@ def discard_unexecuted_response(loop):
         response = messages_from_dict([raw])[0]
         loop.state['history'].append(raw)
         for call in [*response.tool_calls, *response.invalid_tool_calls]:
-            loop.state['history'].append(message_to_dict(ToolMessage(
-                content=json.dumps({'outcome': 'superseded_by_user', 'actions_executed': False}),
-                name=call['name'], tool_call_id=call['id'])))
+            loop.state['history'].append(
+                message_to_dict(
+                    ToolMessage(
+                        content=json.dumps(
+                            {'outcome': 'superseded_by_user', 'actions_executed': False}
+                        ),
+                        name=call['name'],
+                        tool_call_id=call['id'],
+                    )
+                )
+            )
         loop.state['response_pending'] = None
 
 
@@ -84,18 +98,29 @@ def apply_controls(loop):
             loop.state.pop('acceptance_release', None)
             loop.state.pop('repair_draft', None)
             loop.state['plan_error'] = ''
-            loop.state['history'].append(message_to_dict(HumanMessage(content=control['text'], id=control['id'])))
-            loop.state.setdefault('user_updates', []).append({'id': control['id'], 'text': control['text']})
-            loop.state.setdefault('public_events', []).append({'id': control['id'], 'type': 'human', 'content': control['text']})
+            loop.state['history'].append(
+                message_to_dict(HumanMessage(content=control['text'], id=control['id']))
+            )
+            loop.state.setdefault('user_updates', []).append(
+                {'id': control['id'], 'text': control['text']}
+            )
+            loop.state.setdefault('public_events', []).append(
+                {'id': control['id'], 'type': 'human', 'content': control['text']}
+            )
             loop.state.update(status='needs_plan', reason='User supplemented the task')
             changed = True
         elif control['kind'] == 'pause':
             loop.state.update(status='paused', reason='User requested pause', pause_requested=True)
             changed = True
         elif control['kind'] == 'resume':
-            loop.state.update(status='executing' if loop.state.get('pending') else 'needs_plan', reason='User resumed task',
-                              pause_requested=False)
+            loop.state.update(
+                status='executing' if loop.state.get('pending') else 'needs_plan',
+                reason='User resumed task',
+                pause_requested=False,
+            )
             changed = True
         applied.append(control['id'])
-        loop.persist('paused' if control['kind'] == 'pause' else 'user_input_applied', {'id': control['id']})
+        loop.persist(
+            'paused' if control['kind'] == 'pause' else 'user_input_applied', {'id': control['id']}
+        )
     return changed

@@ -1,6 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
-/** Public replies remain visible; the turn's private activity shares one group. */
+/** 保留公开回复的显示，同一轮的私有活动归入一组。 */
 export function activityAnchors(messages: Message[]) {
   const anchors = new Map<string, string>();
   let current = "";

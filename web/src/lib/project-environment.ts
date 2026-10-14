@@ -9,6 +9,8 @@ export type ProjectEnvironment = {
   error?: string;
   environment?: ProjectBinding;
   details?: string[];
+  projects?: { path: string; language: string; manager: string }[];
+  materials?: { file_count: number; total_bytes: number } | null;
 };
 
 type Observer = {
@@ -17,7 +19,7 @@ type Observer = {
   busy: (value: boolean) => void;
 };
 
-/** One in-flight read per selected folder; mutations supersede stale reads. */
+/** 每个选中目录最多保留一个进行中的读取请求；修改操作优先于过期读取。 */
 export class ProjectEnvironmentMonitor {
   private controller?: AbortController;
   private timer?: ReturnType<typeof setTimeout>;
@@ -40,7 +42,7 @@ export class ProjectEnvironmentMonitor {
     this.apiUrl = apiUrl;
     this.repo = repo;
     this.observer = observer;
-    // Browser fetch must not receive the monitor instance as its receiver.
+    // 调用浏览器 fetch 时，不能将监视器实例绑定为其接收者。
     this.fetcher = (input, init) => fetcher(input, init);
     this.interval = interval;
   }
@@ -109,7 +111,7 @@ export class ProjectEnvironmentMonitor {
       if (!response.ok)
         throw new Error(value.error || "无法连接环境服务，请稍后重新连接。");
       if (path === "/workspace/execution") {
-        // A successful legacy save is followed by the same public status read.
+        // 旧版保存操作成功后，同样读取公开状态。
         await this.request();
         return;
       }

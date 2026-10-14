@@ -1,4 +1,4 @@
-"""Local process execution shared by commands and acceptance tests."""
+"""命令与验收测试共用的本地进程执行逻辑。"""
 
 import os
 from pathlib import Path
@@ -11,8 +11,8 @@ def shell_arguments(command):
         raise ValueError("shell 命令必须是非空文本")
     if os.name != "nt":
         return ["/bin/bash", "-e", "-o", "pipefail", "-c", command], False
-    # cmd.exe has no pipefail. Reject top-level pipelines rather than report
-    # the final consumer's exit code as the whole pipeline's test result.
+    # cmd.exe 没有 pipefail；应拒绝顶层管道，不能把最后一个程序的
+    # 退出码当作整条管道的测试结果。
     quoted, escaped = False, False
     for char in command:
         if escaped:
@@ -22,16 +22,22 @@ def shell_arguments(command):
         elif char == '"':
             quoted = not quoted
         elif char == "|" and not quoted:
-            raise ValueError("Windows 命令不支持可靠判定顶层管道结果，请拆成独立命令并检查每次退出码。")
+            raise ValueError(
+                "Windows 命令不支持可靠判定顶层管道结果，请拆成独立命令并检查每次退出码。"
+            )
     return command, True
 
 
 def stop_process(process):
     if os.name == "nt":
         try:
-            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
         except (OSError, subprocess.TimeoutExpired):
             pass
     else:
@@ -44,19 +50,30 @@ def stop_process(process):
     process.wait(timeout=5)
 
 
-def run_process(command, *, cwd, stdout_path, stderr_path, timeout, shell=False, env=None, on_started=None):
+def run_process(
+    command, *, cwd, stdout_path, stderr_path, timeout, shell=False, env=None, on_started=None
+):
     if timeout <= 0:
         raise ValueError("timeout 必须大于 0")
     if shell:
         command, shell = shell_arguments(command)
-    options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
-               if os.name == "nt" else {"start_new_session": True})
-    result = {"exit_code": None, "timed_out": False,
-              "stdout_log": str(stdout_path), "stderr_log": str(stderr_path)}
+    options = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+        if os.name == "nt"
+        else {"start_new_session": True}
+    )
+    result = {
+        "exit_code": None,
+        "timed_out": False,
+        "stdout_log": str(stdout_path),
+        "stderr_log": str(stderr_path),
+    }
     for path in (stdout_path, stderr_path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     with Path(stdout_path).open("wb") as out, Path(stderr_path).open("wb") as err:
-        process = subprocess.Popen(command, cwd=str(cwd), shell=shell, stdout=out, stderr=err, env=env, **options)
+        process = subprocess.Popen(
+            command, cwd=str(cwd), shell=shell, stdout=out, stderr=err, env=env, **options
+        )
         try:
             if on_started:
                 on_started(process.pid)

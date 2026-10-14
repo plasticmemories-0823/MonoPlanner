@@ -20,8 +20,8 @@ function latestTitle(
   return incoming;
 }
 
-// Local mutations win over in-flight search snapshots. Titles are independent
-// display records and never become messages or task input.
+// 本地修改优先于进行中的搜索快照；标题是独立的
+// 展示记录，不会成为消息或任务输入。
 export class ThreadHistoryStore {
   rows: ManagedThread[] = [];
   private pending = new Set<string>();
@@ -66,7 +66,7 @@ export class ThreadHistoryStore {
           visibility: override?.value || row.visibility,
         };
       });
-    // A newly created conversation may not be visible in search yet.
+    // 新建会话可能尚未出现在搜索结果中。
     for (const row of this.rows)
       if (
         !found.has(row.thread_id) &&

@@ -1,9 +1,13 @@
-"""Fixed strict tools for submissions and explicit local corrections."""
+"""用于提交和明确局部修正的固定严格工具。"""
+
 import json
 from langchain_core.tools import tool
 from agent.settings import PROJECT_ROOT
 
 
+# ========================================================================
+# 工作计划与局部修正工具
+# ========================================================================
 SCHEMA_PATH = PROJECT_ROOT / "resources/plan.schema.json"
 WORK_SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 REPAIR_SCHEMA_PATH = PROJECT_ROOT / "resources/repair.schema.json"
@@ -25,7 +29,12 @@ def repair_work(**kwargs) -> dict:
     return kwargs
 
 
-REVIEW_SCHEMA = json.loads((PROJECT_ROOT / "resources/acceptance-review.schema.json").read_text(encoding="utf-8"))
+# ========================================================================
+# 冻结验收与验收修订工具
+# ========================================================================
+REVIEW_SCHEMA = json.loads(
+    (PROJECT_ROOT / "resources/acceptance-review.schema.json").read_text(encoding="utf-8")
+)
 
 
 @tool(args_schema=REVIEW_SCHEMA["freeze"])
@@ -45,6 +54,9 @@ def revise_acceptance(**kwargs) -> dict:
 
 WORK_TOOLS = (submit_plan, repair_work, freeze_acceptance, revise_acceptance)
 
+# ========================================================================
+# 联网搜索与公开网页读取工具
+# ========================================================================
 WEB_SCHEMA = json.loads((PROJECT_ROOT / 'resources/web.schema.json').read_text(encoding='utf-8'))
 
 
@@ -60,7 +72,12 @@ def web_fetch(**kwargs) -> dict:
     return kwargs
 
 
-ASSISTANT_SCHEMA = json.loads((PROJECT_ROOT / 'resources/assistant.schema.json').read_text(encoding='utf-8'))
+# ========================================================================
+# 本地查询、已有任务与桌面操作工具
+# ========================================================================
+ASSISTANT_SCHEMA = json.loads(
+    (PROJECT_ROOT / 'resources/assistant.schema.json').read_text(encoding='utf-8')
+)
 
 
 @tool(args_schema=ASSISTANT_SCHEMA['list_files'])
@@ -128,7 +145,9 @@ def request_file_operation(**kwargs) -> dict:
     return kwargs
 
 
-@tool(args_schema={'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False})
+@tool(
+    args_schema={'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}
+)
 def start_work() -> dict:
     """Enter coding after explicit user authorization. The host prepares original requirements
     and repository materials before requesting any code or plan. Supply no arguments.
@@ -136,6 +155,20 @@ def start_work() -> dict:
     return {}
 
 
+# ========================================================================
+# 按工作场景公开的工具集合
+# ========================================================================
 CODING_TOOLS = (*WORK_TOOLS, web_search, web_fetch)
-CHAT_TOOLS = (start_work, web_search, web_fetch, list_files, read_file, search_files,
-              run_existing, list_applications, open_file, launch_application, request_file_operation)
+CHAT_TOOLS = (
+    start_work,
+    web_search,
+    web_fetch,
+    list_files,
+    read_file,
+    search_files,
+    run_existing,
+    list_applications,
+    open_file,
+    launch_application,
+    request_file_operation,
+)

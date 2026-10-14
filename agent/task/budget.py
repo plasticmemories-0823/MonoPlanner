@@ -7,14 +7,14 @@ import time
 from agent.model.errors import ModelRequestNotSent
 
 
-# Only bookkeeping is locked. Never hold this lock while invoking a model.
-# Keeping the lock outside dataclasses preserves vars()/asdict() JSON support.
+# 锁只保护记账，调用模型时绝不持有该锁。
+# 将锁放在 dataclass 外部，保留 vars()/asdict() 的 JSON 支持。
 _BUDGET_LOCK = RLock()
 
 
 @dataclass
 class RequestReservation:
-    """One request's immutable identity and reservation-time balance snapshot."""
+    """单次请求的不可变标识及预留时的余额快照。"""
 
     owner: int
     call_id: int
@@ -73,18 +73,22 @@ class StepBudget:
     @property
     def working_steps(self) -> int:
         with _BUDGET_LOCK:
-            return max(0, self.remaining_steps - max(0, self.report_reserve - self.report_used_steps))
+            return max(
+                0, self.remaining_steps - max(0, self.report_reserve - self.report_used_steps)
+            )
 
     def available_steps(self, purpose="work"):
         with _BUDGET_LOCK:
             if self.cancelled:
                 return 0
             if purpose == "report":
-                return min(self.remaining_steps, max(0, self.report_reserve - self.report_used_steps))
+                return min(
+                    self.remaining_steps, max(0, self.report_reserve - self.report_used_steps)
+                )
             return self.working_steps
 
     def request_cancel(self, reason="用户请求停止任务。"):
-        """Stop admitting new work; already-sent requests still must settle."""
+        """停止接收新工作；已发送的请求仍必须结算。"""
         with _BUDGET_LOCK:
             self.cancelled = True
             self.cancel_reason = str(reason) or "用户请求停止任务。"
@@ -99,32 +103,60 @@ class StepBudget:
         with _BUDGET_LOCK:
             if self.cancelled:
                 raise ModelRequestNotSent("task_cancelled", self.cancel_reason)
-            reserve = self.report_token_reserve if purpose != "report" and self.report_reserve else 0
+            reserve = (
+                self.report_token_reserve if purpose != "report" and self.report_reserve else 0
+            )
             if self.max_tokens is not None and (
-                    self.reported_tokens + self.unknown_reserved_tokens + self.inflight_reserved_tokens
-                    + reservation + reserve > self.max_tokens):
-                # Only a peer's *pending* reservation can be released. Unknown
-                # usage is retained, and a request cannot wait on its own ticket.
-                alone = self.reported_tokens + self.unknown_reserved_tokens + own_reserved + reservation + reserve
+                self.reported_tokens
+                + self.unknown_reserved_tokens
+                + self.inflight_reserved_tokens
+                + reservation
+                + reserve
+                > self.max_tokens
+            ):
+                # 只能释放其他请求尚未使用的预留；保留用量未知的记录，
+                # 请求也不能等待自己的凭单。
+                alone = (
+                    self.reported_tokens
+                    + self.unknown_reserved_tokens
+                    + own_reserved
+                    + reservation
+                    + reserve
+                )
                 waiting = self.inflight_reserved_tokens > own_reserved and alone <= self.max_tokens
                 status = "budget_wait" if waiting else "token_budget_exhausted"
-                self.admission_events.append({"status": status, "used_steps": self.used_steps,
-                    "reported_tokens": self.reported_tokens, "unknown_reserved_tokens": self.unknown_reserved_tokens,
-                    "inflight_reserved_tokens": self.inflight_reserved_tokens, "own_reserved_tokens": own_reserved,
-                    "additional_reservation": reservation, "report_reserve": reserve, "max_tokens": self.max_tokens})
-                raise ModelRequestNotSent(status, "并行请求尚未结算，保留现场并等待余额释放。" if waiting else
-                                          "任务 Token 余额不足以覆盖本次请求及预留汇报。")
+                self.admission_events.append(
+                    {
+                        "status": status,
+                        "used_steps": self.used_steps,
+                        "reported_tokens": self.reported_tokens,
+                        "unknown_reserved_tokens": self.unknown_reserved_tokens,
+                        "inflight_reserved_tokens": self.inflight_reserved_tokens,
+                        "own_reserved_tokens": own_reserved,
+                        "additional_reservation": reservation,
+                        "report_reserve": reserve,
+                        "max_tokens": self.max_tokens,
+                    }
+                )
+                raise ModelRequestNotSent(
+                    status,
+                    (
+                        "并行请求尚未结算，保留现场并等待余额释放。"
+                        if waiting
+                        else "任务 Token 余额不足以覆盖本次请求及预留汇报。"
+                    ),
+                )
             remaining = self.remaining_time(purpose)
             if remaining is not None and remaining <= 0:
-                raise ModelRequestNotSent("task_timeout", "当前阶段时间额度已用完，停止新模型请求。")
+                raise ModelRequestNotSent(
+                    "task_timeout", "当前阶段时间额度已用完，停止新模型请求。"
+                )
 
     def reserve_request(self, reservation=0, purpose="work") -> RequestReservation:
-        """Atomically claim one call and its known token allowance.
+        """原子预留一次调用及其已知 Token 额度。
 
-        The executor initially claims the call with zero tokens so it can put
-        this request's unique ID in the input, then calls reserve_tokens before
-        sending. Both guards are atomic, and either rejection sends no request.
-        """
+        执行器先以零 Token 预留调用，将唯一请求 ID 放入输入，
+        再在发送前调用 reserve_tokens。两次检查都是原子的，任一拒绝都不会发送请求。"""
         if reservation < 0:
             raise ValueError("reservation 不能小于 0")
         with _BUDGET_LOCK:
@@ -134,7 +166,11 @@ class StepBudget:
                 exhausted = self.remaining_steps == 0
                 raise ModelRequestNotSent(
                     "budget_exhausted" if exhausted else "work_budget_exhausted",
-                    "本次任务的总调用次数已用完。" if exhausted else "工作调用额度已用完，剩余额度仅用于最终汇报。",
+                    (
+                        "本次任务的总调用次数已用完。"
+                        if exhausted
+                        else "工作调用额度已用完，剩余额度仅用于最终汇报。"
+                    ),
                 )
             self.check_request(reservation, purpose)
             self.used_steps += 1
@@ -143,9 +179,16 @@ class StepBudget:
                 self.report_used_steps += 1
             self.inflight_reserved_tokens += reservation
             return RequestReservation(
-                id(self), self.request_sequence, self.used_steps, purpose, self.remaining_steps,
-                self.working_steps, max(0, self.report_reserve - self.report_used_steps),
-                self.reported_tokens, self.unknown_usage_steps, reservation,
+                id(self),
+                self.request_sequence,
+                self.used_steps,
+                purpose,
+                self.remaining_steps,
+                self.working_steps,
+                max(0, self.report_reserve - self.report_used_steps),
+                self.reported_tokens,
+                self.unknown_usage_steps,
+                reservation,
             )
 
     def _check_ticket(self, ticket):
@@ -153,7 +196,7 @@ class StepBudget:
             raise ValueError("请求凭证不属于本预算，或已完成记账")
 
     def reserve_tokens(self, ticket: RequestReservation, reservation: int):
-        """Account for in-flight requests before releasing the caller to HTTP."""
+        """允许调用方发送 HTTP 请求前，先计入进行中的请求额度。"""
         if reservation < 0:
             raise ValueError("reservation 不能小于 0")
         with _BUDGET_LOCK:
@@ -171,7 +214,7 @@ class StepBudget:
             ticket.active = False
 
     def cancel_request(self, ticket: RequestReservation):
-        """Only call when the model request is confirmed not sent."""
+        """仅在确认模型请求尚未发送时调用。"""
         with _BUDGET_LOCK:
             self._check_ticket(ticket)
             self.inflight_reserved_tokens -= ticket.reserved_tokens

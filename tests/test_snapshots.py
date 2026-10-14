@@ -1,4 +1,4 @@
-"""Independent source/test execution views; no real model or Docker daemon."""
+"""验证独立的源码和测试执行视图；不使用真实模型或 Docker 守护进程。"""
 
 import json
 import os
@@ -45,9 +45,16 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(candidate.changes_from(start)["modified"], ["module.py"])
 
     def test_exclusions_have_reasons_and_source_assets_are_preserved(self):
-        for name in (".env", ".env.local", "server.key", "__pycache__/cache.pyc",
-                     ".venv/installed.py", "node_modules/package/index.js", "eval/runs/large.log",
-                     "evidence/run.json"):
+        for name in (
+            ".env",
+            ".env.local",
+            "server.key",
+            "__pycache__/cache.pyc",
+            ".venv/installed.py",
+            "node_modules/package/index.js",
+            "eval/runs/large.log",
+            "evidence/run.json",
+        ):
             self.write(name, "PRIVATE_OR_DERIVED")
         self.write("config.toml", "[project]\nname = 'example'\n")
         self.write("tests/test_example.py", "assert True\n")
@@ -55,8 +62,10 @@ class SnapshotTests(unittest.TestCase):
         self.write("secret.txt", "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n")
         self.write("data/fixture.bin", "\x00RESOURCE")
         snapshot = self.capture(excluded_roots=[self.repo / "evidence"])
-        self.assertEqual(set(snapshot.files), {"module.py", "config.toml", "tests/test_example.py",
-                                             "data/fixture.bin", "notes.txt"})
+        self.assertEqual(
+            set(snapshot.files),
+            {"module.py", "config.toml", "tests/test_example.py", "data/fixture.bin", "notes.txt"},
+        )
         report = json.loads(snapshot.manifest_path.read_text())
         excluded = {entry["path"]: entry["reason"] for entry in report["excluded"]}
         self.assertEqual(excluded[".env"], "environment_credentials")
@@ -68,8 +77,10 @@ class SnapshotTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("git"), "Git is not installed")
     def test_git_selection_keeps_dirty_and_new_files_and_omits_deleted_and_ignored(self):
         def git(*args):
-            return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
-                                  capture_output=True)
+            return subprocess.run(
+                ["git", "-C", str(self.repo), *args], check=True, capture_output=True
+            )
+
         git("init", "--quiet")
         self.write("deleted.py", "old\n")
         self.write(".gitignore", "ignored-data/\n")
@@ -85,11 +96,15 @@ class SnapshotTests(unittest.TestCase):
         self.assertFalse((snapshot.root / "ignored-data").exists())
         manifest = json.loads(snapshot.manifest_path.read_text())
         self.assertEqual(manifest["selection"], "git")
-        self.assertIn({"path": "deleted.py", "reason": "deleted_tracked_file"}, manifest["excluded"])
+        self.assertIn(
+            {"path": "deleted.py", "reason": "deleted_tracked_file"}, manifest["excluded"]
+        )
 
     @unittest.skipUnless(shutil.which("git"), "Git is not installed")
     def test_tracked_source_overrides_generated_names_and_integrity_still_checks_it(self):
-        subprocess.run(["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True
+        )
         self.write("build/tool.py", "TOOL = 1\n")
         self.write("fixtures/expected.log", "EXPECTED OUTPUT\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True, capture_output=True)
@@ -104,33 +119,48 @@ class SnapshotTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git"), "Git is not installed")
     def test_git_ignored_directory_is_not_traversed_for_secret_discovery(self):
-        subprocess.run(["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True
+        )
         self.write(".gitignore", "validation/\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True, capture_output=True)
         self.write("validation/pnpm-store/link/private.txt", "ignored cache")
         from agent.source.snapshots import _link
-        with patch("agent.source.snapshots._link", side_effect=lambda p: p.name == "link" or _link(p)):
+
+        with patch(
+            "agent.source.snapshots._link", side_effect=lambda p: p.name == "link" or _link(p)
+        ):
             snapshot = self.capture()
         self.assertIn("module.py", snapshot.files)
         self.assertFalse((snapshot.root / "validation").exists())
 
     @unittest.skipUnless(shutil.which("git"), "Git is not installed")
     def test_tracked_source_inside_ignored_directory_still_rejects_links(self):
-        subprocess.run(["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True
+        )
         self.write(".gitignore", "validation/\n")
         self.write("validation/tracked.py", "VALUE = 1\n")
-        subprocess.run(["git", "-C", str(self.repo), "add", "-f", "validation/tracked.py"],
-                       check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "add", "-f", "validation/tracked.py"],
+            check=True,
+            capture_output=True,
+        )
         snapshot = self.capture("tracked")
         self.assertIn("validation/tracked.py", snapshot.files)
         from agent.source.snapshots import _link
-        with patch("agent.source.snapshots._link", side_effect=lambda p: p.name == "tracked.py" or _link(p)):
+
+        with patch(
+            "agent.source.snapshots._link", side_effect=lambda p: p.name == "tracked.py" or _link(p)
+        ):
             with self.assertRaisesRegex(SnapshotError, "Links"):
                 self.capture("linked")
 
     @unittest.skipUnless(shutil.which("git"), "Git is not installed")
     def test_tracked_secrets_in_generated_directories_still_take_exclusion_priority(self):
-        subprocess.run(["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True
+        )
         paths = ("build/.env", "dist/.env.local", "build/server.key", "eval/runs/id_rsa")
         for name in paths:
             self.write(name, "DEMONSTRATION_SECRET_BEFORE\n")
@@ -144,14 +174,18 @@ class SnapshotTests(unittest.TestCase):
                 self.write(name, "DEMONSTRATION_SECRET_AFTER\n")
         updated = self.capture("updated")
         self.assertEqual(updated.excluded_changes_from(initial)["modified"], sorted(paths))
-        reasons = {item["path"]: item["reason"]
-                   for item in json.loads(initial.manifest_path.read_text())["excluded"]}
+        reasons = {
+            item["path"]: item["reason"]
+            for item in json.loads(initial.manifest_path.read_text())["excluded"]
+        }
         self.assertEqual(reasons["build/.env"], "environment_credentials")
         self.assertEqual(reasons["build/server.key"], "possible_private_key")
 
     @unittest.skipUnless(shutil.which("git"), "Git is not installed")
     def test_excluded_secret_changes_are_fingerprinted_without_copying_content(self):
-        subprocess.run(["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "init", "--quiet"], check=True, capture_output=True
+        )
         self.write(".env", "TOKEN=SECRET_INITIAL_VALUE\n")
         self.write(".gitignore", ".env.local\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True, capture_output=True)
@@ -177,7 +211,9 @@ class SnapshotTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git"), "Git is not installed")
     def test_independent_source_under_ignored_parent_directory_is_not_an_empty_git_snapshot(self):
-        subprocess.run(["git", "-C", str(self.base), "init", "--quiet"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.base), "init", "--quiet"], check=True, capture_output=True
+        )
         (self.base / ".gitignore").write_text("original/\n")
         snapshot = self.capture()
         self.assertEqual((snapshot.root / "module.py").read_text(), "VALUE = 1\n")
@@ -223,12 +259,18 @@ class SnapshotTests(unittest.TestCase):
         (outside / "private.txt").write_text("secret")
         junction = self.repo / "junction"
         quote = lambda value: "'" + str(value).replace("'", "''") + "'"
-        result = subprocess.run(["powershell", "-NoProfile", "-Command",
-            f"New-Item -ItemType Junction -Path {quote(junction)} -Target {quote(outside)} | Out-Null"],
-            capture_output=True)
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"New-Item -ItemType Junction -Path {quote(junction)} -Target {quote(outside)} | Out-Null",
+            ],
+            capture_output=True,
+        )
         if result.returncode:
             self.skipTest("Junction creation is unavailable")
-        # rmdir removes just this created directory link, never the external target.
+        # rmdir 只移除此处创建的目录链接，绝不删除外部目标。
         self.addCleanup(lambda: os.rmdir(junction) if junction.exists() else None)
         with self.assertRaisesRegex(SnapshotError, "reparse"):
             self.capture()
@@ -236,10 +278,12 @@ class SnapshotTests(unittest.TestCase):
 
     def test_changes_during_copy_fail_instead_of_saving_mixed_content(self):
         copy = shutil.copy2
+
         def mutate(source, destination):
             copied = copy(source, destination)
             Path(source).write_text("changed during capture\n")
             return copied
+
         with patch("agent.source.snapshots.shutil.copy2", side_effect=mutate):
             with self.assertRaisesRegex(SnapshotError, "changed during capture"):
                 self.capture()
@@ -264,10 +308,19 @@ class SnapshotTests(unittest.TestCase):
         snapshot = self.capture()
         original = LocalEnvironment(self.repo, timeout=7, artifact_root=self.base / "original-logs")
         with snapshot.environment_like(original, self.base / "snapshot-logs") as environment:
-            stdout, stderr = environment.artifact_root / "out.txt", environment.artifact_root / "err.txt"
-            result = environment.run_process([environment.python_executable, "-c",
-                "from pathlib import Path; print(Path('module.py').read_text()); Path('new.py').write_text('new')"],
-                stdout_path=stdout, stderr_path=stderr)
+            stdout, stderr = (
+                environment.artifact_root / "out.txt",
+                environment.artifact_root / "err.txt",
+            )
+            result = environment.run_process(
+                [
+                    environment.python_executable,
+                    "-c",
+                    "from pathlib import Path; print(Path('module.py').read_text()); Path('new.py').write_text('new')",
+                ],
+                stdout_path=stdout,
+                stderr_path=stderr,
+            )
             self.assertEqual(result["exit_code"], 0)
             self.assertEqual(environment.timeout, 7)
             self.assertEqual(environment.repo_root, snapshot.root)
@@ -276,17 +329,27 @@ class SnapshotTests(unittest.TestCase):
 
     def test_docker_clone_reuses_image_but_owns_its_lifecycle(self):
         snapshot = self.capture()
-        original = DockerEnvironment(self.repo, "fixture:image", "original-task", timeout=9,
-                                     artifact_root=self.base / "original-logs")
+        original = DockerEnvironment(
+            self.repo,
+            "fixture:image",
+            "original-task",
+            timeout=9,
+            artifact_root=self.base / "original-logs",
+        )
         original._container_id = "a" * 64
         events = []
+
         def start(environment):
             events.append(("start", environment))
             environment._container_id = "b" * 64
             return environment
+
         def close(environment):
             events.append(("close", environment))
-        with patch.object(DockerEnvironment, "start", start), patch.object(DockerEnvironment, "close", close):
+
+        with patch.object(DockerEnvironment, "start", start), patch.object(
+            DockerEnvironment, "close", close
+        ):
             with self.assertRaisesRegex(RuntimeError, "test failed"):
                 with snapshot.environment_like(original, self.base / "snapshot-logs") as child:
                     self.assertEqual(child.image, original.image)

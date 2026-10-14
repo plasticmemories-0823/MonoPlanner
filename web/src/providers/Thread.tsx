@@ -108,8 +108,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         pending_deletions = [],
       } = await response.json();
       const savedIds = new Set(threads.map((thread) => thread.thread_id));
-      // A partial cleanup may have removed the SDK thread already. Keep a
-      // minimal trash entry so the user can explicitly retry the cleanup.
+      // 部分清理操作可能已删除 SDK 会话；保留一个最小回收站条目，
+      // 以便用户明确重试清理。
       const pending: Thread[] = pending_deletions
         .filter((item: { thread_id: string }) => !savedIds.has(item.thread_id))
         .map((item: { thread_id: string; title: string }) => ({
@@ -143,7 +143,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         setThreadsError(
           error instanceof Error ? error.message : "无法读取对话记录",
         );
-      // Refresh failures must not clear the last usable list.
+      // 刷新失败时保留上一次可用列表。
       return expectedStore.rows;
     } finally {
       if (activeScope.current === scope && request.current === version)
@@ -160,15 +160,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (state.expired) setTitleError("标题尚未同步，可重试查询");
       if (!state.pending) return;
       try {
-        // One lightweight watcher survives conversation selection changes.
-        // It only reads display metadata, not SDK message histories.
-        const response = await fetch(
-          `${apiUrl}/conversations`,
-          {
-            cache: "no-store",
-            signal: controller.signal,
-          },
-        );
+        // 会话选择变化时，继续复用同一个轻量监视器。
+        // 仅读取展示元数据，不读取 SDK 消息历史。
+        const response = await fetch(`${apiUrl}/conversations`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
         if (!response.ok) throw new Error("无法同步对话标题");
         const result = await response.json();
         if (controller.signal.aborted || store.current !== expectedStore)
@@ -205,28 +202,22 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   }, [getThreads]);
 
   const setVisibility = async (thread: string, visibility: Visibility) => {
-    const response = await fetch(
-      `${apiUrl}/threads/${thread}/visibility`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ visibility }),
-      },
-    );
+    const response = await fetch(`${apiUrl}/threads/${thread}/visibility`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ visibility }),
+    });
     const value = await response.json();
     if (!response.ok) throw new Error(value.error || "对话管理操作未完成");
     setThreads(store.current.setVisibility(thread, visibility));
   };
 
   const deletePermanently = async (thread: string) => {
-    const response = await fetch(
-      `${apiUrl}/threads/${thread}/purge`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirm_thread_id: thread }),
-      },
-    );
+    const response = await fetch(`${apiUrl}/threads/${thread}/purge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm_thread_id: thread }),
+    });
     const value = await response.json();
     if (!response.ok) throw new Error(value.error || "彻底删除未完成");
     setThreads(store.current.purge(thread));

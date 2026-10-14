@@ -1,9 +1,9 @@
-"""Public-download proxy run only inside the isolated preparation sidecar.
+"""只在隔离的环境准备辅助容器中运行公开下载代理。
 
-The setup container has only an internal Docker network. DNS is resolved by
-this proxy and the validated numeric address is used for the actual connection.
-No proxy authentication, host credentials, or arbitrary forwarding headers exist.
+安装容器仅接入 Docker 内部网络。代理负责解析 DNS，并使用已校验的
+数值 IP 地址建立真实连接；不转发代理认证、本机凭据或任意请求头。
 """
+
 import http.server
 import ipaddress
 import select
@@ -21,9 +21,12 @@ def connect_public(host, port):
     if not host or host.lower().rstrip('.').endswith(('.localhost', '.local', '.internal')):
         raise ValueError('private host')
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    if not addresses or any(not ipaddress.ip_address(info[4][0]).is_global
-                            or ipaddress.ip_address(info[4][0]).is_multicast
-                            or ipaddress.ip_address(info[4][0]).is_reserved for info in addresses):
+    if not addresses or any(
+        not ipaddress.ip_address(info[4][0]).is_global
+        or ipaddress.ip_address(info[4][0]).is_multicast
+        or ipaddress.ip_address(info[4][0]).is_reserved
+        for info in addresses
+    ):
         raise ValueError('private address')
     last = None
     for family, kind, proto, _, address in addresses:
@@ -43,7 +46,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     timeout = TIMEOUT
 
     def log_message(self, *args):
-        # URLs may contain dependency names or signed tokens. Never log them.
+        # URL 可能包含依赖名称或签名令牌，不能写入日志。
         pass
 
     def do_CONNECT(self):
@@ -80,9 +83,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         upstream = None
         try:
             parsed = urlsplit(self.path)
-            if (parsed.scheme != 'http' or parsed.port not in (None, 80)
-                    or parsed.username or parsed.password or self.headers.get('Transfer-Encoding')
-                    or self.headers.get('Content-Length') not in (None, '0')):
+            if (
+                parsed.scheme != 'http'
+                or parsed.port not in (None, 80)
+                or parsed.username
+                or parsed.password
+                or self.headers.get('Transfer-Encoding')
+                or self.headers.get('Content-Length') not in (None, '0')
+            ):
                 raise ValueError('only public HTTP downloads are permitted')
             upstream = connect_public(parsed.hostname, 80)
             target = (parsed.path or '/') + ('?' + parsed.query if parsed.query else '')

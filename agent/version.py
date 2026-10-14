@@ -1,2 +1,3 @@
-"""Public product version, independent of task and model configuration."""
-VERSION = '1.1.2'
+"""对外显示的产品版本，与任务配置和模型配置无关。"""
+
+VERSION = '1.0.0'

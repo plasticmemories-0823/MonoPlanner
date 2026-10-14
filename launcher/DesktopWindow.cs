@@ -10,7 +10,8 @@ using Microsoft.Web.WebView2.WinForms;
 
 internal sealed class DesktopWindow : Form
 {
-    private static readonly Uri Home = new Uri("http://127.0.0.1:3000/");
+    // 工作区地址、窗口控件与连接状态。
+    private static readonly Uri Home = WorkspaceAddress();
     private WebView2 view = new WebView2();
     private readonly Panel loading = new Panel();
     private readonly Label message = new Label();
@@ -24,32 +25,64 @@ internal sealed class DesktopWindow : Form
     private bool stopped;
     private bool browserLost;
 
+    // 桌面窗口和服务共用启动器端口；地址始终限制在本机回环。
+    private static Uri WorkspaceAddress()
+    {
+        string configured = Environment.GetEnvironmentVariable("MONOPLANER_UI_PORT");
+        int port = 3000;
+        if (!String.IsNullOrEmpty(configured) &&
+            (!Int32.TryParse(configured, out port) || port < 1024 || port > 65535))
+            throw new ArgumentException("本机界面端口必须为 1024 到 65535 的整数。");
+        return new Uri("http://127.0.0.1:" + port + "/");
+    }
+
+    // 组装桌面窗口并绑定用户操作与激活事件。
     internal DesktopWindow(EventWaitHandle activate, string key)
     {
-        Text = "MonoPlanner 1.1";
+        Text = "MonoPlanner 1.0";
         Font = new Font("Microsoft YaHei UI", 9);
         ClientSize = new Size(1240, 820);
         MinimumSize = new Size(850, 600);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.White;
         AutoScaleMode = AutoScaleMode.Dpi;
-        profile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                               "MonoPlanner", "WebView2", key);
+        profile = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "MonoPlanner", "WebView2", key);
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-        var menu = new MenuStrip { BackColor = Color.White, Padding = new Padding(8, 3, 8, 3) };
+
+        // 菜单与底部状态栏。
+        var menu = new MenuStrip
+        {
+            BackColor = Color.White,
+            Padding = new Padding(8, 3, 8, 3)
+        };
         var app = new ToolStripMenuItem("MonoPlanner");
         var exit = new ToolStripMenuItem("退出并停止服务");
         reload.ShortcutKeys = Keys.F5;
         app.DropDownItems.AddRange(new ToolStripItem[] { reload, restart, new ToolStripSeparator(), exit });
         menu.Items.Add(app);
         MainMenuStrip = menu;
-        var bar = new StatusStrip { BackColor = Color.White, SizingGrip = false };
+        var bar = new StatusStrip
+        {
+            BackColor = Color.White,
+            SizingGrip = false
+        };
         bar.Items.Add(status);
+
+        // 工作区浏览器与加载提示。
         view.Dock = DockStyle.Fill;
         view.DefaultBackgroundColor = Color.White;
         loading.Dock = DockStyle.Fill;
-        var title = new Label { Text = "MonoPlanner", AutoSize = false, Font = new Font(Font.FontFamily, 26),
-                                TextAlign = ContentAlignment.MiddleCenter, Dock = DockStyle.Top, Height = 92 };
+        var title = new Label
+        {
+            Text = "MonoPlanner",
+            AutoSize = false,
+            Font = new Font(Font.FontFamily, 26),
+            TextAlign = ContentAlignment.MiddleCenter,
+            Dock = DockStyle.Top,
+            Height = 92
+        };
         message.Text = "正在准备工作区…";
         message.Dock = DockStyle.Top;
         message.Height = 125;
@@ -58,8 +91,12 @@ internal sealed class DesktopWindow : Form
         retry.Text = "重新连接";
         retry.Size = new Size(120, 36);
         retry.Visible = false;
-        var controls = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 50,
-                                            FlowDirection = FlowDirection.LeftToRight };
+        var controls = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 50,
+            FlowDirection = FlowDirection.LeftToRight
+        };
         controls.Controls.Add(retry);
         loading.Controls.Add(controls);
         loading.Controls.Add(message);
@@ -70,26 +107,53 @@ internal sealed class DesktopWindow : Form
         Controls.Add(bar);
         Controls.Add(menu);
         loading.BringToFront();
-        retry.Click += delegate { RunService("Start"); };
-        restart.Click += delegate { RunService("Restart"); };
-        reload.Click += delegate { if (!busy && view.CoreWebView2 != null) view.Reload(); };
-        exit.Click += delegate { Close(); };
-        Shown += delegate { RunService("Start"); };
-        FormClosing += delegate(object sender, FormClosingEventArgs e) {
-            if (stopped) return;
-            e.Cancel = true;
-            if (!busy) RunService("Stop");
+
+        // 重连、重启、刷新与退出操作。
+        retry.Click += delegate
+        {
+            RunService("Start");
         };
+        restart.Click += delegate
+        {
+            RunService("Restart");
+        };
+        reload.Click += delegate
+        {
+            if (!busy && view.CoreWebView2 != null)
+                view.Reload();
+        };
+        exit.Click += delegate
+        {
+            Close();
+        };
+        Shown += delegate
+        {
+            RunService("Start");
+        };
+        FormClosing += delegate (object sender, FormClosingEventArgs e)
+        {
+            if (stopped)
+                return;
+            e.Cancel = true;
+            if (!busy)
+                RunService("Stop");
+        };
+
+        // 接收其他启动实例发来的窗口激活信号。
         focusTimer.Interval = 300;
-        focusTimer.Tick += delegate {
-            if (!activate.WaitOne(0)) return;
-            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        focusTimer.Tick += delegate
+        {
+            if (!activate.WaitOne(0))
+                return;
+            if (WindowState == FormWindowState.Minimized)
+                WindowState = FormWindowState.Normal;
             Show();
             Activate();
         };
         focusTimer.Start();
     }
 
+    // 协调后台服务操作与窗口忙碌状态。
     private void SetBusy(bool value)
     {
         busy = value;
@@ -98,28 +162,61 @@ internal sealed class DesktopWindow : Form
 
     private void RunService(string action)
     {
-        if (busy) return;
+        if (busy)
+            return;
         SetBusy(true);
         status.Text = action == "Stop" ? "正在停止服务…" : "正在准备工作区…";
-        ThreadPool.QueueUserWorkItem(delegate {
+        ThreadPool.QueueUserWorkItem(delegate
+        {
             string failure = null;
-            try { if (Program.RunService(action, true) != 0) failure = Program.Failure(); }
-            catch (Exception error) { failure = error.Message; }
-            if (IsDisposed) return;
-            BeginInvoke(new Action(delegate {
+            try
+            {
+                if (Program.RunService(action, true) != 0)
+                    failure = Program.Failure();
+            }
+            catch (Exception error)
+            {
+                failure = error.Message;
+            }
+
+            if (IsDisposed)
+                return;
+            BeginInvoke(new Action(delegate
+            {
                 if (failure != null)
                 {
                     SetBusy(false);
                     status.Text = "操作未完成";
-                    if (view.CoreWebView2 == null) ShowError(failure);
-                    else MessageBox.Show(this, failure, "MonoPlanner", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (action == "Stop")
+                    {
+                        var closeWindow = MessageBox.Show(this,
+                            failure + "\n\n是否只关闭窗口，保留后台服务和任务？后台任务可能继续运行。",
+                            "MonoPlanner", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                            MessageBoxDefaultButton.Button2);
+                        if (closeWindow == DialogResult.Yes)
+                        {
+                            stopped = true;
+                            Close();
+                        }
+                        return;
+                    }
+                    if (view.CoreWebView2 == null)
+                        ShowError(failure);
+                    else
+                        MessageBox.Show(this, failure, "MonoPlanner", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
-                else if (action == "Stop") { stopped = true; Close(); }
-                else OpenWorkspace();
+                else if (action == "Stop")
+                {
+                    stopped = true;
+                    Close();
+                }
+                else
+                    OpenWorkspace();
             }));
         });
     }
 
+    // 连接失败提示与 WebView2 工作区初始化。
     private void ShowError(string error)
     {
         loading.Visible = true;
@@ -136,64 +233,124 @@ internal sealed class DesktopWindow : Form
             int position = Controls.GetChildIndex(view);
             Controls.Remove(view);
             view.Dispose();
-            view = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.White };
+            view = new WebView2
+            {
+                Dock = DockStyle.Fill,
+                DefaultBackgroundColor = Color.White
+            };
             Controls.Add(view);
             Controls.SetChildIndex(view, position);
             browserLost = false;
         }
+
         if (view.CoreWebView2 != null)
         {
             SetBusy(false);
-            try { view.Reload(); }
-            catch (Exception error) { ShowError(error.Message); }
+            try
+            {
+                view.Reload();
+            }
+            catch (Exception error)
+            {
+                ShowError(error.Message);
+            }
+
             return;
         }
+
         var scheduler = TaskScheduler.FromCurrentSynchronizationContext();
         try
         {
             string browser = null;
-            try { CoreWebView2Environment.GetAvailableBrowserVersionString(); }
-            catch(WebView2RuntimeNotFoundException) {
-                var candidates=Directory.GetDirectories(Path.Combine(Program.Runtime,"webview"));
-                if(candidates.Length!=1) throw new IOException("备用 WebView2 运行时缺失或不明确");
-                browser=candidates[0];
+            try
+            {
+                CoreWebView2Environment.GetAvailableBrowserVersionString();
             }
-            if(Environment.GetEnvironmentVariable("MONOPLANER_FIXED_WEBVIEW")=="1") {
-                browser=Directory.GetDirectories(Path.Combine(Program.Runtime,"webview"))[0];
+            catch (WebView2RuntimeNotFoundException)
+            {
+                var candidates = Directory.GetDirectories(Path.Combine(Program.Runtime, "webview"));
+                if (candidates.Length != 1)
+                    throw new IOException("备用 WebView2 运行时缺失或不明确");
+                browser = candidates[0];
             }
-            CoreWebView2Environment.CreateAsync(browser, profile).ContinueWith(environment => {
-                if (environment.IsFaulted) { SetBusy(false); ShowError(environment.Exception.GetBaseException().Message); return; }
+
+            if (Environment.GetEnvironmentVariable("MONOPLANER_FIXED_WEBVIEW") == "1")
+            {
+                browser = Directory.GetDirectories(Path.Combine(Program.Runtime, "webview"))[0];
+            }
+
+            CoreWebView2Environment.CreateAsync(browser, profile).ContinueWith(environment =>
+            {
+                if (environment.IsFaulted)
+                {
+                    SetBusy(false);
+                    ShowError(environment.Exception.GetBaseException().Message);
+                    return;
+                }
+
                 try
                 {
-                    view.EnsureCoreWebView2Async(environment.Result).ContinueWith(initialized => {
+                    view.EnsureCoreWebView2Async(environment.Result).ContinueWith(initialized =>
+                    {
                         SetBusy(false);
-                        if (initialized.IsFaulted) { ShowError(initialized.Exception.GetBaseException().Message); return; }
-                        try { ConfigureBrowser(); view.Source = Home; }
-                        catch (Exception error) { ShowError(error.Message); }
+                        if (initialized.IsFaulted)
+                        {
+                            ShowError(initialized.Exception.GetBaseException().Message);
+                            return;
+                        }
+
+                        try
+                        {
+                            ConfigureBrowser();
+                            view.Source = Home;
+                        }
+                        catch (Exception error)
+                        {
+                            ShowError(error.Message);
+                        }
                     }, scheduler);
                 }
-                catch (Exception error) { SetBusy(false); ShowError(error.Message); }
+                catch (Exception error)
+                {
+                    SetBusy(false);
+                    ShowError(error.Message);
+                }
             }, scheduler);
         }
-        catch (Exception error) { SetBusy(false); ShowError(error.Message); }
+        catch (Exception error)
+        {
+            SetBusy(false);
+            ShowError(error.Message);
+        }
     }
 
+    // 限制工作区导航，并处理用户主动打开的外部链接。
     private static bool IsWorkspace(string address)
     {
         Uri target;
         return Uri.TryCreate(address, UriKind.Absolute, out target) &&
-               target.Scheme == Home.Scheme && target.Host == Home.Host && target.Port == Home.Port;
+               target.Scheme == Home.Scheme &&
+               target.Host == Home.Host &&
+               target.Port == Home.Port;
     }
 
     private void OpenExternal(string address)
     {
         Uri target;
         if (!Uri.TryCreate(address, UriKind.Absolute, out target) ||
-            (target.Scheme != "http" && target.Scheme != "https")) return;
-        try { Process.Start(new ProcessStartInfo(target.AbsoluteUri) { UseShellExecute = true }); }
-        catch (Exception error) { status.Text = "链接未打开：" + error.Message; }
+            (target.Scheme != "http" && target.Scheme != "https"))
+            return;
+        try
+        {
+            Process.Start(new ProcessStartInfo(target.AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception error)
+        {
+            status.Text = "链接未打开：" + error.Message;
+        }
     }
 
+    // 配置浏览器权限，并更新导航完成或进程异常状态。
     private void ConfigureBrowser()
     {
         view.CoreWebView2.Settings.AreHostObjectsAllowed = false;
@@ -201,28 +358,45 @@ internal sealed class DesktopWindow : Form
         view.CoreWebView2.Settings.AreDevToolsEnabled = false;
         view.CoreWebView2.Settings.IsStatusBarEnabled = false;
         view.CoreWebView2.Settings.IsZoomControlEnabled = true;
-        view.CoreWebView2.NavigationStarting += delegate(object sender, CoreWebView2NavigationStartingEventArgs e) {
-            if (IsWorkspace(e.Uri)) return;
+
+        view.CoreWebView2.NavigationStarting += delegate (object sender, CoreWebView2NavigationStartingEventArgs e)
+        {
+            if (IsWorkspace(e.Uri))
+                return;
             e.Cancel = true;
-            // Only a user-initiated external link can open another application.
-            if (e.IsUserInitiated && !e.IsRedirected) OpenExternal(e.Uri);
+            // 仅允许用户主动点击的外部链接打开其他应用。
+            if (e.IsUserInitiated && !e.IsRedirected)
+                OpenExternal(e.Uri);
         };
-        view.CoreWebView2.FrameNavigationStarting += delegate(object sender, CoreWebView2NavigationStartingEventArgs e) {
-            if (!IsWorkspace(e.Uri)) e.Cancel = true;
+        view.CoreWebView2.FrameNavigationStarting += delegate (object sender, CoreWebView2NavigationStartingEventArgs e)
+        {
+            if (!IsWorkspace(e.Uri))
+                e.Cancel = true;
         };
-        view.CoreWebView2.NewWindowRequested += delegate(object sender, CoreWebView2NewWindowRequestedEventArgs e) {
+        view.CoreWebView2.NewWindowRequested += delegate (object sender, CoreWebView2NewWindowRequestedEventArgs e)
+        {
             e.Handled = true;
-            if (e.IsUserInitiated) OpenExternal(e.Uri);
+            if (e.IsUserInitiated)
+                OpenExternal(e.Uri);
         };
-        view.CoreWebView2.PermissionRequested += delegate(object sender, CoreWebView2PermissionRequestedEventArgs e) {
+        view.CoreWebView2.PermissionRequested += delegate (object sender, CoreWebView2PermissionRequestedEventArgs e)
+        {
             e.State = CoreWebView2PermissionState.Deny;
         };
-        view.CoreWebView2.NavigationCompleted += delegate(object sender, CoreWebView2NavigationCompletedEventArgs e) {
-            if (!e.IsSuccess) { ShowError("界面暂未加载完成：" + e.WebErrorStatus + "。可重新连接，任务记录会保留。"); return; }
+
+        view.CoreWebView2.NavigationCompleted += delegate (object sender, CoreWebView2NavigationCompletedEventArgs e)
+        {
+            if (!e.IsSuccess)
+            {
+                ShowError("界面暂未加载完成：" + e.WebErrorStatus + "。可重新连接，任务记录会保留。");
+                return;
+            }
+
             loading.Visible = false;
             status.Text = "本机工作区 · 就绪";
         };
-        view.CoreWebView2.ProcessFailed += delegate(object sender, CoreWebView2ProcessFailedEventArgs e) {
+        view.CoreWebView2.ProcessFailed += delegate (object sender, CoreWebView2ProcessFailedEventArgs e)
+        {
             browserLost = e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited;
             ShowError("界面进程已中断。可重新连接，后台任务与记录保留。");
         };
@@ -230,7 +404,8 @@ internal sealed class DesktopWindow : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) focusTimer.Dispose();
+        if (disposing)
+            focusTimer.Dispose();
         base.Dispose(disposing);
     }
 }

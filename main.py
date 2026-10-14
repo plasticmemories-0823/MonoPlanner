@@ -1,4 +1,5 @@
-"""p0401 interactive entrypoint."""
+"""p0401 交互入口。"""
+
 from agent.cli.interactive import main
 
 

@@ -1,6 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
-/** The SDK resets stream/history in effects, after a thread selection renders. */
+/** 切换会话完成渲染后，SDK 才在副作用中重置流和历史记录。 */
 export function messagesForThread(
   incoming: Message[],
   selectedKey: string,
@@ -17,7 +17,7 @@ export function messagesForThread(
   return incoming;
 }
 
-/** Published messages survive older recovery snapshots and empty stream views. */
+/** 即使收到较旧的恢复快照或空的流视图，也保留已发布消息。 */
 export function mergePublicMessages(
   base: Message[],
   incoming: Message[],
@@ -39,8 +39,8 @@ export function mergePublicMessages(
       continue;
     }
     const old = result[index];
-    // This UI does not support editing published replies. A shorter fragment
-    // with the same ID is an older snapshot, not a deletion instruction.
+    // 界面不支持编辑已发布回复；相同 ID 对应的较短片段
+    // 表示较旧快照，不表示删除指令。
     if (
       typeof old.content === "string" &&
       typeof message.content === "string" &&
@@ -52,8 +52,8 @@ export function mergePublicMessages(
       changed = true;
     }
   }
-  // Recovery and stream fragments can replace the same ID twice in one update.
-  // A final value equal to the archive must not trigger another React render.
+  // 一次更新中的恢复片段和流片段可能先后替换同一 ID。
+  // 最终值与归档一致时，不应再次触发 React 渲染。
   return changed && JSON.stringify(result) !== JSON.stringify(base)
     ? result
     : base;

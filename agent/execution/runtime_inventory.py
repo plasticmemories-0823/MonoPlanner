@@ -1,4 +1,4 @@
-"""Explicit task-local runtime material inventory; never copy all ignored files."""
+"""明确记录任务所需的本地运行材料，不复制全部被忽略文件。"""
 
 import hashlib
 import json
@@ -9,23 +9,30 @@ from agent.source.snapshots import _walk, _reason, _safe_file, _inspect_file
 
 def package_roots(repo):
     root = Path(repo).resolve()
-    return sorted(p.parent.relative_to(root).as_posix()
-        for base in (root, root / "src") if base.is_dir()
+    return sorted(
+        p.parent.relative_to(root).as_posix()
+        for base in (root, root / "src")
+        if base.is_dir()
         for p in base.glob("*/__init__.py")
         if p.parent.name not in {"tests", "test", "docs", "examples", "build", "setup"}
-        and not _reason(p.relative_to(root)))
+        and not _reason(p.relative_to(root))
+    )
 
 
 def runtime_inventory(repo):
-    """Keep package-local Python/native modules, excluding caches/builds/secrets.
+    """保留包内的 Python 和原生模块，排除缓存、构建产物及秘密资料。
 
-    Exact paths and hashes are frozen before the worker starts. The manifest is
-    an environment input, not an answer or permission supplied by repository text.
+    工作进程启动前冻结准确路径和哈希。该清单是执行环境输入，
+    不是仓库文字提供的答案或授权。
     """
     root, files = Path(repo).resolve(), {}
     packages = package_roots(root)
     for relative, skip in _walk(root):
-        if skip or _reason(relative) or relative.suffix.lower() not in {".py", ".so", ".pyd", ".dll", ".dylib"}:
+        if (
+            skip
+            or _reason(relative)
+            or relative.suffix.lower() not in {".py", ".so", ".pyd", ".dll", ".dylib"}
+        ):
             continue
         name = relative.as_posix()
         if not any(name.startswith(package + "/") for package in packages):
@@ -34,16 +41,19 @@ def runtime_inventory(repo):
         digest, private = _inspect_file(path)
         if not private:
             files[name] = digest
-    return {"packages": packages, "files": files,
-            "sha256": hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()}
+    return {
+        "packages": packages,
+        "files": files,
+        "sha256": hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest(),
+    }
 
 
 def probe_runtime(environment, packages, directory, *, metadata_only=False):
-    """Inspect the actual backend; chat bootstrap never imports project modules."""
+    """检查真实执行后端；聊天开工准备不导入项目模块。"""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     modules = [] if metadata_only else sorted({Path(p).name for p in packages})
-    # ASCII script / JSON works on the original Python 3.6 ASCII-locale images.
+    # 使用 ASCII 脚本和 JSON，兼容原始 Python 3.6 镜像的 ASCII 区域设置。
     code = '''import importlib, importlib.util, json, shutil, sys, os
 if not METADATA_ONLY:
     sys.path[:0] = [os.getcwd(), os.path.join(os.getcwd(), "src")]
@@ -67,15 +77,27 @@ for name in ("pytest", "flake8", "ruff"):
         report["checkers"][name] = None
         report["checker_errors"][name] = type(exc).__name__ + ": " + str(exc)
 print(json.dumps(report))
-'''.replace("MODULES", repr(modules)).replace("METADATA_ONLY", repr(metadata_only))
+'''.replace(
+        "MODULES", repr(modules)
+    ).replace(
+        "METADATA_ONLY", repr(metadata_only)
+    )
     script = directory / "runtime_probe.py"
     script.write_text(code, encoding="ascii")
-    path = environment.host_to_container(script) if hasattr(environment, "host_to_container") else str(script)
+    path = (
+        environment.host_to_container(script)
+        if hasattr(environment, "host_to_container")
+        else str(script)
+    )
     stdout, stderr = directory / "stdout.log", directory / "stderr.log"
     flags = ["-I", "-B"] if metadata_only else ["-B"]
-    outcome = environment.run_process([environment.python_executable, *flags, path],
-        stdout_path=stdout, stderr_path=stderr, timeout=60,
-        **({"isolated_launcher": True} if metadata_only else {}))
+    outcome = environment.run_process(
+        [environment.python_executable, *flags, path],
+        stdout_path=stdout,
+        stderr_path=stderr,
+        timeout=60,
+        **({"isolated_launcher": True} if metadata_only else {}),
+    )
     report = {"process": outcome}
     if outcome.get("exit_code") == 0 and not outcome.get("timed_out") and not outcome.get("error"):
         try:
@@ -83,17 +105,32 @@ print(json.dumps(report))
         except (ValueError, IndexError):
             report["parse_error"] = "Runtime import probe did not return JSON."
     if metadata_only:
-        report["ok"] = (isinstance(report.get("python"), str) and bool(report["python"].strip())
+        report["ok"] = (
+            isinstance(report.get("python"), str)
+            and bool(report["python"].strip())
             and set(report.get("checkers", {})) == {"pytest", "flake8", "ruff"}
-            and all(value is None or isinstance(value, bool) for value in report["checkers"].values()))
+            and all(
+                value is None or isinstance(value, bool) for value in report["checkers"].values()
+            )
+        )
     else:
-        report["ok"] = bool(report.get("imports")) and all(v["ok"] for v in report.get("imports", {}).values())
+        report["ok"] = bool(report.get("imports")) and all(
+            v["ok"] for v in report.get("imports", {}).values()
+        )
     if report.get("python"):
-        facts = {"python": report["python"], "checkers": report.get("checkers", {}),
-            "note": "来自任务执行后端的开工检查；代码与测试须兼容此版本，修改环境后需要重新查证。"}
+        facts = {
+            "python": report["python"],
+            "checkers": report.get("checkers", {}),
+            "note": "来自任务执行后端的开工检查；代码与测试须兼容此版本，修改环境后需要重新查证。",
+        }
         if metadata_only:
-            facts = {**getattr(environment, "runtime_facts", {}), **facts,
-                     "checker_errors": report.get("checker_errors", {})}
+            facts = {
+                **getattr(environment, "runtime_facts", {}),
+                **facts,
+                "checker_errors": report.get("checker_errors", {}),
+            }
         environment.runtime_facts = facts
-    (directory / "report.json").write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
+    (directory / "report.json").write_text(
+        json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8"
+    )
     return report

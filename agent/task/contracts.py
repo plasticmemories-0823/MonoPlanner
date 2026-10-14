@@ -1,4 +1,5 @@
-"""Validated operations and work requests; no provider calls."""
+"""经过校验的操作与工作请求，不调用服务商。"""
+
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -10,8 +11,12 @@ class Operation(BaseModel):
     path: str = "."
     query: str = ""
     offset: int = Field(default=0, ge=0)
-    limit: int = Field(default=80, ge=1, le=2000,
-                       description='read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.')
+    limit: int = Field(
+        default=80,
+        ge=1,
+        le=2000,
+        description='read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.',
+    )
     from_step: str = ""
     command: str = Field(default="", max_length=30000)
     expected_exit: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=4)
@@ -26,7 +31,9 @@ class Operation(BaseModel):
     @model_validator(mode="after")
     def complete_parameters(self):
         if self.op != 'read' and self.limit > 1000:
-            raise ValueError('Only read accepts more than 1000 lines; other operation limits are unchanged')
+            raise ValueError(
+                'Only read accepts more than 1000 lines; other operation limits are unchanged'
+            )
         if self.op == "shell" and not self.command.strip():
             raise ValueError("shell requires actual executable commands, not a task description")
         if self.op == "search" and not self.query.strip():

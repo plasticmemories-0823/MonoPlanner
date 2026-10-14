@@ -1,4 +1,5 @@
-"""Default offline service isolation; individual tests can override both seams."""
+"""默认隔离离线服务；各测试可分别替换这两处边界。"""
+
 import os
 
 import pytest
@@ -7,20 +8,29 @@ from langchain_core.messages import AIMessage
 
 @pytest.fixture(autouse=True)
 def offline_conversation_service(tmp_path, monkeypatch):
-    monkeypatch.setenv('MONOPLANER_SERVICE_TOKEN', 'offline-instance-token-not-a-production-credential')
+    monkeypatch.setenv(
+        'MONOPLANER_SERVICE_TOKEN', 'offline-instance-token-not-a-production-credential'
+    )
     if 'MONOPLANER_STATE_DIR' not in os.environ:
         monkeypatch.setenv('MONOPLANER_STATE_DIR', str(tmp_path / 'conversation-state'))
     from agent.server import titles
 
     class OfflineTitleModel:
         def invoke(self, messages):
-            return AIMessage(content='离线会话标题验证', response_metadata={'finish_reason': 'stop'},
-                             usage_metadata={'input_tokens': 8, 'output_tokens': 4, 'total_tokens': 12,
-                                             'input_token_details': {'cache_read': 2}})
+            return AIMessage(
+                content='离线会话标题验证',
+                response_metadata={'finish_reason': 'stop'},
+                usage_metadata={
+                    'input_tokens': 8,
+                    'output_tokens': 4,
+                    'total_tokens': 12,
+                    'input_token_details': {'cache_read': 2},
+                },
+            )
 
     monkeypatch.setattr(titles, 'model_factory', OfflineTitleModel)
-    # Missing-environment conversation tests must never download production
-    # images. Managed preparation tests explicitly replace this boundary.
+    # 环境缺失的对话测试绝不能下载生产镜像。
+    # 托管环境准备测试会明确替换此处边界。
     from agent.execution import preparation
     from agent.execution.projects import EnvironmentRequired
 

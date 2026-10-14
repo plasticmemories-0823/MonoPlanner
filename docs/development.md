@@ -24,6 +24,8 @@
 
 从项目根目录运行 `scripts/start-app.ps1 -NoBrowser`。启动器同时启动受认证保护的前后端；后端不热重载。使用 `-BackendPort` 与 `-FrontendPort` 设置独立验证端口。不要替换正在运行的任务源码。
 
+便携版 EXE 可通过 `MONOPLANER_BACKEND_PORT` 与 `MONOPLANER_UI_PORT` 环境变量使用独立端口；未设置时仍为 2024 和 3000。桌面窗口跟随同一界面端口，不接受远程主机地址。
+
 浏览器固定通过同源 `/api` 访问后端，图 ID `monoplaner` 为兼容保留。后端凭证由启动器生成并用 DPAPI 保存；不设置 `NEXT_PUBLIC_API_URL` 或浏览器服务密钥。开发独立服务必须设置相同的实例凭证及端口，并使用本机代理入口；不要在 URL 或日志中放置凭证。
 
 ## CLI 与独立任务

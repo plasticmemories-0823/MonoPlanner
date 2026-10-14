@@ -1,4 +1,5 @@
-"""Immediate local directories for the workspace chooser; never read file contents."""
+"""为工作目录选择器列出当前层的本地目录，不读取文件内容。"""
+
 import os
 from pathlib import Path
 
@@ -7,8 +8,13 @@ def directory_page(value=''):
     if not value:
         drives = os.listdrives() if hasattr(os, 'listdrives') else [Path.home().anchor]
         roots = [Path.home(), *(Path(d) for d in drives)]
-        return {'path': '', 'parent': None, 'directories': [
-            {'name': str(p), 'path': str(p)} for p in dict.fromkeys(roots) if p.is_dir()]}
+        return {
+            'path': '',
+            'parent': None,
+            'directories': [
+                {'name': str(p), 'path': str(p)} for p in dict.fromkeys(roots) if p.is_dir()
+            ],
+        }
     folder = Path(value).expanduser()
     if not folder.is_absolute():
         raise ValueError('请输入完整的目录路径')
@@ -23,5 +29,8 @@ def directory_page(value=''):
                     directories.append({'name': entry.name, 'path': str(folder / entry.name)})
             except OSError:
                 continue
-    return {'path': str(folder), 'parent': str(folder.parent) if folder.parent != folder else '',
-            'directories': sorted(directories, key=lambda d: d['name'].casefold())}
+    return {
+        'path': str(folder),
+        'parent': str(folder.parent) if folder.parent != folder else '',
+        'directories': sorted(directories, key=lambda d: d['name'].casefold()),
+    }

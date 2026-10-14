@@ -1,4 +1,5 @@
-"""Settings persist without exposing credentials or changing active request policy."""
+"""设置可持久保存，不泄露凭据，也不改变当前请求策略。"""
+
 import json
 import os
 from pathlib import Path
@@ -28,7 +29,9 @@ class PreferencesTests(unittest.TestCase):
         if os.name != 'nt':
             self.skipTest('Windows DPAPI')
         value = 'offline-secret-中文-not-a-real-key'
-        public = self.preferences.update({'api_key': value, 'reasoning_effort': 'low', 'online': True})
+        public = self.preferences.update(
+            {'api_key': value, 'reasoning_effort': 'low', 'online': True}
+        )
         self.assertEqual(self.preferences.key(), value)
         self.assertNotIn(value, repr(public))
         self.assertNotIn(value.encode(), self.preferences.secret.read_bytes())
@@ -41,7 +44,13 @@ class PreferencesTests(unittest.TestCase):
     def test_invalid_policy_does_not_replace_existing_defaults_or_secret(self):
         self.preferences.update({'reasoning_effort': 'max'})
         before = self.preferences.path.read_bytes()
-        for value in [{'model_name': 'pro'}, {'reasoning_effort': 'medium'}, {'online': 'yes'}, {'unknown': 1}, {'api_key': 'bad\nkey'}]:
+        for value in [
+            {'model_name': 'pro'},
+            {'reasoning_effort': 'medium'},
+            {'online': 'yes'},
+            {'unknown': 1},
+            {'api_key': 'bad\nkey'},
+        ]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.preferences.update(value)
         self.assertEqual(self.preferences.path.read_bytes(), before)
@@ -49,6 +58,7 @@ class PreferencesTests(unittest.TestCase):
 
     def test_model_settings_use_saved_defaults_and_environment_fallback(self):
         from agent.settings import load_settings
+
         self.preferences.update({'reasoning_effort': 'none'})
         with patch('agent.storage.preferences.state_root', return_value=Path(self.temp.name)):
             value = load_settings()
@@ -58,13 +68,22 @@ class PreferencesTests(unittest.TestCase):
 
     def test_http_configuration_is_redacted_and_rejects_external_origin(self):
         from agent.server.app import app
-        with patch('agent.server.app.Preferences', return_value=self.preferences), TestClient(app) as client:
-            response = client.post('/settings', json={'reasoning_effort': 'low'}, headers={'origin': 'http://127.0.0.1:3000'})
+
+        with patch('agent.server.app.Preferences', return_value=self.preferences), TestClient(
+            app
+        ) as client:
+            response = client.post(
+                '/settings',
+                json={'reasoning_effort': 'low'},
+                headers={'origin': 'http://127.0.0.1:3000'},
+            )
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()['reasoning_effort'], 'low')
             self.assertNotIn('offline-environment', response.text)
             self.assertEqual(response.headers['cache-control'], 'no-store')
-            rejected = client.post('/settings', json={'online': True}, headers={'origin': 'https://external.example'})
+            rejected = client.post(
+                '/settings', json={'online': True}, headers={'origin': 'https://external.example'}
+            )
             self.assertEqual(rejected.status_code, 403)
             self.assertFalse(self.preferences.defaults()['online'])
             self.assertEqual(client.post('/settings', content='bad').status_code, 415)
@@ -72,10 +91,12 @@ class PreferencesTests(unittest.TestCase):
     def test_settings_filesystem_setup_never_runs_on_event_loop(self):
         import asyncio
         from agent.server.app import app
+
         def factory():
             with self.assertRaises(RuntimeError):
                 asyncio.get_running_loop()
             return self.preferences
+
         with patch('agent.server.app.Preferences', side_effect=factory), TestClient(app) as client:
             self.assertEqual(client.get('/settings').status_code, 200)
             self.assertEqual(client.post('/settings', json={'online': True}).status_code, 200)
@@ -83,15 +104,37 @@ class PreferencesTests(unittest.TestCase):
 
     def test_four_efforts_reach_real_sdk_wire_and_tools_stay_identical(self):
         bodies = []
+
         def respond(request):
             bodies.append(json.loads(request.content))
-            return httpx.Response(200, json={'id': 'offline', 'object': 'chat.completion', 'created': 1,
-                'model': 'deepseek-flash', 'choices': [{'index': 0, 'finish_reason': 'stop',
-                'message': {'role': 'assistant', 'content': 'offline'}}]})
+            return httpx.Response(
+                200,
+                json={
+                    'id': 'offline',
+                    'object': 'chat.completion',
+                    'created': 1,
+                    'model': 'deepseek-flash',
+                    'choices': [
+                        {
+                            'index': 0,
+                            'finish_reason': 'stop',
+                            'message': {'role': 'assistant', 'content': 'offline'},
+                        }
+                    ],
+                },
+            )
+
         for effort in ('none', 'low', 'high', 'max'):
-            with httpx.Client(transport=httpx.MockTransport(respond)) as client, \
-                    patch('agent.model.network.model_http_clients', return_value={'http_client': client}):
-                model = create_model({'model_name': 'deepseek-flash', 'api_key': 'offline', 'reasoning_effort': effort}).bind_tools(CHAT_TOOLS)
+            with httpx.Client(transport=httpx.MockTransport(respond)) as client, patch(
+                'agent.model.network.model_http_clients', return_value={'http_client': client}
+            ):
+                model = create_model(
+                    {
+                        'model_name': 'deepseek-flash',
+                        'api_key': 'offline',
+                        'reasoning_effort': effort,
+                    }
+                ).bind_tools(CHAT_TOOLS)
                 model.invoke([HumanMessage(content='hello')])
         self.assertEqual(bodies[0]['thinking']['type'], 'disabled')
         self.assertNotIn('reasoning_effort', bodies[0])
@@ -99,7 +142,19 @@ class PreferencesTests(unittest.TestCase):
             self.assertEqual(body['reasoning_effort'], effort)
             self.assertEqual(body['thinking']['type'], 'enabled')
         self.assertTrue(all(body['tools'] == bodies[0]['tools'] for body in bodies))
-        self.assertEqual([t['function']['name'] for t in bodies[0]['tools']],
-                             ['start_work', 'web_search', 'web_fetch',
-                              'list_files', 'read_file', 'search_files', 'run_existing',
-                              'list_applications', 'open_file', 'launch_application', 'request_file_operation'])
+        self.assertEqual(
+            [t['function']['name'] for t in bodies[0]['tools']],
+            [
+                'start_work',
+                'web_search',
+                'web_fetch',
+                'list_files',
+                'read_file',
+                'search_files',
+                'run_existing',
+                'list_applications',
+                'open_file',
+                'launch_application',
+                'request_file_operation',
+            ],
+        )

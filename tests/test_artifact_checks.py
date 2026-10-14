@@ -1,4 +1,4 @@
-"""Fixed consumer checks must defeat a green but misleading generated test suite."""
+"""固定的使用方检查必须识破通过却具有误导性的生成测试。"""
 
 import json
 from pathlib import Path
@@ -7,15 +7,25 @@ import unittest
 from unittest.mock import patch
 
 from agent.execution.local import LocalEnvironment
-from agent.acceptance.artifact_checks import load_artifact_checks, required_consumer, requested_calls
+from agent.acceptance.artifact_checks import (
+    load_artifact_checks,
+    required_consumer,
+    requested_calls,
+)
 from agent.task.budget import StepBudget
 from agent.acceptance.runner import AcceptanceRun
 from agent.acceptance.contracts import VerificationSpec
 
 
-CHECK = {'id': 'generated', 'kind': 'c_expression',
-         'imports': 'from generator import render', 'setup': '', 'expression': 'render()',
-         'variables': ['x'], 'cases': [{'values': [0.0], 'expected': 1.0}]}
+CHECK = {
+    'id': 'generated',
+    'kind': 'c_expression',
+    'imports': 'from generator import render',
+    'setup': '',
+    'expression': 'render()',
+    'variables': ['x'],
+    'cases': [{'values': [0.0], 'expected': 1.0}],
+}
 TEST = '''import unittest
 from generator import render
 class OutputTests(unittest.TestCase):
@@ -36,8 +46,10 @@ class ArtifactTests(unittest.TestCase):
         self.root = Path(directory.name)
         self.repo = self.root / 'repo'
         self.repo.mkdir()
-        (self.repo / 'generator.py').write_text('def render():\n    return "Missing(x)"\n', encoding='utf-8')
-        self.environment = LocalEnvironment(self.repo, artifact_root=self.root/'commands')
+        (self.repo / 'generator.py').write_text(
+            'def render():\n    return "Missing(x)"\n', encoding='utf-8'
+        )
+        self.environment = LocalEnvironment(self.repo, artifact_root=self.root / 'commands')
 
     def test_only_explicit_c_output_requires_supported_consumer(self):
         self.assertEqual(required_consumer('Fix generated C code from render()'), 'c_expression')
@@ -49,11 +61,15 @@ class ArtifactTests(unittest.TestCase):
             VerificationSpec(('C output',), test_code=TEST, required_consumer='c_expression')
 
     def test_no_replacement_wrapper_producer_override_or_invalid_values(self):
-        for fields in ({'expression': "render().replace('Missing(x)', 'x + 1')"},
-                       {'setup': "render = lambda: 'x + 1'"},
-                       {'variables': [[]]}, {'kind': 'pretend_c'},
-                       {'imports': 'from generator import *'},
-                       {'expression': 'render('}, {'cases': [{'values': [], 'expected': 1.0}]}):
+        for fields in (
+            {'expression': "render().replace('Missing(x)', 'x + 1')"},
+            {'setup': "render = lambda: 'x + 1'"},
+            {'variables': [[]]},
+            {'kind': 'pretend_c'},
+            {'imports': 'from generator import *'},
+            {'expression': 'render('},
+            {'cases': [{'values': [], 'expected': 1.0}]},
+        ):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 load_artifact_checks(code({**CHECK, **fields}), 'c_expression')
         self.assertEqual(load_artifact_checks(code()), [CHECK])
@@ -63,55 +79,86 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(set(required), {'render', 'Node'})
         with self.assertRaisesRegex(ValueError, '调用链'):
             load_artifact_checks(code(), 'c_expression', required)
-        valid = {**CHECK, 'imports':'from generator import render, Node as N',
-                 'setup':'input_node = N(0)', 'expression':'render(input_node)'}
+        valid = {
+            **CHECK,
+            'imports': 'from generator import render, Node as N',
+            'setup': 'input_node = N(0)',
+            'expression': 'render(input_node)',
+        }
         self.assertEqual(load_artifact_checks(code(valid), 'c_expression', required), [valid])
-        irrelevant = {**valid, 'expression':'render()'}
+        irrelevant = {**valid, 'expression': 'render()'}
         with self.assertRaisesRegex(ValueError, '调用链'):
             load_artifact_checks(code(irrelevant), 'c_expression', required)
 
     def test_input_comparisons_and_unpacking_do_not_transform_raw_output(self):
-        check = {**CHECK, 'setup':'x, y = (1, 2)', 'expression':'render(x < y)'}
+        check = {**CHECK, 'setup': 'x, y = (1, 2)', 'expression': 'render(x < y)'}
         self.assertEqual(load_artifact_checks(code(check)), [check])
 
     @staticmethod
     def consumer(checks, environment, directory, timeout):
-        assert checks == [CHECK]  # The model test cleared its own list, not this copy.
-        valid = 'Missing' not in (environment.repo_root/'generator.py').read_text(encoding='utf-8')
-        return [{'id':'artifact:generated:compile', 'status':'passed' if valid else 'failed',
-                 'detail':'' if valid else "implicit declaration of function 'Missing'"},
-                {'id':'artifact:generated:case:0', 'status':'passed' if valid else 'not_run', 'detail':''}]
+        assert checks == [CHECK]  # 模型生成的测试清空的是它自己的列表，此副本不受影响。
+        valid = 'Missing' not in (environment.repo_root / 'generator.py').read_text(
+            encoding='utf-8'
+        )
+        return [
+            {
+                'id': 'artifact:generated:compile',
+                'status': 'passed' if valid else 'failed',
+                'detail': '' if valid else "implicit declaration of function 'Missing'",
+            },
+            {
+                'id': 'artifact:generated:case:0',
+                'status': 'passed' if valid else 'not_run',
+                'detail': '',
+            },
+        ]
 
     def test_raw_failure_overrides_green_model_tests(self):
-        spec = VerificationSpec(('Valid raw C output',), test_code=code(), required_consumer='c_expression')
-        run = AcceptanceRun(self.repo, spec, self.root/'acceptance', environment=self.environment)
+        spec = VerificationSpec(
+            ('Valid raw C output',), test_code=code(), required_consumer='c_expression'
+        )
+        run = AcceptanceRun(self.repo, spec, self.root / 'acceptance', environment=self.environment)
         with patch('agent.acceptance.runner.run_artifact_checks', side_effect=self.consumer):
             report = run.run('candidate')
         self.assertEqual(report['status'], 'failed')
         self.assertEqual(report['test_results'][0]['status'], 'passed')
         self.assertEqual(report['artifact_results'][0]['status'], 'failed')
         self.assertIn('Missing', report['artifact_results'][0]['detail'])
-        self.assertTrue(report['tests_ready'], 'A recorded compile failure is usable candidate evidence')
+        self.assertTrue(
+            report['tests_ready'], 'A recorded compile failure is usable candidate evidence'
+        )
 
     def test_unexplained_consumer_not_run_does_not_make_tests_ready(self):
         for compile_status in ('passed', 'error'):
             with self.subTest(compile_status=compile_status):
-                rows = [{'id':'artifact:generated:compile', 'status':compile_status, 'detail':''},
-                        {'id':'artifact:generated:case:0', 'status':'not_run', 'detail':''}]
-                run = AcceptanceRun(self.repo, VerificationSpec(('C output',), test_code=code()),
-                                    self.root/'acceptance', environment=self.environment)
+                rows = [
+                    {'id': 'artifact:generated:compile', 'status': compile_status, 'detail': ''},
+                    {'id': 'artifact:generated:case:0', 'status': 'not_run', 'detail': ''},
+                ]
+                run = AcceptanceRun(
+                    self.repo,
+                    VerificationSpec(('C output',), test_code=code()),
+                    self.root / 'acceptance',
+                    environment=self.environment,
+                )
                 with patch('agent.acceptance.runner.run_artifact_checks', return_value=rows):
                     report = run.run('baseline')
                 self.assertFalse(report['tests_ready'])
 
     def test_missing_consumer_result_cannot_reuse_green_status(self):
-        run = AcceptanceRun(self.repo, VerificationSpec(('C output',), test_code=code()),
-                            self.root/'acceptance', environment=self.environment)
-        with patch('agent.acceptance.runner.run_artifact_checks', side_effect=RuntimeError('consumer missing')):
+        run = AcceptanceRun(
+            self.repo,
+            VerificationSpec(('C output',), test_code=code()),
+            self.root / 'acceptance',
+            environment=self.environment,
+        )
+        with patch(
+            'agent.acceptance.runner.run_artifact_checks',
+            side_effect=RuntimeError('consumer missing'),
+        ):
             report = run.run('candidate')
         self.assertEqual(report['status'], 'error')
         self.assertFalse(report['test_evidence_valid'])
-
 
 
 if __name__ == '__main__':

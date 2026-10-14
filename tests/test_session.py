@@ -1,4 +1,5 @@
-"""Workspace switching, one-use acceptance and append-only conversation remain usable."""
+"""工作目录切换、单次验收授权和仅追加的对话记录仍可使用。"""
+
 from contextlib import redirect_stderr, redirect_stdout
 import io
 from pathlib import Path
@@ -25,34 +26,66 @@ class SessionTests(unittest.TestCase):
 
     def run_cli(self, args, inputs):
         calls = []
+
         def turn(agent, history, text, max_steps, verify_command=None, acceptance=None):
             calls.append((text, verify_command, acceptance, Path(agent.repo), list(history)))
-            return {"status": "verified_success", "messages": [*history, HumanMessage(content=text), AIMessage(content="done")]}
-        with patch.object(cli, "load_model", return_value=object()) as loader, patch.object(cli, "run_one_turn", side_effect=turn), \
-                patch("builtins.input", side_effect=inputs), redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            return {
+                "status": "verified_success",
+                "messages": [*history, HumanMessage(content=text), AIMessage(content="done")],
+            }
+
+        with patch.object(cli, "load_model", return_value=object()) as loader, patch.object(
+            cli, "run_one_turn", side_effect=turn
+        ), patch("builtins.input", side_effect=inputs), redirect_stdout(
+            io.StringIO()
+        ) as out, redirect_stderr(
+            io.StringIO()
+        ) as err:
             result = cli.main(args)
         return result, calls, loader, out.getvalue(), err.getvalue()
 
     def test_history_appends_and_clear_resets(self):
-        result, calls, loader, _, errors = self.run_cli(["--repo", str(self.a)], ["one", "two", "/clear", "three", "/exit"])
+        result, calls, loader, _, errors = self.run_cli(
+            ["--repo", str(self.a)], ["one", "two", "/clear", "three", "/exit"]
+        )
         self.assertEqual(result, 0, errors)
         self.assertEqual([m.content for m in calls[1][4]], ["one", "done"])
         self.assertEqual(calls[2][4], [])
         self.assertEqual(loader.call_count, 1)
 
     def test_acceptance_is_one_use_and_switches_only_after_valid_repo(self):
-        result, calls, _, _, errors = self.run_cli(["--repo", str(self.a), "--verify-command", "INITIAL", "--acceptance", "RULE"],
-            ["first", "second", "/verify-command CUSTOM", "/acceptance EXTRA", "/repo " + str(self.root / "missing"),
-             "third", "/acceptance STALE", "/repo " + str(self.b), "fourth", "/exit"])
+        result, calls, _, _, errors = self.run_cli(
+            ["--repo", str(self.a), "--verify-command", "INITIAL", "--acceptance", "RULE"],
+            [
+                "first",
+                "second",
+                "/verify-command CUSTOM",
+                "/acceptance EXTRA",
+                "/repo " + str(self.root / "missing"),
+                "third",
+                "/acceptance STALE",
+                "/repo " + str(self.b),
+                "fourth",
+                "/exit",
+            ],
+        )
         self.assertEqual(result, 0, errors)
-        self.assertEqual([(t, c, a, r) for t, c, a, r, h in calls],
-            [("first", "INITIAL", "RULE", self.a), ("second", None, None, self.a),
-             ("third", "CUSTOM", "EXTRA", self.a), ("fourth", None, None, self.b)])
+        self.assertEqual(
+            [(t, c, a, r) for t, c, a, r, h in calls],
+            [
+                ("first", "INITIAL", "RULE", self.a),
+                ("second", None, None, self.a),
+                ("third", "CUSTOM", "EXTRA", self.a),
+                ("fourth", None, None, self.b),
+            ],
+        )
         self.assertEqual(calls[-1][4], [])
         self.assertEqual(Path(workspace.load_saved_repo()), self.b)
 
     def test_restart_remembers_repository_but_not_conversation(self):
-        first = self.run_cli([], [str(self.root / "missing"), '"' + str(self.a) + '"', "old", "/exit"])
+        first = self.run_cli(
+            [], [str(self.root / "missing"), '"' + str(self.a) + '"', "old", "/exit"]
+        )
         self.assertEqual(first[0], 0)
         second = self.run_cli([], ["fresh", "/exit"])
         self.assertEqual(second[0], 0)
@@ -60,13 +93,17 @@ class SessionTests(unittest.TestCase):
 
     def test_corrupt_preferences_can_be_replaced(self):
         self.state.write_text("{broken", encoding="utf-8")
-        result, calls, loader, _, errors = self.run_cli([], [str(self.b), "/help", "/repo", "/unknown", "/exit"])
+        result, calls, loader, _, errors = self.run_cli(
+            [], [str(self.b), "/help", "/repo", "/unknown", "/exit"]
+        )
         self.assertEqual(result, 0, errors)
         loader.assert_not_called()
         self.assertEqual(calls, [])
         self.assertEqual(Path(workspace.load_saved_repo()), self.b)
 
     def test_check_without_saved_repo_does_not_prompt_or_change_preferences(self):
-        with patch("builtins.input", side_effect=AssertionError("must not prompt")), redirect_stderr(io.StringIO()):
+        with patch(
+            "builtins.input", side_effect=AssertionError("must not prompt")
+        ), redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(["--check-workspace"]), 1)
         self.assertFalse(self.state.exists())

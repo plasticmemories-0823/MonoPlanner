@@ -1,4 +1,4 @@
-"""Summarize saved evidence. Never infer official success from an Agent answer."""
+"""汇总保存的证据，不能根据 Agent 的文字回复推断官方通过。"""
 
 import argparse
 from collections import Counter
@@ -17,12 +17,16 @@ def summarize(run_dir, official_reports=()):
         if "resolved_ids" not in report:
             raise ValueError(f"Not an official aggregate evaluation report: {path}")
         test_completed.update(report.get("completed_ids", []))
-        for key, status in (("resolved_ids", "resolved"), ("unresolved_ids", "unresolved"),
-                            ("error_ids", "grading_error"), ("empty_patch_ids", "empty_patch")):
+        for key, status in (
+            ("resolved_ids", "resolved"),
+            ("unresolved_ids", "unresolved"),
+            ("error_ids", "grading_error"),
+            ("empty_patch_ids", "empty_patch"),
+        ):
             for instance_id in report.get(key, []):
                 previous = official.get(instance_id)
                 if previous and previous != status:
-                    # Some harness versions list empty patches among unresolved.
+                    # 部分评测框架版本会把空补丁也列为未解决。
                     if {previous, status} <= {"unresolved", "empty_patch"}:
                         status = "empty_patch"
                     else:
@@ -33,8 +37,9 @@ def summarize(run_dir, official_reports=()):
         row = dict(saved)
         row["official_status"] = official.get(row["instance_id"], "not_scored")
         row["official_resolved"] = (
-            True if row["official_status"] == "resolved" else
-            False if row["official_status"] in {"unresolved", "empty_patch"} else None
+            True
+            if row["official_status"] == "resolved"
+            else False if row["official_status"] in {"unresolved", "empty_patch"} else None
         )
         input_sizes, cache_tokens = [], 0
         phase_calls, phase_tokens = Counter(), Counter()
@@ -46,9 +51,15 @@ def summarize(run_dir, official_reports=()):
             if request_path.exists():
                 request = json.loads(request_path.read_text(encoding="utf-8"))
                 system = request["messages"][0]["data"]["content"]
-                phase = ("report" if "【当前阶段：最终汇报】" in system else
-                         "preparation" if "【当前阶段：任务识别和验收准备】" in system else
-                         "review" if "【当前阶段：验收复查】" in system else "worker")
+                phase = (
+                    "report"
+                    if "【当前阶段：最终汇报】" in system
+                    else (
+                        "preparation"
+                        if "【当前阶段：任务识别和验收准备】" in system
+                        else "review" if "【当前阶段：验收复查】" in system else "worker"
+                    )
+                )
                 phase_calls[phase] += 1
                 phase_tokens[phase] += usage.get("total_tokens", 0) or 0
             if isinstance(usage.get("input_tokens"), int):
@@ -64,19 +75,26 @@ def summarize(run_dir, official_reports=()):
     scored = [row for row in rows if row["official_resolved"] is not None]
     resolved = sum(row["official_resolved"] is True for row in rows)
     return {
-        "run_directory": str(run_dir), "official_reports": [str(Path(p).resolve()) for p in official_reports],
-        "selected_tasks": len(rows), "officially_scored_tasks": len(scored),
+        "run_directory": str(run_dir),
+        "official_reports": [str(Path(p).resolve()) for p in official_reports],
+        "selected_tasks": len(rows),
+        "officially_scored_tasks": len(scored),
         "official_test_completed_tasks": sum(row["official_test_completed"] for row in rows),
         "officially_resolved_tasks": resolved,
-        # A missing grading result is not a failed repair, nor a successful one.
-        "complete_sample_resolve_rate": resolved / len(rows) if len(scored) == len(rows) and rows else None,
+        # 缺少评分结果不能被解释为修复失败，也不能被解释为成功。
+        "complete_sample_resolve_rate": (
+            resolved / len(rows) if len(scored) == len(rows) and rows else None
+        ),
         "internal_accepts": sum(row["agent_status"] == "verified_success" for row in rows),
-        "false_accepts_against_official_tests": sum(row["agent_status"] == "verified_success"
-            and row["official_resolved"] is False for row in rows),
+        "false_accepts_against_official_tests": sum(
+            row["agent_status"] == "verified_success" and row["official_resolved"] is False
+            for row in rows
+        ),
         "reported_tokens": sum(row.get("reported_tokens", 0) for row in rows),
         "sent_model_calls": sum(row.get("sent_model_calls", 0) for row in rows),
         "unknown_usage_calls": sum(row.get("unknown_usage_calls", 0) for row in rows),
-        "tool_requests": dict(tools), "tasks": rows,
+        "tool_requests": dict(tools),
+        "tasks": rows,
     }
 
 
@@ -91,8 +109,13 @@ def main(argv=None):
         parser.error("Use a new output file; previous analyses are retained.")
     analysis = summarize(args.run_dir, args.official_report)
     write_json(output, analysis)
-    print(json.dumps({key: value for key, value in analysis.items() if key != "tasks"},
-                     ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {key: value for key, value in analysis.items() if key != "tasks"},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

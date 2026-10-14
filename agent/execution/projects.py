@@ -1,8 +1,9 @@
-"""Project preferences and immutable task execution bindings.
+"""保存项目偏好，并为任务冻结不可变的执行环境绑定。
 
-Looking up a project is read-only. Automatic preparation is reserved for the
-first actual execution, or an explicit prepare action in the project window.
+查询项目只读取配置。自动准备只在首次实际执行，或用户在项目窗口
+明确点击准备时启动。
 """
+
 import json
 import os
 from pathlib import Path
@@ -23,11 +24,19 @@ _preferences_lock = RLock()
 
 def docker_query(arguments):
     try:
-        result = subprocess.run([docker_executable(), *arguments], capture_output=True, text=True,
-            encoding='utf-8', errors='replace', timeout=20,
-            **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
+        result = subprocess.run(
+            [docker_executable(), *arguments],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=20,
+            **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}),
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise EnvironmentRequired('Docker 不可用，请安装并启动 Docker 后重试；不会使用本机执行。') from exc
+        raise EnvironmentRequired(
+            'Docker 不可用，请安装并启动 Docker 后重试；不会使用本机执行。'
+        ) from exc
     if result.returncode:
         raise EnvironmentRequired('Docker 查询失败：' + result.stderr.strip()[:500])
     return result.stdout
@@ -35,8 +44,13 @@ def docker_query(arguments):
 
 def local_images():
     docker_query(['info', '--format', '{{.OSType}}'])
-    images = [json.loads(line) for line in docker_query(['image', 'ls', '--no-trunc',
-              '--format', '{{json .}}']).splitlines() if line.strip()]
+    images = [
+        json.loads(line)
+        for line in docker_query(
+            ['image', 'ls', '--no-trunc', '--format', '{{json .}}']
+        ).splitlines()
+        if line.strip()
+    ]
     grouped = {}
     for row in images:
         image = grouped.setdefault(row['ID'], {'id': row['ID'], 'names': [], 'size': row['Size']})
@@ -54,7 +68,7 @@ def workspace_path(repo):
 
 class ProjectEnvironments:
     def __init__(self, root=None):
-        self.path = (Path(root) if root else state_root())/'project-environments.json'
+        self.path = (Path(root) if root else state_root()) / 'project-environments.json'
 
     def get(self, repo):
         if not repo:
@@ -71,21 +85,29 @@ class ProjectEnvironments:
             raise ValueError('请选择本机已有镜像的完整 ID')
         runtime = runtime_profile(value['runtime'])
         inspected = json.loads(docker_query(['image', 'inspect', image]))[0]
-        if inspected['Id'] != image or inspected['Os'] != 'linux' or inspected['Architecture'] != 'amd64':
+        if (
+            inspected['Id'] != image
+            or inspected['Os'] != 'linux'
+            or inspected['Architecture'] != 'amd64'
+        ):
             raise ValueError('当前执行后端需要本机已有的 Linux amd64 镜像')
         with _preferences_lock:
             values = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {}
             values[repo] = {'backend': 'docker', 'image': image, 'runtime': runtime}
-            atomic_write(self.path, json.dumps(values, ensure_ascii=False, indent=2).encode('utf-8'))
+            atomic_write(
+                self.path, json.dumps(values, ensure_ascii=False, indent=2).encode('utf-8')
+            )
         return values[repo]
 
     def automatic(self, repo):
-        """Reset future executions only; task checkpoints keep their own image."""
+        """只重置后续执行的配置；已有任务检查点保留自己的镜像。"""
         repo = workspace_path(repo)
         with _preferences_lock:
             values = json.loads(self.path.read_text(encoding='utf-8')) if self.path.exists() else {}
             values.pop(repo, None)
-            atomic_write(self.path, json.dumps(values, ensure_ascii=False, indent=2).encode('utf-8'))
+            atomic_write(
+                self.path, json.dumps(values, ensure_ascii=False, indent=2).encode('utf-8')
+            )
         return {'backend': 'docker'}
 
 
@@ -111,9 +133,10 @@ def require_binding(repo, binding=None):
 
 
 def prepare_binding(repo, *, progress=None, cancelled=None):
-    """Resolve the latest project preference before the first execution only."""
+    """仅在首次执行前读取最新的项目偏好。"""
     selected = workspace_binding(repo)
     if selected.get('image'):
         return require_binding(repo, selected)
     from agent.execution.preparation import ensure_prepared
+
     return require_binding(repo, ensure_prepared(repo, progress=progress, cancelled=cancelled))

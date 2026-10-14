@@ -1,9 +1,11 @@
-"""Render bounded source excerpts for repository navigation."""
+"""为仓库导航渲染有大小限制的源码摘录。"""
+
 import hashlib
 from pathlib import Path
 from agent.source.snapshots import _safe_file
 
 MAX_FILE_BYTES = 512 * 1024
+
 
 def _code_excerpt(self, name, line, count, max_chars):
     entry = self.entries[name]
@@ -28,7 +30,17 @@ def _code_excerpt(self, name, line, count, max_chars):
         rows.append(row)
         size += len(row) + 1
     actual_end = start + len(rows) - 1
-    return {"path": name, "start_line": start, "end_line": actual_end,
-            "source_sha256": entry["digest"], "text": "\n".join(rows),
-            "truncated": actual_end < (symbol["end_line"] if symbol else len(lines)),
-            "read_hint": {"mode": "read", "path": name, "offset": max(start - 1, actual_end), "limit": count}}
+    return {
+        "path": name,
+        "start_line": start,
+        "end_line": actual_end,
+        "source_sha256": entry["digest"],
+        "text": "\n".join(rows),
+        "truncated": actual_end < (symbol["end_line"] if symbol else len(lines)),
+        "read_hint": {
+            "mode": "read",
+            "path": name,
+            "offset": max(start - 1, actual_end),
+            "limit": count,
+        },
+    }

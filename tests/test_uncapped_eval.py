@@ -8,16 +8,30 @@ from agent.model.errors import ModelRequestNotSent
 
 class UncappedEvaluationTests(unittest.TestCase):
     def test_zero_limits_disable_both_ceilings(self):
-        args = parse_args(["--tasks", "tasks.json", "--images", "images.json",
-                           "--run-dir", "run", "--token-limit", "0", "--task-token-limit", "0"])
+        args = parse_args(
+            [
+                "--tasks",
+                "tasks.json",
+                "--images",
+                "images.json",
+                "--run-dir",
+                "run",
+                "--token-limit",
+                "0",
+                "--task-token-limit",
+                "0",
+            ]
+        )
         self.assertIsNone(args.token_limit)
         self.assertIsNone(args.task_token_limit)
 
     def test_unlimited_ledger_still_accounts_and_reserves_unknown_usage(self):
         ledger = TokenLedger(limit=None)
         ledger.reserve(2_000_000)
-        ledger.settle({"total_tokens": 1_200_000, "input_tokens": 1_100_000,
-                       "output_tokens": 100_000}, 2_000_000)
+        ledger.settle(
+            {"total_tokens": 1_200_000, "input_tokens": 1_100_000, "output_tokens": 100_000},
+            2_000_000,
+        )
         ledger.reserve(3_000_000)
         self.assertEqual(ledger.reported_tokens, 1_200_000)
         self.assertEqual(ledger.reserved_unknown_tokens, 3_000_000)

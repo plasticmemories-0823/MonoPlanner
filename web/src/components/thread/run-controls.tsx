@@ -20,6 +20,7 @@ export function statusLabel(status?: string) {
         awaiting_user: "等待补充或继续",
         task_blocked: "任务受阻",
         runtime_error: "任务已停止，运行记录已保留",
+        output_limit_reached: "回复达到输出上限，等待手动继续",
         model_request_unknown: "模型请求结果未确认，已保留记录",
         web_request_unknown: "联网请求结果未确认，已保留记录",
         execution_unknown: "操作结果未确认，已保留记录",
@@ -42,17 +43,22 @@ export function useRunControls(
   const [queued, setQueued] = useState<Message[]>([]);
   const [pauseRequested, setPauseRequested] = useState(false);
   const attempted = useRef("");
+  const resumeRequest = useRef<string | null>(null);
+  const resuming = useRef(false);
   const pendingMessages = queued.filter(
     (m) => !(stream.values.messages || []).some((v) => v.id === m.id),
   );
 
   useEffect(() => {
     if (!stream.isLoading) setPauseRequested(false);
+    if (stream.isLoading) resumeRequest.current = null;
   }, [stream.isLoading]);
 
   useEffect(() => {
     setQueued([]);
     attempted.current = "";
+    resumeRequest.current = null;
+    resuming.current = false;
     if (!threadId) return;
     let cancelled = false;
     fetch(`${stream.apiUrl}/threads/${threadId}/control`)
@@ -83,8 +89,8 @@ export function useRunControls(
     const first = pendingMessages[0];
     if (attempted.current === first.id) return;
     attempted.current = first.id!;
-    // A message can arrive after the final graph node. Drain its saved ID only
-    // after that run closes; the backend deduplicates already applied input.
+    // 消息可能在图的最后一个节点结束后到达；仅在该次运行关闭后
+    // 处理已保存的消息 ID，后端会对已经应用的输入去重。
     stream.submit({ messages: [first], repo: stream.values.repo }, options);
   }, [
     stream.isLoading,
@@ -124,7 +130,15 @@ export function useRunControls(
     }
   }
   async function resume() {
-    if (await control("resume")) stream.submit({ messages: [] }, options);
+    if (resuming.current) return;
+    resuming.current = true;
+    resumeRequest.current ||= uuid();
+    try {
+      if (await control("resume", undefined, resumeRequest.current))
+        await stream.submit({ messages: [] }, options);
+    } finally {
+      resuming.current = false;
+    }
   }
   return { pendingMessages, queueMessage, pause, resume, pauseRequested };
 }

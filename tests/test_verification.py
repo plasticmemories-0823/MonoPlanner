@@ -17,7 +17,8 @@ def acceptance_code(body="self.assertEqual(2 + 2, 4)", decorator=""):
         "import unittest\n\nclass AcceptanceTests(unittest.TestCase):\n"
         + (f"    {decorator}\n" if decorator else "")
         + "    def test_behavior(self):\n"
-        + "\n".join(f"        {line}" for line in body.splitlines()) + "\n"
+        + "\n".join(f"        {line}" for line in body.splitlines())
+        + "\n"
     )
 
 
@@ -31,9 +32,18 @@ class VerificationTests(unittest.TestCase):
         self.artifacts = self.root / "runs"
 
     def runner(self, *, code=None, command=None, timeout=120):
-        spec = VerificationSpec(("满足可验证的行为要求",), command=command,
-                                test_code=acceptance_code() if code is None and command is None else code)
-        return AcceptanceRun(self.repo, spec, self.artifacts, timeout, environment=LocalEnvironment(self.repo, artifact_root=self.artifacts))
+        spec = VerificationSpec(
+            ("满足可验证的行为要求",),
+            command=command,
+            test_code=acceptance_code() if code is None and command is None else code,
+        )
+        return AcceptanceRun(
+            self.repo,
+            spec,
+            self.artifacts,
+            timeout,
+            environment=LocalEnvironment(self.repo, artifact_root=self.artifacts),
+        )
 
     def test_generated_tests_pass_and_save_evidence(self):
         runner = self.runner()
@@ -42,7 +52,9 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(result["tests_run"], 1)
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(result["failures"], 0)
-        saved = json.loads((runner.artifact_dir / "baseline.result.json").read_text(encoding="utf-8"))
+        saved = json.loads(
+            (runner.artifact_dir / "baseline.result.json").read_text(encoding="utf-8")
+        )
         self.assertEqual(saved, result)
         self.assertIn("test_behavior", result["stderr"])
         self.assertFalse(runner.artifact_dir.is_relative_to(self.repo))
@@ -60,7 +72,9 @@ class VerificationTests(unittest.TestCase):
     def test_same_frozen_tests_check_before_and_after_repository_change(self):
         module = self.repo / "sample_app.py"
         module.write_text("VALUE = 3\n", encoding="utf-8")
-        runner = self.runner(code=acceptance_code("from sample_app import VALUE\nself.assertEqual(VALUE, 4)"))
+        runner = self.runner(
+            code=acceptance_code("from sample_app import VALUE\nself.assertEqual(VALUE, 4)")
+        )
         before = runner.run("baseline")
         module.write_text("VALUE = 4\n", encoding="utf-8")
         after = runner.run("final")
@@ -77,14 +91,18 @@ class VerificationTests(unittest.TestCase):
         module.write_text("VALUE = 4\n", encoding="utf-8")
         os.utime(module, (1700000000, 1700000000))
 
-        runner = self.runner(code=acceptance_code("from cached_app import VALUE\nself.assertEqual(VALUE, 4)"))
+        runner = self.runner(
+            code=acceptance_code("from cached_app import VALUE\nself.assertEqual(VALUE, 4)")
+        )
         result = runner.run("final")
 
         self.assertEqual(result["status"], "passed", result["stderr"])
         self.assertEqual(cached_path.read_bytes(), cached_bytes)
 
     def test_generated_runtime_error_is_distinct_from_assertion_failure(self):
-        result = self.runner(code=acceptance_code("import module_that_does_not_exist_for_test")).run("final")
+        result = self.runner(
+            code=acceptance_code("import module_that_does_not_exist_for_test")
+        ).run("final")
         self.assertEqual(result["status"], "error")
         self.assertEqual(result["errors"], 1)
 
@@ -114,9 +132,12 @@ class VerificationTests(unittest.TestCase):
         self.assertFalse(result["tests_ready"])
 
     def test_skips_expected_failures_and_zero_discovered_tests_never_pass(self):
-        codes = [acceptance_code(decorator="@unittest.skip('not implemented')"),
-                 acceptance_code("self.fail('TODO')", "@unittest.expectedFailure"),
-                 acceptance_code() + "\ndef load_tests(loader, tests, pattern):\n    return unittest.TestSuite()\n"]
+        codes = [
+            acceptance_code(decorator="@unittest.skip('not implemented')"),
+            acceptance_code("self.fail('TODO')", "@unittest.expectedFailure"),
+            acceptance_code()
+            + "\ndef load_tests(loader, tests, pattern):\n    return unittest.TestSuite()\n",
+        ]
         for code in codes:
             with self.subTest(code=code):
                 result = self.runner(code=code).run("final")
@@ -129,7 +150,9 @@ class VerificationTests(unittest.TestCase):
     def test_user_command_uses_exit_code_without_inventing_test_counts(self):
         for exit_code in (0, 7):
             with self.subTest(exit_code=exit_code):
-                command = subprocess.list2cmdline([sys.executable, "-B", "-c", f"raise SystemExit({exit_code})"])
+                command = subprocess.list2cmdline(
+                    [sys.executable, "-B", "-c", f"raise SystemExit({exit_code})"]
+                )
                 result = self.runner(command=command).run("final")
                 self.assertEqual(result["status"], "passed" if exit_code == 0 else "failed")
                 self.assertEqual(result["exit_code"], exit_code)
@@ -165,12 +188,17 @@ class VerificationTests(unittest.TestCase):
         self.assertIn("执行期间", result["reason"])
 
     def test_logs_are_full_on_disk_but_summaries_are_bounded(self):
-        result = self.runner(code=acceptance_code("print('A' * 20000)\nself.assertTrue(True)")).run("final")
+        result = self.runner(code=acceptance_code("print('A' * 20000)\nself.assertTrue(True)")).run(
+            "final"
+        )
         self.assertEqual(result["status"], "passed")
         self.assertLess(len(result["stdout"]), 6100)
         self.assertGreater(Path(result["stdout_log"]).stat().st_size, 20000)
-        self.assertEqual(result["stdout"], "[前文已截断；完整内容见日志]\n" +
-                         Path(result["stdout_log"]).read_bytes()[-6000:].decode("utf-8", errors="replace"))
+        self.assertEqual(
+            result["stdout"],
+            "[前文已截断；完整内容见日志]\n"
+            + Path(result["stdout_log"]).read_bytes()[-6000:].decode("utf-8", errors="replace"),
+        )
 
     def test_phase_names_cannot_escape_artifact_directory(self):
         runner = self.runner()

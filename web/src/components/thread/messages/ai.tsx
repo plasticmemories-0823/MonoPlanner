@@ -4,7 +4,7 @@ import { CommandBar } from "./shared";
 import { MarkdownText } from "../markdown-text";
 import { memo } from "react";
 
-// Public graph messages carry no tool parameters or private diagnostics.
+// 公开的图消息不包含工具参数或私有诊断信息。
 export const AssistantMessage = memo(function AssistantMessage({
   message,
   isLoading,

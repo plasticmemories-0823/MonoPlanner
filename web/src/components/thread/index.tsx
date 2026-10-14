@@ -116,11 +116,11 @@ export function Thread() {
     try {
       const message = (stream.error as any).message;
       if (!message || lastError.current === message) {
-        // Message has already been logged. do not modify ref, return early.
+        // 消息已经记录，保留引用并提前返回。
         return;
       }
 
-      // Message is defined, and it has not been logged yet. Save it, and send the error
+      // 消息存在且尚未记录，保存消息并显示错误。
       lastError.current = message;
       toast.error("当前请求未完成，消息和运行记录已保留", {
         description: (
@@ -132,11 +132,11 @@ export function Thread() {
         closeButton: true,
       });
     } catch {
-      // no-op
+      // 无需操作。
     }
   }, [stream.error]);
 
-  // Stop the waiting indicator when the first assistant reply arrives.
+  // 收到第一条助手回复时停止等待提示。
   const prevMessageLength = useRef(0);
   useEffect(() => {
     if (
@@ -154,7 +154,7 @@ export function Thread() {
     e.preventDefault();
     if (input.trim().length === 0 || stream.preparingThread) return;
     setFirstTokenReceived(false);
-    // Chat needs no workspace. The backend validates it when work is requested.
+    // 聊天无需工作目录；请求执行任务时由后端校验目录。
     if (repo.trim()) localStorage.setItem("monoplaner.repo", repo.trim());
 
     const newHumanMessage: Message = {
@@ -502,7 +502,7 @@ export function Thread() {
                             : statusLabel(stream.values.status)}
                         </span>
                         {!isLoading &&
-                          ["paused", "awaiting_user"].includes(
+                          ["paused", "awaiting_user", "output_limit_reached"].includes(
                             stream.values.status || "",
                           ) && (
                             <Button

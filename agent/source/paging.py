@@ -1,4 +1,5 @@
-"""Bound requested ranges, then paginate without another planner decision."""
+"""限制请求范围后自动分页，无需规划器再次决策。"""
+
 import json
 
 PAGE_LINES = 200
@@ -7,7 +8,8 @@ OUTPUT_BYTES = 50 * 1024
 
 
 class ReadBudget:
-    """One UTF-8 text budget shared by every page/location of a read step."""
+    """一次读取步骤的所有页面和位置共用同一 UTF-8 文本预算。"""
+
     def __init__(self):
         self.remaining = OUTPUT_BYTES
 
@@ -19,18 +21,25 @@ class ReadBudget:
             separator = 1 if rows else 0
             if len(raw) + separator > self.remaining:
                 if len(raw) > OUTPUT_BYTES:
-                    long_line = {'offset': index, 'utf8_bytes': len(raw),
-                                 'reason': 'Single line exceeds the 50 KiB read budget; partial text only.'}
+                    long_line = {
+                        'offset': index,
+                        'utf8_bytes': len(raw),
+                        'reason': 'Single line exceeds the 50 KiB read budget; partial text only.',
+                    }
                     if self.remaining > separator:
-                        part = raw[:self.remaining - separator].decode('utf-8', errors='ignore')
+                        part = raw[: self.remaining - separator].decode('utf-8', errors='ignore')
                         rows.append(part)
                         self.remaining -= separator + len(part.encode('utf-8'))
                 break
             rows.append(row)
             self.remaining -= len(raw) + separator
             end = index + 1
-        result = {'text': '\n'.join(rows), 'visible_ranges': [[offset, end]] if end > offset else [],
-                  'truncated': end < min(len(lines), offset + limit), 'next_offset': end}
+        result = {
+            'text': '\n'.join(rows),
+            'visible_ranges': [[offset, end]] if end > offset else [],
+            'truncated': end < min(len(lines), offset + limit),
+            'next_offset': end,
+        }
         if long_line:
             result['long_line'] = long_line
         return result
@@ -70,7 +79,7 @@ def read_pages(value):
 
 
 def visible_reads(history, rows):
-    """Only actual tool results/initial material, never assistant claims or local files."""
+    """仅采纳实际工具结果和初始材料，不采纳助手声明或本地文件。"""
     values = []
     for index, message in enumerate(history):
         data = message.get('data', {})
@@ -86,9 +95,14 @@ def visible_reads(history, rows):
             values.extend(body.get('initial_evidence', {}).get('readme', []))
         if data.get('name') == 'read_file':
             values.append(body)
-        values.extend(row['data'] for row in body.get('steps', [])
-                      if row.get('op') == 'read' and row.get('status') == 'succeeded')
-    values.extend(row['data'] for row in rows if row.get('op') == 'read' and row.get('status') == 'succeeded')
+        values.extend(
+            row['data']
+            for row in body.get('steps', [])
+            if row.get('op') == 'read' and row.get('status') == 'succeeded'
+        )
+    values.extend(
+        row['data'] for row in rows if row.get('op') == 'read' and row.get('status') == 'succeeded'
+    )
     seen = {}
     for value in values:
         for page in read_pages(value):
@@ -102,8 +116,10 @@ def ranges(offset, limit):
         raise ValueError('offset must be a nonnegative integer')
     if type(limit) is not int or not 1 <= limit <= MAX_REQUEST_LINES:
         raise ValueError('Request 1..2000 lines; pages contain at most 200 lines')
-    return [(start, min(PAGE_LINES, offset + limit - start))
-            for start in range(offset, offset + limit, PAGE_LINES)]
+    return [
+        (start, min(PAGE_LINES, offset + limit - start))
+        for start in range(offset, offset + limit, PAGE_LINES)
+    ]
 
 
 def read_range(executor, path, offset, limit, budget=None):
@@ -117,6 +133,13 @@ def read_range(executor, path, offset, limit, budget=None):
             break
     if len(pages) == 1:
         return pages[0]
-    return {'reads': pages, 'truncated': any(page['truncated'] for page in pages), 'pagination': {
-        'requested_offset': offset, 'requested_lines': limit,
-        'page_line_limit': PAGE_LINES, 'returned_pages': len(pages)}}
+    return {
+        'reads': pages,
+        'truncated': any(page['truncated'] for page in pages),
+        'pagination': {
+            'requested_offset': offset,
+            'requested_lines': limit,
+            'page_line_limit': PAGE_LINES,
+            'returned_pages': len(pages),
+        },
+    }

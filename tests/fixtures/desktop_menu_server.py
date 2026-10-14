@@ -1,4 +1,5 @@
-"""UI-only desktop controls: no real permission elevation or application launch."""
+"""仅验证桌面界面控制，不实际提权或启动应用程序。"""
+
 import asyncio
 from pathlib import Path
 from starlette.applications import Starlette
@@ -38,20 +39,31 @@ async def choose(request):
     kind = value.get('kind', 'file')
     calls.append({'kind': kind, 'thread': request.path_params['thread']})
     path = str(Path(fixture_file).parent) if kind == 'directory' else fixture_file
-    sources = await asyncio.to_thread(lambda: ReadSources(state_root()).add(request.path_params['thread'], path, kind))
+    sources = await asyncio.to_thread(
+        lambda: ReadSources(state_root()).add(request.path_params['thread'], path, kind)
+    )
     return JSONResponse({'path': path, 'sources': sources})
 
 
 async def checks(request):
     if request.method == 'POST':
         options.update(await request.json())
-    return JSONResponse({'calls': calls, 'permissions': permissions, 'options': options,
-                         'real_permission_changes': 0, 'applications_started': 0})
+    return JSONResponse(
+        {
+            'calls': calls,
+            'permissions': permissions,
+            'options': options,
+            'real_permission_changes': 0,
+            'applications_started': 0,
+        }
+    )
 
 
-app = Starlette(routes=[
-    Route('/threads/{thread}/permission', permission, methods=['GET', 'POST']),
-    Route('/threads/{thread}/choose-file', choose, methods=['POST']),
-    Route('/test/desktop-checks', checks, methods=['GET', 'POST']),
-    *application.routes,
-])
+app = Starlette(
+    routes=[
+        Route('/threads/{thread}/permission', permission, methods=['GET', 'POST']),
+        Route('/threads/{thread}/choose-file', choose, methods=['POST']),
+        Route('/test/desktop-checks', checks, methods=['GET', 'POST']),
+        *application.routes,
+    ]
+)

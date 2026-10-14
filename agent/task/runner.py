@@ -1,4 +1,5 @@
-"""One planner -> deterministic plan execution -> final acceptance -> replan."""
+"""单一规划器依次规划、确定性执行、最终验收，再按需重新规划。"""
+
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -9,7 +10,12 @@ from langchain_core.messages import message_to_dict, messages_from_dict, message
 from agent.task.instructions import ARTIFACT_RULES
 from agent.acceptance.artifact_checks import required_consumer, requested_calls
 from agent.model.client import configure_call
-from agent.model.errors import ModelInterrupted, ModelRequestNotSent, ModelResponseNotSaved, is_context_overflow
+from agent.model.errors import (
+    ModelInterrupted,
+    ModelRequestNotSent,
+    ModelResponseNotSaved,
+    is_context_overflow,
+)
 from agent.model.payload import request_reservation, estimate_input_tokens
 from agent.source.snapshots import SourceSnapshot
 from agent.source.versions import SourceVersions
@@ -28,14 +34,36 @@ ENGINE = "MonoPlanner 1.0"
 
 
 class TaskRunner:
-    def __init__(self, model, environment, artifacts_root=None, *, max_rounds=3,
-                 task_token_limit=None, task_timeout=7200, state_dir=None, pause_after_steps=None, persistence=True, optimize_source=True, overlap_preparation=True, interactive=False, yield_boundary=False, event_sink=None, control_source=None, runtime_settings=None):
+    def __init__(
+        self,
+        model,
+        environment,
+        artifacts_root=None,
+        *,
+        max_rounds=3,
+        task_token_limit=None,
+        task_timeout=7200,
+        state_dir=None,
+        pause_after_steps=None,
+        persistence=True,
+        optimize_source=True,
+        overlap_preparation=True,
+        interactive=False,
+        yield_boundary=False,
+        event_sink=None,
+        control_source=None,
+        runtime_settings=None,
+    ):
         self.interactive, self.yield_boundary = interactive, yield_boundary
         self.event_sink, self.control_source = event_sink, control_source
         self.model, self.environment = model, environment
         self.artifacts_root = Path(artifacts_root or Path.home() / ".local/state/task")
         self.explicit_state = Path(state_dir).resolve() if state_dir else None
-        self.max_rounds, self.task_token_limit, self.task_timeout = max_rounds, task_token_limit, task_timeout
+        self.max_rounds, self.task_token_limit, self.task_timeout = (
+            max_rounds,
+            task_token_limit,
+            task_timeout,
+        )
         self.pause_after_steps = pause_after_steps
         self.steps_this_invocation = 0
         self.state = {}
@@ -45,8 +73,12 @@ class TaskRunner:
         self.preparation, self.preparation_errors = None, []
         self.runtime_settings = dict(runtime_settings or {})
         from agent.model.tools import CODING_TOOLS
+
         self.tools = CODING_TOOLS
 
+    # ========================================================================
+    # 状态持久化与公开进度
+    # ========================================================================
     def persist(self, event, payload=None):
         self.state["budget"] = asdict(self.budget)
         self.state["elapsed_seconds"] = self.prior_elapsed + time.monotonic() - self.run_started
@@ -55,23 +87,49 @@ class TaskRunner:
         else:
             save(self.root / "state.json", self.state)
             with (self.root / "events.jsonl").open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps({"time": time.time(), "kind": event, "payload": payload or {}}, ensure_ascii=False) + "\n")
+                stream.write(
+                    json.dumps(
+                        {"time": time.time(), "kind": event, "payload": payload or {}},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
         if self.event_sink and event in dialogue.PROGRESS:
             phase, text = dialogue.PROGRESS[event]
             try:
                 self.event_sink({"type": "progress", "phase": phase, "text": text})
             except (OSError, RuntimeError):
-                pass  # A disconnected presentation stream cannot invalidate saved execution.
+                pass  # 展示流断开不能使已保存的执行失效。
 
+    # ========================================================================
+    # 初始仓库材料与规划器输入
+    # ========================================================================
     def initial_material(self):
         files = self.executor.inventory()
         names = sorted(files)
-        docs = [n for n in names if "/" not in n and n.lower().startswith(("readme", "contributing"))][:2]
-        return {"root_entries": sorted({n.split('/')[0] for n in names}), "file_count": len(names),
-                "readme": [self.executor.read(n, 0, 150) for n in docs],
-                "test_config_paths": [n for n in names if n in {"bin/test", "pytest.ini", "tox.ini", "pyproject.toml", "setup.cfg", "runtests.py"}],
-                "runtime_facts": getattr(self.environment, "runtime_facts", {}),
-                "source": self.evidence.current}
+        docs = [
+            n for n in names if "/" not in n and n.lower().startswith(("readme", "contributing"))
+        ][:2]
+        return {
+            "root_entries": sorted({n.split('/')[0] for n in names}),
+            "file_count": len(names),
+            "readme": [self.executor.read(n, 0, 150) for n in docs],
+            "test_config_paths": [
+                n
+                for n in names
+                if n
+                in {
+                    "bin/test",
+                    "pytest.ini",
+                    "tox.ini",
+                    "pyproject.toml",
+                    "setup.cfg",
+                    "runtests.py",
+                }
+            ],
+            "runtime_facts": getattr(self.environment, "runtime_facts", {}),
+            "source": self.evidence.current,
+        }
 
     def planner_messages(self):
         return compaction.messages(self)
@@ -81,10 +139,13 @@ class TaskRunner:
         if self.state.get("repair_draft"):
             repair.read(self, self.state["repair_draft"])
         purpose = "plan_repair" if self.state.get("plan_error") else "plan"
-        selected = configure_call(self.model.bind_tools(self.tools), purpose,
-            timeout=min(90, self.budget.remaining_time() or 90))
-        cap = getattr(selected, "max_output_tokens", 65536)
-        cap = cap if type(cap) is int else 65536
+        selected = configure_call(
+            self.model.bind_tools(self.tools),
+            purpose,
+            timeout=min(90, self.budget.remaining_time() or 90),
+        )
+        cap = getattr(selected, "max_output_tokens", 256000)
+        cap = cap if type(cap) is int else 256000
         compaction.prepare(self, cap)
         for attempt in range(compaction.CONFIG['max_overflow_retries'] + 1):
             messages = self.planner_messages()
@@ -92,63 +153,107 @@ class TaskRunner:
             try:
                 raw = self.request_model(messages, purpose)
             except Exception as exc:
-                if not is_context_overflow(exc) or attempt == compaction.CONFIG['max_overflow_retries']:
+                if (
+                    not is_context_overflow(exc)
+                    or attempt == compaction.CONFIG['max_overflow_retries']
+                ):
                     raise
                 compaction.prepare(self, cap, force=True)
                 continue
             return self.decode_plan(raw)
 
+    # ========================================================================
+    # 模型请求的预算、记录与异常结算
+    # ========================================================================
     def request_model(self, messages, purpose):
-        selected = configure_call(self.model.bind_tools(self.tools), purpose,
-            timeout=min(90, self.budget.remaining_time() or 90))
-        cap = getattr(selected, "max_output_tokens", 65536)
-        cap = cap if type(cap) is int else 65536
-        if purpose != 'compaction' and self.state.get('baseline'):
+        selected = configure_call(
+            self.model.bind_tools(self.tools),
+            purpose,
+            timeout=min(90, self.budget.remaining_time() or 90),
+        )
+        cap = getattr(selected, "max_output_tokens", 256000)
+        cap = cap if type(cap) is int else 256000
+        if purpose != 'compaction' and self.state.get('baseline') and self.environment is not None:
             source_runtime.begin(self)
-        ticket = self.budget.reserve_request(request_reservation(messages, self.tools, cap), purpose=purpose)
+
+        # ========================================================================
+        # 发送前预留额度并保存请求原件
+        # ========================================================================
+        ticket = self.budget.reserve_request(
+            request_reservation(messages, self.tools, cap), purpose=purpose
+        )
         folder = self.root / "requests" / ("call-%04d" % ticket.call_id)
         save(folder / "request.json", {"messages": messages_to_dict(messages), "purpose": purpose})
-        self.state["request_pending"] = {"call": ticket.call_id, "reservation": ticket.reserved_tokens, "purpose": purpose}
-        self.state['context_usage'] = {'used_tokens': estimate_input_tokens(messages, self.tools),
-            'window_tokens': CONTEXT_WINDOW_TOKENS, 'estimated': True, 'call': ticket.call_id}
+        self.state["request_pending"] = {
+            "call": ticket.call_id,
+            "reservation": ticket.reserved_tokens,
+            "purpose": purpose,
+        }
+        self.state['context_usage'] = {
+            'used_tokens': estimate_input_tokens(messages, self.tools),
+            'window_tokens': CONTEXT_WINDOW_TOKENS,
+            'estimated': True,
+            'call': ticket.call_id,
+        }
         self.persist("model_request_started", self.state["request_pending"])
+
+        # ========================================================================
+        # 记录实际调用时长，按需展示思考片段
+        # ========================================================================
         model_started = time.monotonic()
         live = None
         received = False
         ending = 'unknown'
         if self.event_sink and callable(getattr(type(selected), 'invoke_with_progress', None)):
             from agent.storage.live_reasoning import LiveReasoning
+
             public = self.state.get('public_events', [])
-            anchor = ((self.state.get('conversation_turn') or {}).get('id')
-                      or (public[-1]['id'] if public else ''))
+            anchor = (self.state.get('conversation_turn') or {}).get('id') or (
+                public[-1]['id'] if public else ''
+            )
             live = LiveReasoning(self.root, ticket.call_id, anchor)
         try:
-            response = (selected.invoke_with_progress(messages, live.append) if live
-                        else selected.invoke(messages))
+            response = (
+                selected.invoke_with_progress(messages, live.append)
+                if live
+                else selected.invoke(messages)
+            )
             received = True
         except ModelInterrupted as exc:
             if self.preparation:
                 self.preparation.cancel()
             if exc.sent:
                 self.budget.settle_request(ticket, None)
-                self.state.setdefault('model_usage', []).append({'call': ticket.call_id, 'purpose': purpose,
-                    'seconds': time.monotonic() - model_started, 'usage': None, 'interrupted': True})
+                self.state.setdefault('model_usage', []).append(
+                    {
+                        'call': ticket.call_id,
+                        'purpose': purpose,
+                        'seconds': time.monotonic() - model_started,
+                        'usage': None,
+                        'interrupted': True,
+                    }
+                )
             else:
                 self.budget.cancel_request(ticket)
             self.state['request_pending'] = None
             if purpose == 'compaction':
-                # No summary was committed. Keep the original request view;
-                # an explicit later continuation may start a new summary.
+                # 尚未提交摘要，保留原始请求视图；
+                # 后续明确继续时可以重新开始生成摘要。
                 self.state['compaction_pending'] = None
             ending = 'interrupted'
-            record = {'call': ticket.call_id, 'purpose': purpose, 'kind': exc.kind,
-                      'request_sent': exc.sent, 'usage': 'unknown' if exc.sent else 'not_sent',
-                      'partial_output_executable': False}
+            record = {
+                'call': ticket.call_id,
+                'purpose': purpose,
+                'kind': exc.kind,
+                'request_sent': exc.sent,
+                'usage': 'unknown' if exc.sent else 'not_sent',
+                'partial_output_executable': False,
+            }
             if live:
                 live.finish(ending)
                 record['reasoning_content'] = live.row['detail']
                 live = None
-            save(folder/'interruption.json', record)
+            save(folder / 'interruption.json', record)
             self.state.setdefault('interrupted_requests', []).append(record)
             self.persist('model_request_interrupted', record)
             raise
@@ -172,43 +277,96 @@ class TaskRunner:
                 live.finish(ending)
             if self.preparation is not None:
                 self.preparation.note_request(model_started, time.monotonic())
+
+        # ========================================================================
+        # 成功返回后结算用量，并在执行工具前保存完整响应
+        # ========================================================================
         self.budget.settle_request(ticket, response)
-        self.state.setdefault('model_usage', []).append({'call': ticket.call_id, 'purpose': purpose,
-            'seconds': time.monotonic() - model_started, 'usage': response.usage_metadata})
+        self.state.setdefault('model_usage', []).append(
+            {
+                'call': ticket.call_id,
+                'purpose': purpose,
+                'seconds': time.monotonic() - model_started,
+                'usage': response.usage_metadata,
+                'max_output_tokens': cap,
+            }
+        )
         usage = response.usage_metadata
         if usage and all(type(usage.get(k)) is int for k in ('input_tokens', 'output_tokens')):
-            self.state['context_usage'].update(used_tokens=usage['input_tokens'] + usage['output_tokens'],
-                                               estimated=False)
+            self.state['context_usage'].update(
+                used_tokens=usage['input_tokens'] + usage['output_tokens'], estimated=False
+            )
         raw = message_to_dict(response)
         save(folder / "response.json", raw)
         self.state["request_pending"] = None
         if purpose == 'compaction':
-            self.state['compaction_pending'].update(stage='response_saved', response=raw, call=ticket.call_id)
+            self.state['compaction_pending'].update(
+                stage='response_saved', response=raw, call=ticket.call_id
+            )
         else:
             self.state["response_pending"] = raw
         self.persist("model_response_received", {"call": ticket.call_id})
         if live:
-            live.finish('completed', response.additional_kwargs.get('reasoning_content', ''))
-        if self.state.get('baseline'):
+            ending = (
+                'interrupted'
+                if response.response_metadata.get('finish_reason') == 'length'
+                else 'completed'
+            )
+            live.finish(ending, response.additional_kwargs.get('reasoning_content', ''))
+        if purpose != 'compaction':
+            from agent.task.output_limit import guard
+
+            guard(self, raw)
+        if self.state.get('baseline') and self.environment is not None:
             source_runtime.collect(self)
         return raw
 
+    # ========================================================================
+    # 回复解码与工作计划校验
+    # ========================================================================
     def decode_plan(self, raw):
         self.rejected_input = None
         self.reviewing = False
+        from agent.task.output_limit import guard
+
+        guard(self, raw)
         response = messages_from_dict([raw])[0]
         finish = response.response_metadata.get("finish_reason")
         if finish in {"length", "content_filter", "aborted", "insufficient_system_resource"}:
             raise ValueError("Incomplete model response: " + str(finish))
         calls = response.tool_calls
-        if calls and not response.invalid_tool_calls and all(c['name'] in {'web_search', 'web_fetch'} for c in calls):
+        if (
+            calls
+            and not response.invalid_tool_calls
+            and all(c['name'] in {'web_search', 'web_fetch'} for c in calls)
+        ):
             return dialogue.WebReply(calls), raw
-        if self.interactive and not calls and not response.invalid_tool_calls and isinstance(response.content, str) and response.content.strip():
+        if (
+            self.interactive
+            and not calls
+            and not response.invalid_tool_calls
+            and isinstance(response.content, str)
+            and response.content.strip()
+        ):
             return dialogue.TextReply(response.content), raw
-        if len(calls) == 1 and not response.invalid_tool_calls and calls[0]["name"] in {"freeze_acceptance", "revise_acceptance"}:
+        if (
+            len(calls) == 1
+            and not response.invalid_tool_calls
+            and calls[0]["name"] in {"freeze_acceptance", "revise_acceptance"}
+        ):
             self.reviewing = True
-            return self.validate_work({**calls[0]["args"],
-                "decision": "freeze" if calls[0]["name"] == "freeze_acceptance" else "revise"}, revisions.Review), raw
+            return (
+                self.validate_work(
+                    {
+                        **calls[0]["args"],
+                        "decision": (
+                            "freeze" if calls[0]["name"] == "freeze_acceptance" else "revise"
+                        ),
+                    },
+                    revisions.Review,
+                ),
+                raw,
+            )
         if response.invalid_tool_calls:
             invalid = response.invalid_tool_calls
             if not calls and len(invalid) == 1 and invalid[0]["name"] == "submit_plan":
@@ -217,7 +375,11 @@ class TaskRunner:
             raise ValueError("Expected exactly one valid work tool call; no actions were executed")
         if len(calls) != 1 or calls[0]["name"] not in {"submit_plan", "repair_work"}:
             raise ValueError("Expected exactly one valid work tool call; no actions were executed")
-        value = repair.merge(self, calls[0]["args"]) if calls[0]["name"] == "repair_work" else calls[0]["args"]
+        value = (
+            repair.merge(self, calls[0]["args"])
+            if calls[0]["name"] == "repair_work"
+            else calls[0]["args"]
+        )
         self.rejected_input = value
         return self.validate_work(value), raw
 
@@ -231,19 +393,40 @@ class TaskRunner:
         if isinstance(value, dict) and value.get("kind") == "candidate":
             current = self.state.get("verification_spec")
             if current:
-                frozen = {"test_code": current.get("test_code") or "",
-                          "test_driver": list(current.get("test_driver", ())),
-                          "regression_command": self.state["regression_command"]}
+                frozen = {
+                    "test_code": current.get("test_code") or "",
+                    "test_driver": list(current.get("test_driver", ())),
+                    "regression_command": self.state["regression_command"],
+                }
                 for name, original in frozen.items():
-                    supplied = list(value[name]) if name == "test_driver" and isinstance(value.get(name), (list, tuple)) else value.get(name)
+                    supplied = (
+                        list(value[name])
+                        if name == "test_driver" and isinstance(value.get(name), (list, tuple))
+                        else value.get(name)
+                    )
                     if supplied and supplied != original:
-                        errors.append((["/" + name], ValueError("Fixed " + name + " cannot be replaced during source repair")))
-            elif not self.state.get("verify_command") and isinstance(value.get("test_code", ""), str):
+                        errors.append(
+                            (
+                                ["/" + name],
+                                ValueError(
+                                    "Fixed " + name + " cannot be replaced during source repair"
+                                ),
+                            )
+                        )
+            elif not self.state.get("verify_command") and isinstance(
+                value.get("test_code", ""), str
+            ):
                 try:
-                    revisions.spec_for(self, value.get("test_code", ""), value.get("test_driver", ()))
+                    revisions.spec_for(
+                        self, value.get("test_code", ""), value.get("test_driver", ())
+                    )
                 except ValueError as exc:
                     errors.append((repair.fields(exc, value), exc))
-        elif isinstance(value, dict) and value.get("decision") == "revise" and isinstance(value.get("test_code", ""), str):
+        elif (
+            isinstance(value, dict)
+            and value.get("decision") == "revise"
+            and isinstance(value.get("test_code", ""), str)
+        ):
             try:
                 revisions.spec_for(self, value.get("test_code", ""), value.get("test_driver", ()))
             except ValueError as exc:
@@ -252,26 +435,48 @@ class TaskRunner:
             raise repair.ValidationErrors(errors)
         return plan
 
+    # ========================================================================
+    # 冻结验收并接收计划
+    # ========================================================================
     def freeze_contract(self, plan):
         current = self.state.get("verification_spec")
         if current:
             if plan.test_code and plan.test_code != (current.get("test_code") or ""):
                 raise ValueError("Fixed task tests cannot be replaced during repair")
-            if plan.regression_command and plan.regression_command != self.state["regression_command"]:
+            if (
+                plan.regression_command
+                and plan.regression_command != self.state["regression_command"]
+            ):
                 raise ValueError("Fixed regression command cannot be replaced")
-            if plan.test_driver and tuple(plan.test_driver) != tuple(current.get("test_driver", ())):
+            if plan.test_driver and tuple(plan.test_driver) != tuple(
+                current.get("test_driver", ())
+            ):
                 raise ValueError("Fixed test_driver cannot be replaced during source repair")
             return
-        request = self.state["request"] + ''.join('\n' + row['text'] for row in self.state.get('user_updates', []))
+        request = self.state["request"] + ''.join(
+            '\n' + row['text'] for row in self.state.get('user_updates', [])
+        )
         criteria = [request] + ([self.state["acceptance"]] if self.state["acceptance"] else [])
         command = self.state["verify_command"]
-        consumer = required_consumer(request + "\n" + (self.state["acceptance"] or "")) if not command else None
-        spec = VerificationSpec(tuple(criteria), command=command, test_code=None if command else plan.test_code,
-            required_consumer=consumer, required_calls=requested_calls(request) if consumer else (),
-            test_driver=() if command else plan.test_driver)
+        consumer = (
+            required_consumer(request + "\n" + (self.state["acceptance"] or ""))
+            if not command
+            else None
+        )
+        spec = VerificationSpec(
+            tuple(criteria),
+            command=command,
+            test_code=None if command else plan.test_code,
+            required_consumer=consumer,
+            required_calls=requested_calls(request) if consumer else (),
+            test_driver=() if command else plan.test_driver,
+        )
         self.state["verification_spec"] = asdict(spec)
         self.state["regression_command"] = plan.regression_command
-        save(self.root / "frozen-acceptance.json", {"spec": asdict(spec), "regression": plan.regression_command})
+        save(
+            self.root / "frozen-acceptance.json",
+            {"spec": asdict(spec), "regression": plan.regression_command},
+        )
         self.persist("acceptance_frozen", {"digest": digest(asdict(spec))})
 
     def accept_plan(self, plan, response):
@@ -282,22 +487,42 @@ class TaskRunner:
             self.freeze_contract(plan)
         fingerprint = digest([plan.model_dump(), self.evidence.current])
         if fingerprint in self.state["seen_plans"]:
-            self.state.update(status="stalled", reason="Identical plan for identical source repeated; no new decision")
+            self.state.update(
+                status="stalled",
+                reason="Identical plan for identical source repeated; no new decision",
+            )
             return
         self.state["seen_plans"].append(fingerprint)
         number = self.state["plan_count"] + 1
         name = "p%04d" % number
-        value = {"id": name, "parent": self.state.get("last_plan"), "plan": plan.model_dump(),
-                 "response": response, "base_source": self.evidence.current, "cursor": 0, "rows": []}
+        value = {
+            "id": name,
+            "parent": self.state.get("last_plan"),
+            "plan": plan.model_dump(),
+            "response": response,
+            "base_source": self.evidence.current,
+            "cursor": 0,
+            "rows": [],
+        }
         if self.state.get("acceptance_release"):
             value["origin_response"] = self.state["acceptance_release"]["origin_response"]
         save(self.root / "plans" / name / "plan.json", value)
-        self.state.update(pending=value, plan_count=number, plan_error="", repair_count=0, response_pending=None, status="executing")
+        self.state.update(
+            pending=value,
+            plan_count=number,
+            plan_error="",
+            repair_count=0,
+            response_pending=None,
+            status="executing",
+        )
         self.state.pop("acceptance_release", None)
         if plan.kind != "inspect":
             self.state.pop("repair_draft", None)
         self.persist("plan_accepted", {"id": name, "base_source": self.evidence.current})
 
+    # ========================================================================
+    # 确定性执行与最终验收入口
+    # ========================================================================
     def execute_pending(self):
         return operations.execute_pending(self)
 
@@ -310,8 +535,12 @@ class TaskRunner:
     def finish_plan(self, outcome):
         return operations.finish_plan(self, outcome)
 
+    # ========================================================================
+    # 任务启动与单步驱动
+    # ========================================================================
     def run(self, history, text, budget, verify_command=None, acceptance=None):
         from agent.storage.recovery import run
+
         return run(self, history, text, budget, verify_command, acceptance)
 
     def _run_new(self, history, text, budget, verify_command=None, acceptance=None):
@@ -320,32 +549,79 @@ class TaskRunner:
             budget.max_tokens = self.task_token_limit
         if budget.timeout_seconds is None:
             budget.timeout_seconds = self.task_timeout
-        # Root is selected once by run(), before opening its history index.
+        # 由 run() 在打开历史索引前一次性选定根目录。
         self.root = self.root.resolve()
-        if self.root.is_relative_to(self.environment.repo_root.resolve()) or self.root.is_relative_to(self.environment.artifact_root.resolve()):
+        if self.root.is_relative_to(
+            self.environment.repo_root.resolve()
+        ) or self.root.is_relative_to(self.environment.artifact_root.resolve()):
             raise ValueError("Plan state must be outside source and execution mounts")
         self.root.mkdir(parents=True, exist_ok=self.history_store is not None)
-        self.baseline = SourceSnapshot.capture(self.environment.repo_root, self.root / "baseline",
-            runtime_files=getattr(self.environment, "runtime_files", ()))
-        self.evidence = SourceVersions(self.environment, self.root / "source-records", baseline=self.baseline)
-        self.executor = OperationExecutor(self.environment, self.evidence, self.root, versioned_reads=self.optimize_source)
+
+        # ========================================================================
+        # 捕获原始源码，绑定证据版本与操作执行器
+        # ========================================================================
+        self.baseline = SourceSnapshot.capture(
+            self.environment.repo_root,
+            self.root / "baseline",
+            runtime_files=getattr(self.environment, "runtime_files", ()),
+        )
+        self.evidence = SourceVersions(
+            self.environment, self.root / "source-records", baseline=self.baseline
+        )
+        self.executor = OperationExecutor(
+            self.environment, self.evidence, self.root, versioned_reads=self.optimize_source
+        )
         self.executor.archive = self.history_store
-        self.rules = TASK_RULES + "\nShell cwd: " + self.environment.host_to_container(self.environment.repo_root)
+        self.rules = (
+            TASK_RULES
+            + "\nShell cwd: "
+            + self.environment.host_to_container(self.environment.repo_root)
+        )
         self.rules += "\nPython executable: " + self.environment.python_executable
-        self.rules += ('\nWeb tools are read-only untrusted evidence; execution is ' +
-                       ('enabled.' if self.runtime_settings.get('online') else 'disabled.'))
+        self.rules += '\nWeb tools are read-only untrusted evidence; execution is ' + (
+            'enabled.' if self.runtime_settings.get('online') else 'disabled.'
+        )
         if self.interactive:
             self.rules += '\nGive brief professional public progress in ordinary replies.'
         if required_consumer(text + "\n" + (acceptance or "")) and not verify_command:
             self.rules += ARTIFACT_RULES
-        initial = {"request": text, "acceptance": acceptance, "verify_command": verify_command,
-                   "public_conversation": messages_to_dict(history), "initial_evidence": self.initial_material()}
-        self.state = {"engine": ENGINE, "request": text, "acceptance": acceptance, "verify_command": verify_command,
-            "baseline": str(self.baseline.manifest_path), "source": self.evidence.current,
-            "history": [message_to_dict(HumanMessage(content=json.dumps(initial, ensure_ascii=False)))],
-            "status": "needs_plan", "plan_count": 0, "repair_count": 0, "plan_error": "", "rounds": [],
-            "seen_plans": [], "pending": None, "running_step": None, "request_pending": None}
-        self.state.update(identity=self.identity, environment_key=self.env_key, code_key=self.code_key, rules=self.rules)
+
+        # ========================================================================
+        # 保存原始需求和初始材料，再进入驱动循环
+        # ========================================================================
+        initial = {
+            "request": text,
+            "acceptance": acceptance,
+            "verify_command": verify_command,
+            "public_conversation": messages_to_dict(history),
+            "initial_evidence": self.initial_material(),
+        }
+        self.state = {
+            "engine": ENGINE,
+            "request": text,
+            "acceptance": acceptance,
+            "verify_command": verify_command,
+            "baseline": str(self.baseline.manifest_path),
+            "source": self.evidence.current,
+            "history": [
+                message_to_dict(HumanMessage(content=json.dumps(initial, ensure_ascii=False)))
+            ],
+            "status": "needs_plan",
+            "plan_count": 0,
+            "repair_count": 0,
+            "plan_error": "",
+            "rounds": [],
+            "seen_plans": [],
+            "pending": None,
+            "running_step": None,
+            "request_pending": None,
+        }
+        self.state.update(
+            identity=self.identity,
+            environment_key=self.env_key,
+            code_key=self.code_key,
+            rules=self.rules,
+        )
         self.persist("task_started")
         return self._drive()
 
@@ -364,13 +640,21 @@ class TaskRunner:
         return self.result()
 
     def on_model_interrupted(self, kind):
-        self.state['history'].append(message_to_dict(HumanMessage(content=
-            'The user interrupted the previous model request. Its partial reply was not submitted or executed. '
-            'Use completed records and the latest user requirements; do not replay completed operations.')))
+        self.state['history'].append(
+            message_to_dict(
+                HumanMessage(
+                    content='The user interrupted the previous model request. Its partial reply was not submitted or executed. '
+                    'Use completed records and the latest user requirements; do not replay completed operations.'
+                )
+            )
+        )
         self.state.pop('dispatch', None)
         self.state.pop('turn_status', None)
-        self.state.update(status='needs_plan' if kind == 'message' else 'paused',
-                          reason='User interrupted model reply', pause_requested=kind == 'pause')
+        self.state.update(
+            status='needs_plan' if kind == 'message' else 'paused',
+            reason='User interrupted model reply',
+            pause_requested=kind == 'pause',
+        )
         dialogue.apply_controls(self)
         self.persist('model_wait_interrupted', {'kind': kind})
 
@@ -381,15 +665,21 @@ class TaskRunner:
         self.budget.check_request(0)
         if dialogue.apply_controls(self):
             return
+
+        # ========================================================================
+        # 优先推进已接收的计划，避免重复请求规划
+        # ========================================================================
         if self.state.get("pending"):
             self.execute_pending()
             return
         if self.state.get('web_pending'):
             from agent.execution.web import execute_calls
+
             execute_calls(self, self.state['web_pending']['response'])
             return
         if self.state.get('assistant_pending'):
             from agent.server.assistant import execute_calls
+
             execute_calls(self, self.state['assistant_pending']['response'])
             return
         if self.state.get("acceptance_release"):
@@ -408,10 +698,12 @@ class TaskRunner:
                 return
             if isinstance(plan, dialogue.WebReply):
                 from agent.execution.web import execute_calls
+
                 execute_calls(self, response)
                 return
             if isinstance(plan, dialogue.AssistantReply):
                 from agent.server.assistant import execute_calls
+
                 execute_calls(self, response)
                 return
             if isinstance(plan, revisions.Review):
@@ -425,31 +717,60 @@ class TaskRunner:
         except ValueError as exc:
             repair.prepare_rejection(self, exc)
 
+    # ========================================================================
+    # 结果汇总与验证证据
+    # ========================================================================
     def result(self):
         source_runtime.close(self)
         self.persist("task_returned", {"status": self.state["status"]})
         report = f"{self.state['status']}: {self.state.get('reason', '')}"
         from agent.storage.usage import summarize
-        outcome = {"status": self.state["status"], "stop_reason": self.state.get("reason", ""),
+        from agent.task.output_limit import public as public_limit
+
+        outcome = {
+            "status": self.state["status"],
+            "stop_reason": self.state.get("reason", ""),
             'pause_requested': self.state.get('pause_requested', False),
-            'usage': summarize(self.state), 'existing_runs': self.state.get('existing_runs', []),
+            'output_limit': public_limit(self.state),
+            'usage': summarize(self.state),
+            'existing_runs': self.state.get('existing_runs', []),
             "messages": [HumanMessage(content=self.state["request"]), AIMessage(content=report)],
-            "task_kind": "coding", "workflow": "task", "artifact_dir": str(self.root), "history_dir": str(self.root / "requests"),
-            "verification": self.state.get("verification", {}), "rounds": self.state["rounds"],
-            "report_status": "program_report", "final_report": report, "worker_answer": "", "plan_path": str(self.root / "plans"),
-            "patch_path": str(self.root / "candidate.patch"), "planner_calls": self.budget.used_steps,
-            "executor_model_calls": 0, "verifier_model_calls": 0, "local_acceptance_calls": 0,
+            "task_kind": "coding",
+            "workflow": "task",
+            "artifact_dir": str(self.root),
+            "history_dir": str(self.root / "requests"),
+            "verification": self.state.get("verification", {}),
+            "rounds": self.state["rounds"],
+            "report_status": "program_report",
+            "final_report": report,
+            "worker_answer": "",
+            "plan_path": str(self.root / "plans"),
+            "patch_path": str(self.root / "candidate.patch"),
+            "planner_calls": self.budget.used_steps,
+            "executor_model_calls": 0,
+            "verifier_model_calls": 0,
+            "local_acceptance_calls": 0,
             "state_file": str(self.root / "state.json"),
             "calls_this_invocation": self.budget.used_steps - self.calls_before,
-            "fresh_verification": self.fresh_verification, "result_reused": self.reused_result,
+            "fresh_verification": self.fresh_verification,
+            "result_reused": self.reused_result,
             "source_performance": self.state.get("source_performance", {}),
             "local_state_stats": dict(self.history_store.stats) if self.history_store else {},
             "compactions": self.state.get("compactions", []),
             "web_usage": self.state.get('web_usage', []),
-            "history_database": str(self.root / "history.sqlite3") if self.history_store else None}
+            "history_database": str(self.root / "history.sqlite3") if self.history_store else None,
+        }
         if self.interactive:
-            public = [(AIMessage if row['type'] == 'ai' else HumanMessage)(content=row['content'], id=row['id'])
-                      for row in self.state.get('public_events', [])]
-            outcome['messages'] = [*self.public_history, HumanMessage(content=self.state['request']), *public]
+            public = [
+                (AIMessage if row['type'] == 'ai' else HumanMessage)(
+                    content=row['content'], id=row['id']
+                )
+                for row in self.state.get('public_events', [])
+            ]
+            outcome['messages'] = [
+                *self.public_history,
+                HumanMessage(content=self.state['request']),
+                *public,
+            ]
         save(self.root / "result.json", {k: v for k, v in outcome.items() if k != "messages"})
         return outcome

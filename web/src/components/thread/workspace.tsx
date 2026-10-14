@@ -234,7 +234,12 @@ export function Workspace({
               </p>
             )}
           </div>
-          {!readOnly && page?.path && <ProjectExecution apiUrl={apiUrl} repo={page.path} />}
+          {!readOnly && page?.path && (
+            <ProjectExecution
+              apiUrl={apiUrl}
+              repo={page.path}
+            />
+          )}
           {error && (
             <p
               role="alert"

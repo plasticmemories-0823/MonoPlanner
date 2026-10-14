@@ -1,4 +1,4 @@
-"""Offline navigation contracts. These do not measure model task success."""
+"""离线验证源码导航约定，不衡量模型完成任务的成功率。"""
 
 import json
 import os
@@ -59,17 +59,34 @@ class RepositoryMapTests(unittest.TestCase):
         self.assertIn("不是语义检索", result["note"])
 
     def test_nested_request_prefers_consumer_not_argument_definitions(self):
-        (self.repo / "consumer.py").write_text("def render(value):\n    return str(value)\n", encoding="utf-8")
-        (self.repo / "arguments.py").write_text("def sin(x): return x\ndef wrap(x): return x\n", encoding="utf-8")
-        result = self.navigator.query("Please implement a code fix for this repository issue:\n\nrender(sin(wrap(x))) returns invalid output")
+        (self.repo / "consumer.py").write_text(
+            "def render(value):\n    return str(value)\n", encoding="utf-8"
+        )
+        (self.repo / "arguments.py").write_text(
+            "def sin(x): return x\ndef wrap(x): return x\n", encoding="utf-8"
+        )
+        result = self.navigator.query(
+            "Please implement a code fix for this repository issue:\n\nrender(sin(wrap(x))) returns invalid output"
+        )
         self.assertEqual(result["candidates"][0]["path"], "consumer.py")
         self.assertEqual(result["candidates"][0]["symbols"][0]["name"], "render")
 
     def test_related_tests_follow_requested_symbol_not_entire_module_or_unbound_method(self):
-        (self.repo / "consumer.py").write_text("def render(x): return x\ndef unrelated(x): return x\nclass Other:\n    def run(self): pass\n", encoding="utf-8")
-        (self.repo / "test_relevant.py").write_text("from consumer import render as convert\ndef test_render(): assert convert(1) == 1\n", encoding="utf-8")
-        (self.repo / "test_unrelated.py").write_text("from consumer import unrelated\ndef test_other(): assert unrelated(1) == 1\n", encoding="utf-8")
-        (self.repo / "test_method.py").write_text("def test_run(obj): obj.run()\n", encoding="utf-8")
+        (self.repo / "consumer.py").write_text(
+            "def render(x): return x\ndef unrelated(x): return x\nclass Other:\n    def run(self): pass\n",
+            encoding="utf-8",
+        )
+        (self.repo / "test_relevant.py").write_text(
+            "from consumer import render as convert\ndef test_render(): assert convert(1) == 1\n",
+            encoding="utf-8",
+        )
+        (self.repo / "test_unrelated.py").write_text(
+            "from consumer import unrelated\ndef test_other(): assert unrelated(1) == 1\n",
+            encoding="utf-8",
+        )
+        (self.repo / "test_method.py").write_text(
+            "def test_run(obj): obj.run()\n", encoding="utf-8"
+        )
         result = self.navigator.query("render", path="consumer.py")["candidates"][0]
         self.assertEqual([s["name"] for s in result["symbols"]], ["render"])
         self.assertEqual([t["path"] for t in result["related"]["tests"]], ["test_relevant.py"])
@@ -81,14 +98,18 @@ class RepositoryMapTests(unittest.TestCase):
             with self.subTest(case=case["id"]):
                 result = self.navigator.query(case["query"], limit=3)
                 self.assertEqual(result["candidates"][0]["path"], case["expected_file"])
-                self.assertIn(case["expected_test"],
-                              [t["path"] for t in result["candidates"][0]["related"]["tests"]])
+                self.assertIn(
+                    case["expected_test"],
+                    [t["path"] for t in result["candidates"][0]["related"]["tests"]],
+                )
                 self.assertLessEqual(len(json.dumps(result, ensure_ascii=False)), 10000)
 
     def test_aliases_relative_imports_and_fixtures_have_explicit_static_evidence(self):
         result = self.navigator.query("add", path="./src/tinycalc/arithmetic.py")
         item = result["candidates"][0]
-        self.assertEqual(item["symbols"][0]["signature"], "def add(left: float, right: float) -> float")
+        self.assertEqual(
+            item["symbols"][0]["signature"], "def add(left: float, right: float) -> float"
+        )
         self.assertEqual(item["symbols"][0]["line"], 1)
         self.assertEqual(item["symbols"][0]["end_line"], 3)
         self.assertEqual(item["read_hint"]["offset"], 0)
@@ -97,7 +118,9 @@ class RepositoryMapTests(unittest.TestCase):
         self.assertEqual(item["related"]["tests"][0]["certainty"], "static_candidate")
         self.assertIn("tests/conftest.py", item["related"]["fixture_files"])
         self.assertIn("src/tinycalc/api.py", [c["path"] for c in item["related"]["callers"]])
-        dependencies = self.navigator.query("total", path="src/tinycalc/api.py")["candidates"][0]["related"]["dependencies"]
+        dependencies = self.navigator.query("total", path="src/tinycalc/api.py")["candidates"][0][
+            "related"
+        ]["dependencies"]
         self.assertIn("src/tinycalc/arithmetic.py", [d["path"] for d in dependencies])
         decoy = self.navigator.query("add", path="src/unrelated/arithmetic.py")["candidates"][0]
         self.assertEqual(decoy["related"]["tests"], [])
@@ -107,7 +130,9 @@ class RepositoryMapTests(unittest.TestCase):
         (self.repo / "client.py").write_text(
             f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
             "class Client:\n    async def send(self, text: str) -> int:\n"
-            "        \"\"\"Send one text.\"\"\"\n        return len(text)\n", encoding="utf-8")
+            "        \"\"\"Send one text.\"\"\"\n        return len(text)\n",
+            encoding="utf-8",
+        )
         result = self.navigator.query("Client", path="client.py")
         self.assertFalse(marker.exists())
         symbols = result["candidates"][0]["symbols"]
@@ -120,7 +145,10 @@ class RepositoryMapTests(unittest.TestCase):
         first = self.navigator.query("add")
         path = self.repo / "src/tinycalc/arithmetic.py"
         before = path.stat()
-        path.write_text(path.read_text(encoding="utf-8").replace("left - right", "left + right"), encoding="utf-8")
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("left - right", "left + right"),
+            encoding="utf-8",
+        )
         os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
         second = self.navigator.query("add")
         self.assertNotEqual(first["source_version"], second["source_version"])
@@ -142,6 +170,7 @@ class RepositoryMapTests(unittest.TestCase):
 
     def test_baseline_and_live_paths_do_not_share_mutable_cache(self):
         import shutil
+
         copy = self.root / "baseline"
         shutil.copytree(self.repo, copy)
         baseline = RepositoryNavigator(copy, self.root / "cache")
@@ -161,8 +190,14 @@ class RepositoryMapTests(unittest.TestCase):
         self.assertEqual(rebuilt["candidates"][0]["path"], "src/tinycalc/names.py")
 
     def test_derived_and_secret_files_are_excluded(self):
-        for relative in (".venv/library.py", ".env.local.py", ".git/hook.py", "eval/runs/old.py",
-                         "node_modules/lib.py", "__pycache__/generated.py"):
+        for relative in (
+            ".venv/library.py",
+            ".env.local.py",
+            ".git/hook.py",
+            "eval/runs/old.py",
+            "node_modules/lib.py",
+            "__pycache__/generated.py",
+        ):
             path = self.repo / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("def EXCLUDED_MARKER(): pass\n", encoding="utf-8")
@@ -171,8 +206,9 @@ class RepositoryMapTests(unittest.TestCase):
     def test_reparse_points_are_not_read(self):
         target = self.repo / "linked.py"
         target.write_text("def LINK_TARGET(): pass\n", encoding="utf-8")
-        # Exercise the reparse exclusion without requiring Windows symlink privilege.
+        # 验证重解析点排除规则，无需 Windows 符号链接权限。
         from agent.source.index import _link
+
         with patch("agent.source.index._link", side_effect=lambda p: p == target or _link(p)):
             self.assertEqual(self.navigator.query("LINK_TARGET")["candidates"], [])
 
@@ -189,7 +225,6 @@ class RepositoryMapTests(unittest.TestCase):
             result = self.navigator.query("total")
         self.assertLessEqual(result["index"]["hashed_bytes"], 100)
         self.assertTrue(result["index"]["incomplete"])
-
 
     def test_invalid_scope_is_rejected_and_cache_cannot_pollute_source(self):
         for path in ("../x", "/tmp/x", "C:/source/x", "src/../../x", "x" * 601, None):

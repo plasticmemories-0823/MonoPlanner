@@ -1,4 +1,5 @@
-"""Reference reuse remains bounded and originals are checked before actual use."""
+"""引用复用始终受限，实际使用前检查原始内容。"""
+
 import os
 from pathlib import Path
 import tempfile
@@ -26,7 +27,7 @@ class IncrementalHistoryTests(unittest.TestCase):
             self.store.record(state, 'progress', {'i': i})
         self.assertEqual(self.store.stats['message_serializations'], 2)
         self.assertEqual(self.store.load(), state)
-        self.assertEqual(len(list((self.store.root/'history/messages').glob('*.json'))), 2)
+        self.assertEqual(len(list((self.store.root / 'history/messages').glob('*.json'))), 2)
 
     def test_nested_mutation_is_saved_as_new_original(self):
         message = {'data': {'tool_calls': [{'args': {'code': 'a'}}]}}
@@ -40,7 +41,7 @@ class IncrementalHistoryTests(unittest.TestCase):
     def test_tamper_with_same_size_and_mtime_is_rejected_at_boundary(self):
         state = {'history': [{'content': 'original'}]}
         self.store.record(state, 'progress', {})
-        path = next((self.store.root/'history/messages').glob('*.json'))
+        path = next((self.store.root / 'history/messages').glob('*.json'))
         original = path.stat()
         path.write_bytes(path.read_bytes().replace(b'original', b'modified'))
         os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))

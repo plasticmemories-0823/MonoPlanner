@@ -1,4 +1,5 @@
-"""One shared async loop lets synchronous graph nodes cancel network waits."""
+"""通过共享异步循环，让同步图节点能够取消网络等待。"""
+
 import asyncio
 from concurrent.futures import Future
 from threading import Lock, Thread
@@ -22,8 +23,11 @@ def run(coroutine, signal):
         try:
             result.set_result(value.result())
         except asyncio.CancelledError:
-            error = (ModelInterrupted(signal.kind) if signal.kind else
-                     RuntimeError('Model stream cancelled without a user interruption'))
+            error = (
+                ModelInterrupted(signal.kind)
+                if signal.kind
+                else RuntimeError('Model stream cancelled without a user interruption')
+            )
             result.set_exception(error)
         except BaseException as exc:
             result.set_exception(exc)
@@ -39,6 +43,7 @@ def run(coroutine, signal):
             if task and not task.done() and not cancelling:
                 cancelling = True
                 task.cancel()
+
         _loop.call_soon_threadsafe(request_cancel)
 
     _loop.call_soon_threadsafe(start)

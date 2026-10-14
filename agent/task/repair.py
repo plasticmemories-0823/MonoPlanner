@@ -1,4 +1,5 @@
-"""Keep rejected drafts local; apply explicit, source-bound edits atomically."""
+"""被拒草稿保留在本地，原子应用明确且绑定源码的编辑。"""
+
 from copy import deepcopy
 import hashlib
 import json
@@ -27,6 +28,9 @@ class Correction(BaseModel):
     edits: list[Edit] = Field(min_length=1, max_length=24)
 
 
+# ========================================================================
+# 严格 JSON 与字段路径处理
+# ========================================================================
 def encode(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -39,8 +43,12 @@ def loads(text):
                 raise ValueError("Duplicate JSON field: " + key)
             result[key] = value
         return result
-    return json.loads(text, object_pairs_hook=object_pairs,
-                      parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Invalid JSON number: " + v)))
+
+    return json.loads(
+        text,
+        object_pairs_hook=object_pairs,
+        parse_constant=lambda v: (_ for _ in ()).throw(ValueError("Invalid JSON number: " + v)),
+    )
 
 
 def location(value, path):
@@ -50,7 +58,9 @@ def location(value, path):
     parent = value
     for part in parts[:-1]:
         try:
-            parent = parent[int(part)] if isinstance(parent, list) and part.isdecimal() else parent[part]
+            parent = (
+                parent[int(part)] if isinstance(parent, list) and part.isdecimal() else parent[part]
+            )
         except (KeyError, IndexError, TypeError):
             raise ValueError("Correction parent does not exist: " + path) from None
     if not isinstance(parent, (dict, list)):
@@ -61,10 +71,15 @@ def location(value, path):
     return parent, key
 
 
+# ========================================================================
+# 按明确允许的路径应用修正
+# ========================================================================
 def apply(value, edits, allowed):
     result = deepcopy(value)
     for edit in edits:
-        if not any(edit.path == p or (p != "$raw" and edit.path.startswith(p + "/")) for p in allowed):
+        if not any(
+            edit.path == p or (p != "$raw" and edit.path.startswith(p + "/")) for p in allowed
+        ):
             raise ValueError("Correction outside reported fields: " + edit.path)
         if edit.path == "$raw":
             if edit.operation != "edit_text":
@@ -72,18 +87,26 @@ def apply(value, edits, allowed):
             parent, key = {"raw": result}, "raw"
         else:
             parent, key = location(result, edit.path)
-        present = key in parent if isinstance(parent, dict) else isinstance(key, int) and 0 <= key < len(parent)
+        present = (
+            key in parent
+            if isinstance(parent, dict)
+            else isinstance(key, int) and 0 <= key < len(parent)
+        )
         current = parent[key] if present else None
         if edit.operation == "edit_text":
             if not isinstance(current, str) or not edit.before or current.count(edit.before) != 1:
                 raise ValueError("Text correction requires one exact nonempty match: " + edit.path)
             parent[key] = current.replace(edit.before, edit.after, 1)
         else:
-            if (not present and edit.before != "") or (present and encode(current) != encode(loads(edit.before))):
+            if (not present and edit.before != "") or (
+                present and encode(current) != encode(loads(edit.before))
+            ):
                 raise ValueError("Original value does not match: " + edit.path)
             if edit.operation == "remove":
                 if not present or edit.after:
-                    raise ValueError("remove requires an existing field and empty after: " + edit.path)
+                    raise ValueError(
+                        "remove requires an existing field and empty after: " + edit.path
+                    )
                 del parent[key]
             else:
                 if isinstance(parent, list) and not present:
@@ -94,14 +117,20 @@ def apply(value, edits, allowed):
     return loads(result) if isinstance(result, str) else result
 
 
+# ========================================================================
+# 聚合校验错误并生成局部预览
+# ========================================================================
 def fields(error, value):
     if isinstance(error, ValidationErrors):
         return error.paths
     if isinstance(value, str):
         return ["$raw"]
     if hasattr(error, "errors"):
-        paths = ["/" + "/".join(str(p).replace("~", "~0").replace("/", "~1") for p in e["loc"])
-                 for e in error.errors() if e["loc"]]
+        paths = [
+            "/" + "/".join(str(p).replace("~", "~0").replace("/", "~1") for p in e["loc"])
+            for e in error.errors()
+            if e["loc"]
+        ]
         if paths:
             return sorted(set(paths))
     message = str(error)
@@ -120,7 +149,8 @@ def fields(error, value):
 
 
 class ValidationErrors(ValueError):
-    """Independent checks report together, without running rejected work."""
+    """集中报告独立检查结果，不执行被拒绝的工作。"""
+
     def __init__(self, errors):
         self.paths = sorted({path for paths, _ in errors for path in paths})
         self.issues = []
@@ -128,7 +158,9 @@ class ValidationErrors(ValueError):
             if hasattr(error, "errors"):
                 for issue in error.errors():
                     location = "/" + "/".join(map(str, issue["loc"]))
-                    self.issues.append(f"{location}: {issue['msg']}; actual={encode(issue.get('input'))[:100]}")
+                    self.issues.append(
+                        f"{location}: {issue['msg']}; actual={encode(issue.get('input'))[:100]}"
+                    )
             else:
                 self.issues.append(", ".join(paths) + ": " + str(error))
         super().__init__("\n".join(self.issues))
@@ -140,7 +172,7 @@ def preview(value, paths, error):
         if path == "$raw":
             text = value
             start = max(0, getattr(error, "pos", 0) - 100)
-            snippets[path] = text[start:start + 400]
+            snippets[path] = text[start : start + 400]
             continue
         try:
             parent, key = location(value, path)
@@ -150,22 +182,43 @@ def preview(value, paths, error):
                 cause = error.__cause__
                 match = re.search(r":(\d+)\b", str(error))
                 line = getattr(cause, "lineno", None) or (int(match[1]) if match else None)
-                indices = ([max(0, line - 2)] if line else
-                           [i for i, row in enumerate(rows) if any(word in row and word in str(error)
-                            for word in ("imports", "ARTIFACT_CHECKS"))])
-                text = "".join("".join(rows[i:i + 3]) for i in indices[:3]) if indices else parent[key][:600]
+                indices = (
+                    [max(0, line - 2)]
+                    if line
+                    else [
+                        i
+                        for i, row in enumerate(rows)
+                        if any(
+                            word in row and word in str(error)
+                            for word in ("imports", "ARTIFACT_CHECKS")
+                        )
+                    ]
+                )
+                text = (
+                    "".join("".join(rows[i : i + 3]) for i in indices[:3])
+                    if indices
+                    else parent[key][:600]
+                )
             snippets[path] = text[:1200]
         except (KeyError, IndexError, TypeError, ValueError):
             snippets[path] = "<missing>"
     return snippets
 
 
+# ========================================================================
+# 被拒草稿的保存、读取与合并
+# ========================================================================
 def reject(owner, error):
     value = getattr(owner, "rejected_input", None)
     if value is not None:
         paths = fields(error, value)
-        record = {"value": value, "source": owner.state["source"], "paths": paths,
-                  "error": str(error), "snippets": preview(value, paths, error)}
+        record = {
+            "value": value,
+            "source": owner.state["source"],
+            "paths": paths,
+            "error": str(error),
+            "snippets": preview(value, paths, error),
+        }
         if isinstance(error, ValidationErrors):
             record["issues"] = error.issues
         raw = encode(record).encode()
@@ -174,23 +227,39 @@ def reject(owner, error):
         path = owner.root / relative
         if not path.exists():
             save(path, record)
-        ref = {"id": identifier, "record": relative,
-               "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "source": record["source"]}
+        ref = {
+            "id": identifier,
+            "record": relative,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "source": record["source"],
+        }
         read(owner, ref)
         owner.state["repair_draft"] = ref
     ref = owner.state.get("repair_draft")
     if not ref:
-        return "[Plan rejected; no actions executed] " + str(error)[:1800] + "\nSubmit a valid work request."
+        return (
+            "[Plan rejected; no actions executed] "
+            + str(error)[:1800]
+            + "\nSubmit a valid work request."
+        )
     record = read(owner, ref)
-    notice = {"draft_id": ref["id"], "error": str(error)[:1800], "allowed_paths": record["paths"],
-              "original_fragments": record["snippets"], "original_record": "$record/" + ref["record"],
-              "origin": "Your rejected tool arguments; unchanged work is retained locally, not generated by the host."}
+    notice = {
+        "draft_id": ref["id"],
+        "error": str(error)[:1800],
+        "allowed_paths": record["paths"],
+        "original_fragments": record["snippets"],
+        "original_record": "$record/" + ref["record"],
+        "origin": "Your rejected tool arguments; unchanged work is retained locally, not generated by the host.",
+    }
     if record.get("issues"):
         notice["issues"] = record["issues"]
     if str(error) != record["error"]:
         notice["original_error"] = record["error"][:1800]
-    instruction = ("Use repair_work for these fields; preserve all other work." if record["paths"] else
-                   "No field correction is available; submit a valid work request.")
+    instruction = (
+        "Use repair_work for these fields; preserve all other work."
+        if record["paths"]
+        else "No field correction is available; submit a valid work request."
+    )
     return "[Plan rejected; no actions executed] " + encode(notice) + "\n" + instruction
 
 
@@ -199,10 +268,19 @@ def read(owner, ref):
         raw = _safe_file(owner.root, Path(ref["record"])).read_bytes()
         record = loads(raw.decode())
     except (OSError, ValueError):
-        raise ModelRequestNotSent("state_conflict", "Rejected draft unavailable; no correction applied.") from None
-    if (not isinstance(record, dict) or hashlib.sha256(raw).hexdigest() != ref["sha256"] or ref["source"] != owner.state["source"]
-            or record.get("source") != ref["source"] or hashlib.sha256(encode(record).encode()).hexdigest() != ref["id"]):
-        raise ModelRequestNotSent("state_conflict", "Rejected draft changed; no correction or operation applied.")
+        raise ModelRequestNotSent(
+            "state_conflict", "Rejected draft unavailable; no correction applied."
+        ) from None
+    if (
+        not isinstance(record, dict)
+        or hashlib.sha256(raw).hexdigest() != ref["sha256"]
+        or ref["source"] != owner.state["source"]
+        or record.get("source") != ref["source"]
+        or hashlib.sha256(encode(record).encode()).hexdigest() != ref["id"]
+    ):
+        raise ModelRequestNotSent(
+            "state_conflict", "Rejected draft changed; no correction or operation applied."
+        )
     return record
 
 
@@ -215,26 +293,49 @@ def merge(owner, arguments):
     return apply(record["value"], correction.edits, record["paths"])
 
 
+# ========================================================================
+# 助手回复与拒绝结果的完整配对提交
+# ========================================================================
 def prepare_rejection(owner, error):
-    """Journal a complete reply before committing its paired rejection results."""
+    """提交配对的拒绝结果前，先记录完整回复。"""
     from langchain_core.messages import messages_from_dict
     from agent.model.payload import original_calls
+
     response = owner.state.get('response_pending')
     if not response:
-        raise ModelRequestNotSent('invalid_message_history', 'Rejected response is unavailable; no retry.')
+        raise ModelRequestNotSent(
+            'invalid_message_history', 'Rejected response is unavailable; no retry.'
+        )
     message = messages_from_dict([response])[0]
     if message.response_metadata.get('finish_reason') in {
-            'length', 'content_filter', 'aborted', 'insufficient_system_resource'}:
-        raise ModelRequestNotSent('incomplete_model_response',
-                                  'Incomplete reply retained; no operations executed or automatic retry.')
+        'length',
+        'content_filter',
+        'aborted',
+        'insufficient_system_resource',
+    }:
+        raise ModelRequestNotSent(
+            'incomplete_model_response',
+            'Incomplete reply retained; no operations executed or automatic retry.',
+        )
     calls = original_calls(message)
     if not calls:
-        raise ModelRequestNotSent('invalid_message_history', 'No trustworthy tool identity; reply retained.')
-    notice = ('[Acceptance review rejected; no workspace edits] ' + str(error)
-              if getattr(owner, 'reviewing', False) else reject(owner, error))
+        raise ModelRequestNotSent(
+            'invalid_message_history', 'No trustworthy tool identity; reply retained.'
+        )
+    notice = (
+        '[Acceptance review rejected; no workspace edits] ' + str(error)
+        if getattr(owner, 'reviewing', False)
+        else reject(owner, error)
+    )
     history = owner.state['history']
-    owner.state['rejection_pending'] = {'response': response, 'calls': calls, 'notice': notice,
-        'reason': str(error), 'history_length': len(history), 'prefix_digest': digest(history)}
+    owner.state['rejection_pending'] = {
+        'response': response,
+        'calls': calls,
+        'notice': notice,
+        'reason': str(error),
+        'history_length': len(history),
+        'prefix_digest': digest(history),
+    }
     owner.persist('plan_rejection_prepared')
     finish_rejection(owner)
 
@@ -243,20 +344,44 @@ def finish_rejection(owner):
     from langchain_core.messages import ToolMessage, message_to_dict, messages_from_dict
     from agent.model.payload import original_calls
     from agent.task import dialogue
+
     pending = owner.state['rejection_pending']
     history = owner.state['history']
-    if (len(history) != pending['history_length'] or digest(history) != pending['prefix_digest']
-            or owner.state.get('response_pending') != pending['response']
-            or original_calls(messages_from_dict([pending['response']])[0]) != pending['calls']):
-        raise ModelRequestNotSent('state_conflict', 'Rejection continuation changed; no request sent.')
+    if (
+        len(history) != pending['history_length']
+        or digest(history) != pending['prefix_digest']
+        or owner.state.get('response_pending') != pending['response']
+        or original_calls(messages_from_dict([pending['response']])[0]) != pending['calls']
+    ):
+        raise ModelRequestNotSent(
+            'state_conflict', 'Rejection continuation changed; no request sent.'
+        )
     if owner.interactive:
         dialogue.publish(owner, pending['response'])
-    # A single checkpoint contains the entire cycle, never an unpaired assistant.
-    history.extend([pending['response'], *[message_to_dict(ToolMessage(
-        content=pending['notice'], name=call['function']['name'], tool_call_id=call['id'],
-        status='error')) for call in pending['calls']]])
-    owner.state.update(response_pending=None, repair_count=owner.state['repair_count'] + 1,
-                       plan_error=clip(pending['reason'], 1800))
+    # 单个检查点保存整个交互周期，不留下未配对的助手消息。
+    history.extend(
+        [
+            pending['response'],
+            *[
+                message_to_dict(
+                    ToolMessage(
+                        content=pending['notice'],
+                        name=call['function']['name'],
+                        tool_call_id=call['id'],
+                        status='error',
+                    )
+                )
+                for call in pending['calls']
+            ],
+        ]
+    )
+    owner.state.update(
+        response_pending=None,
+        repair_count=owner.state['repair_count'] + 1,
+        plan_error=clip(pending['reason'], 1800),
+    )
     owner.state.pop('rejection_pending')
-    owner.persist('plan_rejected', {'reason': pending['reason'],
-                                  'call_ids': [call['id'] for call in pending['calls']]})
+    owner.persist(
+        'plan_rejected',
+        {'reason': pending['reason'], 'call_ids': [call['id'] for call in pending['calls']]},
+    )

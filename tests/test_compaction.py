@@ -1,4 +1,5 @@
-"""Exercise real request views, paired tools and durable compaction recovery."""
+"""验证真实请求视图、成对工具消息和可持久恢复的上下文压缩。"""
+
 import copy
 import json
 from pathlib import Path
@@ -11,7 +12,12 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messag
 from agent.model import compaction
 from agent.model.client import ConfiguredModel
 from agent.model.context import admit
-from agent.model.errors import ModelInterrupted, ModelRequestNotSent, ModelCallError, is_context_overflow
+from agent.model.errors import (
+    ModelInterrupted,
+    ModelRequestNotSent,
+    ModelCallError,
+    is_context_overflow,
+)
 from agent.model.payload import wire_input
 from agent.model.tools import WORK_TOOLS
 from agent.source.paging import visible_reads
@@ -22,27 +28,55 @@ from test_task_runner import reply, confirmation, CODE
 from support import python_command
 
 
-def summary(text='Known failure remains unresolved. Original code and tests remain in their records.'):
-    return message_to_dict(AIMessage(content=text, response_metadata={'finish_reason': 'stop'},
-        additional_kwargs={'reasoning_content': 'private summary reasoning'},
-        usage_metadata={'input_tokens': 12, 'output_tokens': 8, 'total_tokens': 20}))
+def summary(
+    text='Known failure remains unresolved. Original code and tests remain in their records.',
+):
+    return message_to_dict(
+        AIMessage(
+            content=text,
+            response_metadata={'finish_reason': 'stop'},
+            additional_kwargs={'reasoning_content': 'private summary reasoning'},
+            usage_metadata={'input_tokens': 12, 'output_tokens': 8, 'total_tokens': 20},
+        )
+    )
 
 
 def cycle(call_id, path, reasoning=''):
     data = {'path': path, 'sha256': path, 'text': '1: exact source\n', 'visible_ranges': [[0, 1]]}
-    return [message_to_dict(AIMessage(content='inspection', additional_kwargs={'reasoning_content': reasoning},
-                tool_calls=[{'id': call_id, 'name': 'submit_plan', 'args': {'kind': 'inspect'}}])),
-            message_to_dict(ToolMessage(tool_call_id=call_id, content=json.dumps(
-                {'steps': [{'op': 'read', 'status': 'succeeded', 'data': data}]})))]
+    return [
+        message_to_dict(
+            AIMessage(
+                content='inspection',
+                additional_kwargs={'reasoning_content': reasoning},
+                tool_calls=[{'id': call_id, 'name': 'submit_plan', 'args': {'kind': 'inspect'}}],
+            )
+        ),
+        message_to_dict(
+            ToolMessage(
+                tool_call_id=call_id,
+                content=json.dumps(
+                    {'steps': [{'op': 'read', 'status': 'succeeded', 'data': data}]}
+                ),
+            )
+        ),
+    ]
 
 
 class Loop:
     def __init__(self, root):
         self.root, self.rules, self.history_store = root, 'fixed rules', None
-        self.state = {'history': [message_to_dict(HumanMessage(content='original request')),
-                      *cycle('old', 'old.py', 'old reasoning ' * 14000), *cycle('recent', 'recent.py', 'recent reasoning')],
-                      'rules': self.rules, 'request': 'fix behavior', 'acceptance': 'fixed requirement',
-                      'verify_command': 'fixed command', 'source': 'source-v1'}
+        self.state = {
+            'history': [
+                message_to_dict(HumanMessage(content='original request')),
+                *cycle('old', 'old.py', 'old reasoning ' * 14000),
+                *cycle('recent', 'recent.py', 'recent reasoning'),
+            ],
+            'rules': self.rules,
+            'request': 'fix behavior',
+            'acceptance': 'fixed requirement',
+            'verify_command': 'fixed command',
+            'source': 'source-v1',
+        }
         self.calls, self.events = [], []
         self.answer = summary()
         self.answers = None
@@ -57,7 +91,9 @@ class Loop:
         self.calls.append((messages, purpose))
         if self.answers is not None:
             self.answer = next(self.answers)
-        self.state['compaction_pending'].update(stage='response_saved', response=copy.deepcopy(self.answer), call=len(self.calls))
+        self.state['compaction_pending'].update(
+            stage='response_saved', response=copy.deepcopy(self.answer), call=len(self.calls)
+        )
         self.persist('model_response_received')
         return self.answer
 
@@ -68,7 +104,7 @@ class CompactionTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.loop = Loop(self.root)
-        self.policy = {'threshold_ratio': .01, 'headroom_tokens': 0, 'retain_ratio': .00005}
+        self.policy = {'threshold_ratio': 0.01, 'headroom_tokens': 0, 'retain_ratio': 0.00005}
 
     def compress(self):
         with patch.dict(compaction.CONFIG, self.policy):
@@ -95,7 +131,10 @@ class CompactionTests(unittest.TestCase):
         self.assertIn('recent reasoning', json.dumps(actual))
         self.assertIn('fixed requirement', json.dumps(actual))
         self.assertNotIn('private summary reasoning', json.dumps(actual))
-        self.assertLess(self.loop.state['compactions'][0]['after_tokens'], self.loop.state['compactions'][0]['before_tokens'])
+        self.assertLess(
+            self.loop.state['compactions'][0]['after_tokens'],
+            self.loop.state['compactions'][0]['before_tokens'],
+        )
         compaction.prepare(self.loop, 65536)
         self.assertEqual(len(self.loop.calls), 1)
 
@@ -131,19 +170,37 @@ class CompactionTests(unittest.TestCase):
         self.assertIn(('recent.py', 'recent.py'), visible)
 
     def test_program_snapshot_uses_actual_records_without_llm_completion_judgment(self):
-        directory = self.root / 'plans/p0001'; directory.mkdir(parents=True)
-        result = {'outcome': 'verification_failed', 'steps': [{'id': 'fix', 'op': 'shell',
-            'status': 'succeeded', 'record': 'plans/p0001/fix/result.json'}]}
+        directory = self.root / 'plans/p0001'
+        directory.mkdir(parents=True)
+        result = {
+            'outcome': 'verification_failed',
+            'steps': [
+                {
+                    'id': 'fix',
+                    'op': 'shell',
+                    'status': 'succeeded',
+                    'record': 'plans/p0001/fix/result.json',
+                }
+            ],
+        }
         (directory / 'result.json').write_text(json.dumps(result), encoding='utf-8')
         (self.root / 'frozen-acceptance.json').write_text('{"fixed": true}', encoding='utf-8')
-        self.loop.state.update(status='needs_plan', plan_count=1, last_plan='p0001', last_result=result,
-                               verification={'status': 'failed'})
+        self.loop.state.update(
+            status='needs_plan',
+            plan_count=1,
+            last_plan='p0001',
+            last_result=result,
+            verification={'status': 'failed'},
+        )
         self.loop.answer = summary('The historical command succeeded; no current completion claim.')
         snapshot = compaction.execution_snapshot(self.loop)
         self.assertEqual(snapshot['verification_status'], 'failed')
         self.assertEqual(snapshot['operations'][0]['status'], 'succeeded')
         self.assertEqual(snapshot['latest_result']['path'], 'plans/p0001/result.json')
-        self.assertEqual(snapshot['latest_result']['sha256'], __import__('hashlib').sha256((directory / 'result.json').read_bytes()).hexdigest())
+        self.assertEqual(
+            snapshot['latest_result']['sha256'],
+            __import__('hashlib').sha256((directory / 'result.json').read_bytes()).hexdigest(),
+        )
         self.compress()
         body = compaction.checked(self.root, self.loop.state['context_view']['record'])
         self.assertEqual(body['execution_snapshot'], snapshot)
@@ -152,13 +209,23 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(self.loop.state['verification']['status'], 'failed')
 
     def test_recent_request_and_results_follow_background_without_rewriting_checkpoint(self):
-        self.loop.state['history'].append(message_to_dict(HumanMessage(content='NEW request: read fresh.py, old reads do not satisfy it')))
+        self.loop.state['history'].append(
+            message_to_dict(
+                HumanMessage(content='NEW request: read fresh.py, old reads do not satisfy it')
+            )
+        )
         self.compress()
         view = compaction.history(self.loop.state, self.root)
-        self.assertIn('Later requests and actual tool results take precedence', view[1]['data']['content'])
-        self.assertEqual(view[-1]['data']['content'], 'NEW request: read fresh.py, old reads do not satisfy it')
+        self.assertIn(
+            'Later requests and actual tool results take precedence', view[1]['data']['content']
+        )
+        self.assertEqual(
+            view[-1]['data']['content'], 'NEW request: read fresh.py, old reads do not satisfy it'
+        )
         original = copy.deepcopy(view[:2])
-        self.loop.state.update(status='needs_plan', verification={'status': 'failed'}, source='source-v2')
+        self.loop.state.update(
+            status='needs_plan', verification={'status': 'failed'}, source='source-v2'
+        )
         self.loop.state['history'].extend(cycle('new', 'fresh.py'))
         updated = compaction.history(self.loop.state, self.root)
         self.assertEqual(updated[:2], original)
@@ -181,7 +248,9 @@ class CompactionTests(unittest.TestCase):
         self.compress()
         pinned = copy.deepcopy(compaction.history(self.loop.state, self.root)[:2])
         self.loop.state['user_updates'] = [{'id': 'new', 'text': '新增要求逐字保留'}]
-        self.loop.state['history'].append(message_to_dict(HumanMessage(content='新增要求逐字保留', id='new')))
+        self.loop.state['history'].append(
+            message_to_dict(HumanMessage(content='新增要求逐字保留', id='new'))
+        )
         self.assertEqual(compaction.history(self.loop.state, self.root)[:2], pinned)
         self.loop.state['history'].extend(cycle('large', 'large.py', 'large reasoning ' * 14000))
         self.loop.state['history'].extend(cycle('last', 'last.py'))
@@ -197,12 +266,24 @@ class CompactionTests(unittest.TestCase):
         self.assertNotIn('open', [c['id'] for m in request for c in getattr(m, 'tool_calls', [])])
 
     def test_incomplete_empty_tool_and_expanding_summaries_do_not_replace_history(self):
-        for answer in (summary(''), summary('x' * 400000),
-                       message_to_dict(AIMessage(content='truncated', response_metadata={'finish_reason': 'length'})),
-                       message_to_dict(AIMessage(content='bad', tool_calls=[{'id': 'bad', 'name': 'submit_plan', 'args': {}}],
-                                                response_metadata={'finish_reason': 'stop'}))):
+        for answer in (
+            summary(''),
+            summary('x' * 400000),
+            message_to_dict(
+                AIMessage(content='truncated', response_metadata={'finish_reason': 'length'})
+            ),
+            message_to_dict(
+                AIMessage(
+                    content='bad',
+                    tool_calls=[{'id': 'bad', 'name': 'submit_plan', 'args': {}}],
+                    response_metadata={'finish_reason': 'stop'},
+                )
+            ),
+        ):
             with self.subTest(answer=answer['data']['content'][:15]):
-                self.loop = Loop(self.root / str(len(self.loop.calls)) / str(len(answer['data']['content'])))
+                self.loop = Loop(
+                    self.root / str(len(self.loop.calls)) / str(len(answer['data']['content']))
+                )
                 self.loop.answer = answer
                 before = copy.deepcopy(self.loop.state['history'])
                 with self.assertRaises(ModelRequestNotSent):
@@ -245,7 +326,9 @@ class CompactionTests(unittest.TestCase):
         model = ConfiguredModel(object())
         self.assertNotIn('tool_choice', model.request_options)
         self.assertEqual(model.for_purpose('compaction').request_options['tool_choice'], 'none')
-        self.assertEqual(model.for_purpose('compaction').request_options['reasoning_effort'], 'high')
+        self.assertEqual(
+            model.for_purpose('compaction').request_options['reasoning_effort'], 'high'
+        )
 
     def test_two_effective_summaries_and_no_third_attempt(self):
         self.loop.answers = iter([summary('x' * 45000), summary()])
@@ -269,6 +352,7 @@ class CompactionTests(unittest.TestCase):
         class Rejected(Exception):
             status_code = 400
             body = {'error': {'code': 'context_length_exceeded'}}
+
         self.assertTrue(is_context_overflow(Rejected()))
         self.assertTrue(is_context_overflow(ModelCallError('rejected', context_overflow=True)))
         self.assertFalse(is_context_overflow(TimeoutError('context length exceeded')))
@@ -289,9 +373,11 @@ class SDK:
     def invoke(self, messages, **options):
         self.calls.append((messages, options))
         if options.get('tool_choice') == 'none':
-            return AIMessage(content='Evidence in saved source records. Value must return four; work remains pending.',
+            return AIMessage(
+                content='Evidence in saved source records. Value must return four; work remains pending.',
                 response_metadata={'finish_reason': 'stop'},
-                usage_metadata={'input_tokens': 12, 'output_tokens': 8, 'total_tokens': 20})
+                usage_metadata={'input_tokens': 12, 'output_tokens': 8, 'total_tokens': 20},
+            )
         if self.failures:
             self.failures -= 1
             raise ModelCallError('Explicit context rejection', context_overflow=True)
@@ -300,7 +386,9 @@ class SDK:
             return result
         plan = next(self.plans)
         result = reply(plan)
-        result.additional_kwargs['reasoning_content'] = 'old evidence reasoning ' * (10000 if len(self.calls) == 1 else 1)
+        result.additional_kwargs['reasoning_content'] = 'old evidence reasoning ' * (
+            10000 if len(self.calls) == 1 else 1
+        )
         return result
 
 
@@ -309,41 +397,77 @@ class DurableCompactionTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        self.repo = self.root / 'repo'; self.repo.mkdir()
+        self.repo = self.root / 'repo'
+        self.repo.mkdir()
         (self.repo / 'sample.py').write_text('def value():\n    return 0\n')
         self.env = LocalEnvironment(self.repo, artifact_root=self.root / 'runtime')
-        plans = [{'kind': 'inspect', 'note': 'read source', 'steps': [{'id': 'r', 'op': 'read', 'path': 'sample.py'}]},
-                 {'kind': 'inspect', 'note': 'confirm exact source', 'steps': [{'id': 'r', 'op': 'read', 'path': 'sample.py',
-                                                                           'query': 'reread: verify'}]}]
+        plans = [
+            {
+                'kind': 'inspect',
+                'note': 'read source',
+                'steps': [{'id': 'r', 'op': 'read', 'path': 'sample.py'}],
+            },
+            {
+                'kind': 'inspect',
+                'note': 'confirm exact source',
+                'steps': [
+                    {'id': 'r', 'op': 'read', 'path': 'sample.py', 'query': 'reread: verify'}
+                ],
+            },
+        ]
         self.sdk = SDK(plans)
         self.model = ConfiguredModel(self.sdk)
-        first = self.engine(pause_after_steps=2).run([], 'value must return four', StepBudget(max_steps=10))
+        first = self.engine(pause_after_steps=2).run(
+            [], 'value must return four', StepBudget(max_steps=10)
+        )
         self.assertEqual(first['status'], 'paused', first)
-        self.policy = {'threshold_ratio': .01, 'headroom_tokens': 0, 'retain_ratio': .00005}
+        self.policy = {'threshold_ratio': 0.01, 'headroom_tokens': 0, 'retain_ratio': 0.00005}
 
     def engine(self, **options):
         return TaskRunner(self.model, self.env, state_dir=self.root / 'state', **options)
 
     def test_full_execution_budget_and_frozen_acceptance_after_saved_summary(self):
-        self.sdk.plans = iter([{'kind': 'candidate', 'note': 'fix value', 'steps': [{'id': 'fix', 'op': 'shell',
-            'command': python_command("from pathlib import Path; Path('sample.py').write_text('def value():\\n    return 4\\n')")}],
-            'test_code': CODE}])
+        self.sdk.plans = iter(
+            [
+                {
+                    'kind': 'candidate',
+                    'note': 'fix value',
+                    'steps': [
+                        {
+                            'id': 'fix',
+                            'op': 'shell',
+                            'command': python_command(
+                                "from pathlib import Path; Path('sample.py').write_text('def value():\\n    return 4\\n')"
+                            ),
+                        }
+                    ],
+                    'test_code': CODE,
+                }
+            ]
+        )
         with patch.dict(compaction.CONFIG, self.policy):
             result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.assertEqual(result['status'], 'verified_success', result)
         self.assertEqual(result['planner_calls'], 5)
         self.assertEqual(len(result['compactions']), 1)
-        self.assertEqual(sum(options.get('tool_choice') == 'none' for _, options in self.sdk.calls), 1)
+        self.assertEqual(
+            sum(options.get('tool_choice') == 'none' for _, options in self.sdk.calls), 1
+        )
         again = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.assertTrue(again['result_reused'])
         self.assertEqual(len(self.sdk.calls), 5)
 
     def test_unknown_summary_request_is_not_resent(self):
         original = TaskRunner.persist
+
         def crash(loop, event, payload=None):
             original(loop, event, payload)
-            if event == 'model_request_started' and loop.state['request_pending']['purpose'] == 'compaction':
+            if (
+                event == 'model_request_started'
+                and loop.state['request_pending']['purpose'] == 'compaction'
+            ):
                 raise InterruptedError('before response')
+
         with patch.dict(compaction.CONFIG, self.policy), patch.object(TaskRunner, 'persist', crash):
             self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         calls = len(self.sdk.calls)
@@ -353,35 +477,42 @@ class DurableCompactionTests(unittest.TestCase):
 
     def test_user_interrupted_summary_keeps_original_view_and_clears_pending(self):
         from agent.storage.history import LocalHistory
-        before = LocalHistory(self.root/'state')
+
+        before = LocalHistory(self.root / 'state')
         with before.lease():
             previous = before.load()
         before.close()
         original = self.sdk.invoke
+
         def interrupt_summary(messages, **options):
             if options.get('tool_choice') == 'none':
                 raise ModelInterrupted('pause')
             return original(messages, **options)
-        with patch.dict(compaction.CONFIG, self.policy), patch.object(self.sdk, 'invoke', interrupt_summary):
+
+        with patch.dict(compaction.CONFIG, self.policy), patch.object(
+            self.sdk, 'invoke', interrupt_summary
+        ):
             result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.assertEqual(result['status'], 'paused')
-        after = LocalHistory(self.root/'state')
+        after = LocalHistory(self.root / 'state')
         with after.lease():
             state = after.load()
         after.close()
         self.assertIsNone(state['compaction_pending'])
         self.assertIsNone(state['request_pending'])
         self.assertEqual(state.get('context_view'), previous.get('context_view'))
-        self.assertEqual(state['history'][:len(previous['history'])], previous['history'])
+        self.assertEqual(state['history'][: len(previous['history'])], previous['history'])
         self.assertEqual(state['interrupted_requests'][0]['purpose'], 'compaction')
-        self.assertFalse(list((self.root/'state'/'compaction').glob('**/*.json')))
+        self.assertFalse(list((self.root / 'state' / 'compaction').glob('**/*.json')))
 
     def test_unknown_commit_is_not_repeated(self):
         original = TaskRunner.persist
+
         def crash(loop, event, payload=None):
             original(loop, event, payload)
             if event == 'compaction_commit_started':
                 raise InterruptedError('commit interrupted')
+
         with patch.dict(compaction.CONFIG, self.policy), patch.object(TaskRunner, 'persist', crash):
             self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         calls = len(self.sdk.calls)
@@ -392,12 +523,17 @@ class DurableCompactionTests(unittest.TestCase):
     def test_saved_summary_response_is_reused_with_real_checkpoint(self):
         class PowerLoss(BaseException):
             pass
+
         original = TaskRunner.persist
+
         def crash(loop, event, payload=None):
             original(loop, event, payload)
             if event == 'model_response_received' and loop.state.get('compaction_pending'):
                 raise PowerLoss()
-        with patch.dict(compaction.CONFIG, self.policy), patch.object(TaskRunner, 'persist', crash), self.assertRaises(PowerLoss):
+
+        with patch.dict(compaction.CONFIG, self.policy), patch.object(
+            TaskRunner, 'persist', crash
+        ), self.assertRaises(PowerLoss):
             self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.sdk.plans = iter([{'kind': 'blocked', 'note': 'fixture complete'}])
         with patch.dict(compaction.CONFIG, self.policy):
@@ -412,7 +548,7 @@ class DurableCompactionTests(unittest.TestCase):
         result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.assertEqual(result['status'], 'task_blocked', result)
         self.assertEqual(result['compactions'][0]['trigger'], 'context-overflow')
-        self.assertEqual(len(self.sdk.calls), 5)  # two completed calls, rejection, summary, continuation
+        self.assertEqual(len(self.sdk.calls), 5)  # 两次已完成调用、拒绝记录、摘要和继续执行。
         self.assertEqual(self.sdk.calls[-1][1].get('tool_choice'), None)
         self.assertEqual(len(result['compactions']), 1)
         self.assertEqual(result['planner_calls'], 5)

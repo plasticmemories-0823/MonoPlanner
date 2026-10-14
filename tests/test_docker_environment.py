@@ -1,4 +1,4 @@
-"""Offline Docker CLI contract tests; no daemon, image pull, or paid API needed."""
+"""离线验证 Docker CLI 约定；无需守护进程、拉取镜像或付费 API。"""
 
 import base64
 import json
@@ -19,8 +19,9 @@ class DockerEnvironmentTests(unittest.TestCase):
         self.repo = self.base / "repo space"
         self.repo.mkdir()
         self.artifacts = self.base / "evidence space"
-        self.environment = DockerEnvironment(self.repo, "benchmark:test", "agent-test",
-                                             artifact_root=self.artifacts)
+        self.environment = DockerEnvironment(
+            self.repo, "benchmark:test", "agent-test", artifact_root=self.artifacts
+        )
         self.cid = "a" * 64
 
     def _successful_run(self, arguments, **kwargs):
@@ -30,9 +31,16 @@ class DockerEnvironmentTests(unittest.TestCase):
             return subprocess.CompletedProcess(arguments, 0, self.cid + "\n", "")
         payload = json.loads(base64.b64decode(arguments[-1]))
         filename = Path(payload["status_path"]).name
-        (self.artifacts / filename).write_text(json.dumps({
-            "exit_code": 0, "timed_out": False, "pid": 321,
-        }), encoding="utf-8")
+        (self.artifacts / filename).write_text(
+            json.dumps(
+                {
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "pid": 321,
+                }
+            ),
+            encoding="utf-8",
+        )
         kwargs["stdout"].write(b"COMMAND_STDOUT\n")
         kwargs["stderr"].write(b"COMMAND_STDERR\n")
         return subprocess.CompletedProcess(arguments, 0)
@@ -64,9 +72,9 @@ class DockerEnvironmentTests(unittest.TestCase):
         args = run.call_args.args[0]
         self.assertIn('--read-only', args)
         self.assertIn('/tmp:rw,exec,nosuid,nodev,size=268435456', args)
-        mounts = [args[i+1] for i, arg in enumerate(args) if arg == '--mount']
+        mounts = [args[i + 1] for i, arg in enumerate(args) if arg == '--mount']
         self.assertTrue(mounts[0].endswith(',readonly'))
-        self.assertEqual(args[args.index('--network')+1], 'none')
+        self.assertEqual(args[args.index('--network') + 1], 'none')
         self.environment.close()
 
     @patch("agent.execution.docker.subprocess.run")
@@ -79,10 +87,13 @@ class DockerEnvironmentTests(unittest.TestCase):
 
     def test_host_mapping_rejects_other_files_and_handles_spaces(self):
         self.assertEqual(self.environment.host_to_container(self.repo), "/testbed")
-        self.assertEqual(self.environment.host_to_container(self.repo / "a b.py"),
-                         "/testbed/a b.py")
-        self.assertEqual(self.environment.host_to_container(self.artifacts / "run" / "test.py"),
-                         "/agent-artifacts/run/test.py")
+        self.assertEqual(
+            self.environment.host_to_container(self.repo / "a b.py"), "/testbed/a b.py"
+        )
+        self.assertEqual(
+            self.environment.host_to_container(self.artifacts / "run" / "test.py"),
+            "/agent-artifacts/run/test.py",
+        )
         with self.assertRaises(ValueError):
             self.environment.host_to_container(self.base / "credentials.env")
 
@@ -109,6 +120,7 @@ class DockerEnvironmentTests(unittest.TestCase):
             path.write_text(json.dumps({"exit_code": 124, "timed_out": True, "pid": 42}))
             kwargs["stdout"].write(b"OUTPUT_BEFORE_TIMEOUT")
             return subprocess.CompletedProcess(arguments, 124)
+
         run.side_effect = response
         result = self.environment.execute("sleep 1000")
         self.assertTrue(result["timed_out"])
@@ -131,8 +143,10 @@ class DockerEnvironmentTests(unittest.TestCase):
 
     @patch("agent.execution.docker.subprocess.run")
     def test_zero_docker_exit_without_process_record_is_not_success(self, run):
-        run.side_effect = [subprocess.CompletedProcess([], 0, self.cid, ""),
-                           subprocess.CompletedProcess([], 0)]
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, self.cid, ""),
+            subprocess.CompletedProcess([], 0),
+        ]
         result = self.environment.execute("echo no-result")
         self.assertIn("没有有效的容器执行结果", result["error"])
         self.assertIsNone(result["exit_code"])
@@ -152,8 +166,11 @@ class DockerEnvironmentTests(unittest.TestCase):
         self.assertTrue(summary.endswith("LAST"))
         self.assertLess(len(summary), 6100)
         self.assertEqual(path.stat().st_size, 20_004)
-        self.assertEqual(summary, "[前文已截断；完整内容见日志]\n" +
-                         path.read_bytes()[-6000:].decode("utf-8", errors="replace"))
+        self.assertEqual(
+            summary,
+            "[前文已截断；完整内容见日志]\n"
+            + path.read_bytes()[-6000:].decode("utf-8", errors="replace"),
+        )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""One fixed consumer driver, sent into the task backend; never repairs producer output."""
+"""将固定的使用方驱动送入任务后端；不修补生成器的输出。"""
 
 DRIVER_SOURCE = r'''
 def build_c_driver(check, raw):
@@ -20,7 +20,7 @@ def build_c_driver(check, raw):
 
 
 def build_c_driver(check, raw):
-    """Use the identical driver locally in tests and in the isolated backend."""
+    """本地测试与隔离后端使用完全相同的驱动。"""
     scope = {}
     exec(DRIVER_SOURCE, scope)
     return scope['build_c_driver'](check, raw)

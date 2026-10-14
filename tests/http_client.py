@@ -3,6 +3,7 @@ from starlette.testclient import TestClient as StarletteTestClient
 
 TEST_TOKEN = 'offline-instance-token-not-a-production-credential'
 
+
 class TestClient(StarletteTestClient):
     def __init__(self, app, **kwargs):
         os.environ.setdefault('MONOPLANER_SERVICE_TOKEN', TEST_TOKEN)

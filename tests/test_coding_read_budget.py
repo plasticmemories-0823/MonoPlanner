@@ -1,4 +1,5 @@
-"""Coding read windows share a UTF-8 body budget, including search references."""
+"""编码读取窗口共享 UTF-8 正文预算，搜索引用也计入其中。"""
+
 import unittest
 
 from agent.execution.executor import OperationExecutor
@@ -32,10 +33,12 @@ class CodingReadBudgetTests(unittest.TestCase):
                 Operation(id='r', op=op, limit=2001 if op == 'read' else 1001, **extra)
 
     def test_455_and_401_line_sources_are_complete_across_pages(self):
-        reader = self.reader({str(n)+'.py': '# source\n' * n for n in (455, 401)})
+        reader = self.reader({str(n) + '.py': '# source\n' * n for n in (455, 401)})
         for n in (455, 401):
-            result = reader.read_continuation(str(n)+'.py', 0, 2000)
-            self.assertEqual(sum(b-a for p in read_pages(result) for a,b in p['visible_ranges']), n)
+            result = reader.read_continuation(str(n) + '.py', 0, 2000)
+            self.assertEqual(
+                sum(b - a for p in read_pages(result) for a, b in p['visible_ranges']), n
+            )
             self.assertEqual(result['continuation']['next_offset'], n)
             self.assertLessEqual(self.body_size(result), 50 * 1024)
 
@@ -61,11 +64,18 @@ class CodingReadBudgetTests(unittest.TestCase):
         self.assertEqual(next(read_pages(second))['offset'], next_offset)
 
     def test_from_step_locations_share_one_budget(self):
-        reader = self.reader({'a.py': ('中' * 80 + '\n') * 200,
-                              'b.py': ('文' * 80 + '\n') * 200})
+        reader = self.reader({'a.py': ('中' * 80 + '\n') * 200, 'b.py': ('文' * 80 + '\n') * 200})
         step = Operation(id='r', op='read', from_step='find', limit=200)
-        result = reader.execute(step, {'find': {'data': {'hits': [
-            {'path': 'a.py', 'line': 1}, {'path': 'b.py', 'line': 1}]}}}, self.root / 'read', 10)['data']
+        result = reader.execute(
+            step,
+            {
+                'find': {
+                    'data': {'hits': [{'path': 'a.py', 'line': 1}, {'path': 'b.py', 'line': 1}]}
+                }
+            },
+            self.root / 'read',
+            10,
+        )['data']
         self.assertLessEqual(self.body_size(result), 50 * 1024)
         self.assertEqual(len(result['reads']), 2)
         self.assertLess(result['reads'][1]['continuation']['next_offset'], 200)
@@ -100,11 +110,18 @@ class CodingReadBudgetTests(unittest.TestCase):
 
     def test_search_reference_unvisited_location_has_explicit_continuation(self):
         reader = self.reader({'a.py': ('x' * 300 + '\n') * 200, 'b.py': 'source\n' * 200})
-        result = reader.execute(Operation(id='r', op='read', from_step='find', limit=200),
-            {'find': {'data': {'hits': [{'path': 'a.py', 'line': 1}, {'path': 'b.py', 'line': 1}]}}},
-            self.root / 'read', 10)['data']
+        result = reader.execute(
+            Operation(id='r', op='read', from_step='find', limit=200),
+            {
+                'find': {
+                    'data': {'hits': [{'path': 'a.py', 'line': 1}, {'path': 'b.py', 'line': 1}]}
+                }
+            },
+            self.root / 'read',
+            10,
+        )['data']
         self.assertLessEqual(self.body_size(result), 50 * 1024)
         last = result['reads'][1]
-        # Budget can leave enough room for a few short lines; all the rest remain unread.
+        # 预算可能还容得下少量短行；其余内容仍未读取。
         self.assertLess(last['continuation']['next_offset'], 200)
         self.assertTrue(last['truncated'])

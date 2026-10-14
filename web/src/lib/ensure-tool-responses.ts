@@ -8,17 +8,17 @@ export function ensureToolCallsHaveResponses(messages: Message[]): Message[] {
 
   messages.forEach((message, index) => {
     if (message.type !== "ai" || message.tool_calls?.length === 0) {
-      // If it's not an AI message, or it doesn't have tool calls, we can ignore.
+      // 非 AI 消息或没有工具调用时直接跳过。
       return;
     }
-    // If it has tool calls, ensure the message which follows this is a tool message
+    // 存在工具调用时，检查紧随其后的消息是否为工具消息。
     const followingMessage = messages[index + 1];
     if (followingMessage && followingMessage.type === "tool") {
-      // Following message is a tool message, so we can ignore.
+      // 后续已有工具消息，无需补充。
       return;
     }
 
-    // Since the following message is not a tool message, we must create a new tool message
+    // 后续不是工具消息，需要补充新的工具响应消息。
     newMessages.push(
       ...(message.tool_calls?.map((tc) => ({
         type: "tool" as const,

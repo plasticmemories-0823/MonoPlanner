@@ -1,4 +1,5 @@
-"""Local previews and durable, target-bound external-open requests."""
+"""提供本地预览，持久保存与明确目标绑定的外部打开请求。"""
+
 import hashlib
 import json
 import mimetypes
@@ -14,19 +15,77 @@ from agent.storage.permissions import Permissions
 from agent.execution import applications as installed
 from agent.execution import file_actions
 
-DOCUMENTS = {'.txt', '.md', '.html', '.htm', '.css', '.json', '.yaml', '.yml', '.xml',
-             '.csv', '.log', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf',
-             '.docx', '.xlsx', '.pptx', '.rtf'}
-PREVIEW_TEXT = {'.py', '.js', '.ts', '.tsx', '.jsx', '.c', '.cpp', '.h', '.ps1', '.sh',
-                '.bat', '.cmd', '.toml', '.ini', '.sql', '.svg', *DOCUMENTS} - {
-                    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf', '.docx', '.xlsx', '.pptx'}
-COMMAND_ENGINES = {'cmd', 'powershell', 'pwsh', 'wscript', 'cscript', 'mshta', 'rundll32',
-                   'regsvr32', 'bash', 'sh', 'wsl', 'node', 'ruby', 'perl', 'java', 'dotnet'}
+DOCUMENTS = {
+    '.txt',
+    '.md',
+    '.html',
+    '.htm',
+    '.css',
+    '.json',
+    '.yaml',
+    '.yml',
+    '.xml',
+    '.csv',
+    '.log',
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.gif',
+    '.webp',
+    '.bmp',
+    '.pdf',
+    '.docx',
+    '.xlsx',
+    '.pptx',
+    '.rtf',
+}
+PREVIEW_TEXT = {
+    '.py',
+    '.js',
+    '.ts',
+    '.tsx',
+    '.jsx',
+    '.c',
+    '.cpp',
+    '.h',
+    '.ps1',
+    '.sh',
+    '.bat',
+    '.cmd',
+    '.toml',
+    '.ini',
+    '.sql',
+    '.svg',
+    *DOCUMENTS,
+} - {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf', '.docx', '.xlsx', '.pptx'}
+COMMAND_ENGINES = {
+    'cmd',
+    'powershell',
+    'pwsh',
+    'wscript',
+    'cscript',
+    'mshta',
+    'rundll32',
+    'regsvr32',
+    'bash',
+    'sh',
+    'wsl',
+    'node',
+    'ruby',
+    'perl',
+    'java',
+    'dotnet',
+}
 
 
+# ============================================================
+# 文档类型、应用和文件身份
+# ============================================================
 def document_application(app):
     name = Path(app.get('path', '')).stem.casefold()
-    if app.get('kind', 'exe') == 'exe' and (name in COMMAND_ENGINES or name.startswith(('python', 'pypy'))):
+    if app.get('kind', 'exe') == 'exe' and (
+        name in COMMAND_ENGINES or name.startswith(('python', 'pypy'))
+    ):
         raise ValueError('文档打开不能使用 Shell、脚本解释器或代码运行器')
 
 
@@ -39,17 +98,26 @@ def applications(refresh=False):
     return installed.discover(refresh)
 
 
+# ============================================================
+# 预览与外部打开记录
+# ============================================================
 class DesktopStore:
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.store = ConversationStore(self.root)
         self.permissions = Permissions(self.root)
         with self.store.connection() as db:
-            db.execute('CREATE TABLE IF NOT EXISTS desktop_requests '
-                       '(id TEXT PRIMARY KEY, thread TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL)')
-            db.execute('CREATE TABLE IF NOT EXISTS desktop_files '
-                       '(thread TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(thread,path))')
-            db.execute('CREATE TABLE IF NOT EXISTS desktop_applications (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
+            db.execute(
+                'CREATE TABLE IF NOT EXISTS desktop_requests '
+                '(id TEXT PRIMARY KEY, thread TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL)'
+            )
+            db.execute(
+                'CREATE TABLE IF NOT EXISTS desktop_files '
+                '(thread TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY(thread,path))'
+            )
+            db.execute(
+                'CREATE TABLE IF NOT EXISTS desktop_applications (id TEXT PRIMARY KEY, data TEXT NOT NULL)'
+            )
 
     def applications(self, refresh=False):
         found = {item['id']: item for item in applications(refresh)}
@@ -64,13 +132,19 @@ class DesktopStore:
         if Path(query).is_absolute():
             app = installed.describe_executable(query)
             with self.store.connection() as db:
-                db.execute('INSERT OR REPLACE INTO desktop_applications VALUES (?,?)',
-                           (app['id'], json.dumps(app, ensure_ascii=False)))
+                db.execute(
+                    'INSERT OR REPLACE INTO desktop_applications VALUES (?,?)',
+                    (app['id'], json.dumps(app, ensure_ascii=False)),
+                )
             return [app]
         matches = [a for a in self.applications() if query.casefold() in a['name'].casefold()]
         if not matches:
-            # A missing/stale catalog entry is not proof that the app is absent.
-            matches = [a for a in self.applications(refresh=True) if query.casefold() in a['name'].casefold()]
+            # 应用目录中缺失或过期的记录，不能证明该应用未安装。
+            matches = [
+                a
+                for a in self.applications(refresh=True)
+                if query.casefold() in a['name'].casefold()
+            ]
         exact = [a for a in matches if a['name'].casefold() == query.casefold()]
         return exact or matches
 
@@ -82,24 +156,39 @@ class DesktopStore:
         identity = uuid.uuid4().hex
         with self.store.connection() as db:
             self.store.require_available(db, self.store.thread(thread))
-            db.execute('INSERT INTO desktop_requests VALUES (?,?,?,?)',
-                       (identity, self.store.thread(thread), status, json.dumps(data, ensure_ascii=False)))
+            db.execute(
+                'INSERT INTO desktop_requests VALUES (?,?,?,?)',
+                (identity, self.store.thread(thread), status, json.dumps(data, ensure_ascii=False)),
+            )
         return {**data, 'id': identity, 'status': status}
 
     def list(self, thread):
         with self.store.connection() as db:
-            rows = db.execute('SELECT id,status,data FROM desktop_requests WHERE thread=? ORDER BY rowid',
-                              (self.store.thread(thread),))
+            rows = db.execute(
+                'SELECT id,status,data FROM desktop_requests WHERE thread=? ORDER BY rowid',
+                (self.store.thread(thread),),
+            )
             return [{**json.loads(r['data']), 'id': r['id'], 'status': r['status']} for r in rows]
 
     def get(self, thread, identity):
         return next((r for r in self.list(thread) if r['id'] == identity), None)
 
+    # ============================================================
+    # 授权范围内的本地预览
+    # ============================================================
     def preview(self, thread, path, repo, roots):
         target = self.path(thread, path, repo, roots)
-        if target.suffix.lower() not in PREVIEW_TEXT | {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf'}:
+        if target.suffix.lower() not in PREVIEW_TEXT | {
+            '.png',
+            '.jpg',
+            '.jpeg',
+            '.gif',
+            '.webp',
+            '.bmp',
+            '.pdf',
+        }:
             raise ValueError('此类型不支持应用内预览，请选择外部软件')
-        if target.stat().st_size > 10*1024*1024:
+        if target.stat().st_size > 10 * 1024 * 1024:
             raise ValueError('预览文件最大 10 MiB')
         raw = target.read_bytes()
         mime = mimetypes.guess_type(target.name)[0] or 'text/plain'
@@ -107,11 +196,26 @@ class DesktopStore:
             raw.decode('utf-8-sig')
             mime = 'text/plain; charset=utf-8'
         sha = hashlib.sha256(raw).hexdigest()
-        folder = self.root/'previews'; folder.mkdir(exist_ok=True)
-        saved = folder/(uuid.uuid4().hex+'.bin'); saved.write_bytes(raw)
-        return self.put(thread, {'kind': 'preview', 'path': str(target), 'sha256': sha,
-                                'mime': mime, 'record': str(saved), 'bytes': len(raw)}, 'ready')
+        folder = self.root / 'previews'
+        folder.mkdir(exist_ok=True)
+        saved = folder / (uuid.uuid4().hex + '.bin')
+        saved.write_bytes(raw)
+        return self.put(
+            thread,
+            {
+                'kind': 'preview',
+                'path': str(target),
+                'sha256': sha,
+                'mime': mime,
+                'record': str(saved),
+                'bytes': len(raw),
+            },
+            'ready',
+        )
 
+    # ============================================================
+    # 绑定目标的一次性操作申请
+    # ============================================================
     def request_open(self, thread, application_id, file_path=None):
         if Permissions(self.root).get(thread)['effective'] == 'sandbox':
             raise ValueError('沙盒权限禁止外部启动；可使用应用内预览，或由用户切换为风险询问')
@@ -124,8 +228,13 @@ class DesktopStore:
             raise ValueError('外部文档打开不允许运行脚本、快捷方式或可执行文件')
         if file_path:
             document_application(app)
-        data = {'kind': 'external', 'application': app, 'path': str(file_path) if file_path else '',
-                'sha256': fingerprint(file_path) if file_path else '', 'application_sha256': installed.identity(app)}
+        data = {
+            'kind': 'external',
+            'application': app,
+            'path': str(file_path) if file_path else '',
+            'sha256': fingerprint(file_path) if file_path else '',
+            'application_sha256': installed.identity(app),
+        }
         data['target'] = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
         return self.put(thread, data, 'awaiting_approval')
 
@@ -136,16 +245,23 @@ class DesktopStore:
         data['target'] = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
         return self.put(thread, data, 'awaiting_approval')
 
+    # ============================================================
+    # 批准、拒绝与消费状态
+    # ============================================================
     def reject(self, thread, identity, target):
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             self.store.require_available(db, self.store.thread(thread))
-            row = db.execute('SELECT status,data FROM desktop_requests WHERE id=? AND thread=?',
-                             (identity, self.store.thread(thread))).fetchone()
+            row = db.execute(
+                'SELECT status,data FROM desktop_requests WHERE id=? AND thread=?',
+                (identity, self.store.thread(thread)),
+            ).fetchone()
             if not row or json.loads(row['data']).get('target') != target:
                 raise ValueError('批准目标不匹配')
             if row['status'] == 'awaiting_approval':
-                db.execute('UPDATE desktop_requests SET status=? WHERE id=?', ('rejected', identity))
+                db.execute(
+                    'UPDATE desktop_requests SET status=? WHERE id=?', ('rejected', identity)
+                )
         return self.get(thread, identity)
 
     def approve(self, thread, identity, target):
@@ -153,20 +269,35 @@ class DesktopStore:
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             self.store.require_available(db, thread)
-            mode = db.execute('SELECT effective FROM permissions WHERE thread=?', (thread,)).fetchone()
+            mode = db.execute(
+                'SELECT effective FROM permissions WHERE thread=?', (thread,)
+            ).fetchone()
             if not mode or mode['effective'] == 'sandbox':
                 raise ValueError('当前沙盒权限不允许外部操作')
-            row = db.execute('SELECT status,data FROM desktop_requests WHERE id=? AND thread=?', (identity, thread)).fetchone()
+            row = db.execute(
+                'SELECT status,data FROM desktop_requests WHERE id=? AND thread=?',
+                (identity, thread),
+            ).fetchone()
             if not row:
                 raise ValueError('找不到打开请求')
             data = json.loads(row['data'])
-            if data.get('kind') not in {'external', 'file_operation'} or data.get('target') != target:
+            if (
+                data.get('kind') not in {'external', 'file_operation'}
+                or data.get('target') != target
+            ):
                 raise ValueError('打开授权与目标不匹配')
             if row['status'] != 'awaiting_approval':
                 return {**data, 'id': identity, 'status': row['status']}
             app = None
             if data['kind'] == 'external':
-                app = next((a for a in self.applications(refresh=True) if a['id'] == data['application']['id']), None)
+                app = next(
+                    (
+                        a
+                        for a in self.applications(refresh=True)
+                        if a['id'] == data['application']['id']
+                    ),
+                    None,
+                )
                 if not app or installed.identity(app) != data['application_sha256']:
                     raise ValueError('软件已变化，请重新请求打开')
                 if data['path']:
@@ -174,11 +305,15 @@ class DesktopStore:
                     path = file_actions.target_path(data['path'], readonly=True)
                     if fingerprint(path) != data['sha256']:
                         raise ValueError('文件已变化，请重新请求打开')
-            db.execute('UPDATE desktop_requests SET status=? WHERE id=?',
-                       ('executing' if data['kind'] == 'file_operation' else 'launching', identity))
+            db.execute(
+                'UPDATE desktop_requests SET status=? WHERE id=?',
+                ('executing' if data['kind'] == 'file_operation' else 'launching', identity),
+            )
         try:
             if data['kind'] == 'file_operation':
-                outcome = file_actions.execute(data, self.root/'file-operation-backups'/thread/(identity+'.bin'))
+                outcome = file_actions.execute(
+                    data, self.root / 'file-operation-backups' / thread / (identity + '.bin')
+                )
                 data.update({k: v for k, v in outcome.items() if k != 'status'})
                 status = 'completed'
             else:
@@ -186,7 +321,7 @@ class DesktopStore:
                 status = 'opened'
         except file_actions.FileActionError as error:
             data['error'], status = str(error), 'unknown' if error.changed else 'failed'
-            backup = self.root/'file-operation-backups'/thread/(identity+'.bin')
+            backup = self.root / 'file-operation-backups' / thread / (identity + '.bin')
             if backup.is_file():
                 data['backup'] = str(backup)
         except subprocess.TimeoutExpired:
@@ -194,13 +329,19 @@ class DesktopStore:
         except (OSError, ValueError) as error:
             data['error'], status = str(error), 'failed'
         with self.store.connection() as db:
-            db.execute('UPDATE desktop_requests SET status=?,data=? WHERE id=?',
-                       (status, json.dumps(data, ensure_ascii=False), identity))
+            db.execute(
+                'UPDATE desktop_requests SET status=?,data=? WHERE id=?',
+                (status, json.dumps(data, ensure_ascii=False), identity),
+            )
         return {**data, 'id': identity, 'status': status}
 
 
+# ============================================================
+# 桌面工具的固定分派入口
+# ============================================================
 def invoke(loop, name, args):
     from agent.storage.preferences import state_root
+
     store, thread = DesktopStore(state_root()), loop.conversation_id
     if not thread:
         raise ValueError('应用打开需要已保存的对话')

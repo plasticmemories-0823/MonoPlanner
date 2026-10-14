@@ -1,4 +1,5 @@
-"""Only immutable source copying overlaps model waits; execution stays lazy."""
+"""只有不可变源码复制可与模型等待重叠，执行仍按需开始。"""
+
 from concurrent.futures import ThreadPoolExecutor, CancelledError
 import os
 import subprocess
@@ -18,23 +19,23 @@ class ProbePreparationTests(unittest.TestCase):
     setUp = f.TaskRunnerTests.setUp
 
     def view(self):
-        base = SourceSnapshot.capture(self.repo, self.root/'baseline')
-        self.evidence = SourceVersions(self.env, self.root/'evidence', baseline=base)
+        base = SourceSnapshot.capture(self.repo, self.root / 'baseline')
+        self.evidence = SourceVersions(self.env, self.root / 'evidence', baseline=base)
         return self.evidence.view()
 
     def worker(self):
         pool = ThreadPoolExecutor(max_workers=1)
         self.addCleanup(pool.shutdown, wait=True, cancel_futures=True)
-        return ProbePreparation(pool, self.root/'prepared')
+        return ProbePreparation(pool, self.root / 'prepared')
 
     def test_ready_copy_is_used_once_and_keeps_archived_bytes(self):
         view = self.view()
         worker = self.worker()
         worker.start(view)
         worker.active['future'].result(timeout=10)
-        (self.repo/'sample.py').write_text('changed workspace')
+        (self.repo / 'sample.py').write_text('changed workspace')
         snapshot = worker.take(view.version)
-        self.assertIn('return 0', (snapshot.root/'sample.py').read_text())
+        self.assertIn('return 0', (snapshot.root / 'sample.py').read_text())
         self.assertIsNone(worker.take(view.version))
         self.assertEqual(worker.jobs[0]['status'], 'consumed')
 
@@ -51,7 +52,7 @@ class ProbePreparationTests(unittest.TestCase):
         worker = self.worker()
         worker.start(view)
         snapshot = worker.active['future'].result(timeout=10)['snapshot']
-        path = snapshot.root/'sample.py'
+        path = snapshot.root / 'sample.py'
         old = path.stat()
         path.write_bytes(path.read_bytes().replace(b'return 0', b'return 9'))
         os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
@@ -63,7 +64,7 @@ class ProbePreparationTests(unittest.TestCase):
         worker = self.worker()
         worker.start(view)
         snapshot = worker.active['future'].result(timeout=10)['snapshot']
-        (snapshot.root/'extra.py').write_text('extra')
+        (snapshot.root / 'extra.py').write_text('extra')
         with self.assertRaisesRegex(ValueError, 'integrity failed'):
             worker.take(view.version)
 
@@ -72,7 +73,7 @@ class ProbePreparationTests(unittest.TestCase):
         worker = self.worker()
         worker.start(view)
         snapshot = worker.active['future'].result(timeout=10)['snapshot']
-        with patch.object(Path, 'resolve', return_value=self.root/'different'):
+        with patch.object(Path, 'resolve', return_value=self.root / 'different'):
             with self.assertRaisesRegex(ValueError, 'integrity failed'):
                 worker.take(view.version)
 
@@ -81,27 +82,32 @@ class ProbePreparationTests(unittest.TestCase):
         worker = self.worker()
         worker.start(view)
         snapshot = worker.active['future'].result(timeout=10)['snapshot']
-        outside = self.root/'outside'
+        outside = self.root / 'outside'
         outside.mkdir()
-        (outside/'private.txt').write_text('outside')
-        link = snapshot.root/'redirect'
+        (outside / 'private.txt').write_text('outside')
+        link = snapshot.root / 'redirect'
         if os.name == 'nt':
-            subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(outside)],
-                           check=True, capture_output=True)
+            subprocess.run(
+                ['cmd', '/c', 'mklink', '/J', str(link), str(outside)],
+                check=True,
+                capture_output=True,
+            )
         else:
             link.symlink_to(outside, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, 'integrity failed: link'):
             worker.take(view.version)
-        self.assertEqual((outside/'private.txt').read_text(), 'outside')
+        self.assertEqual((outside / 'private.txt').read_text(), 'outside')
 
     def test_unfinished_copy_is_optional_and_job_queue_is_bounded(self):
         view = self.view()
         worker = self.worker()
         entered, release = Event(), Event()
+
         def copy(view, directory, cancel):
             entered.set()
             release.wait(5)
             raise CancelledError()
+
         with patch('agent.source.probe_preparation.prepare_copy', side_effect=copy) as build:
             worker.start(view)
             self.assertTrue(entered.wait(5))
@@ -133,7 +139,7 @@ class ProbePreparationTests(unittest.TestCase):
 
     def test_copy_and_index_share_one_worker_and_close_cleanly(self):
         view = self.view()
-        preparation = Preparation(self.root/'prepared', prepare_probes=True)
+        preparation = Preparation(self.root / 'prepared', prepare_probes=True)
         preparation.start(view)
         preparation.probes.active['future'].result(timeout=10)
         preparation.active['future'].result(timeout=10)
@@ -150,19 +156,22 @@ class ProbePreparationTests(unittest.TestCase):
         cancel = Event()
         cancel.set()
         with self.assertRaises(CancelledError):
-            view.export(self.root/'cancelled', cancel=cancel)
-        self.assertFalse((self.root/'cancelled/manifest.json').exists())
+            view.export(self.root / 'cancelled', cancel=cancel)
+        self.assertFalse((self.root / 'cancelled/manifest.json').exists())
 
     def test_short_wait_cancels_queued_copy_without_delaying_the_index(self):
         view = self.view()
         entered, release = Event(), Event()
-        preparation = Preparation(self.root/'prepared', prepare_probes=True)
+        preparation = Preparation(self.root / 'prepared', prepare_probes=True)
+
         def index(view, previous, cancel):
             entered.set()
             release.wait(5)
             raise CancelledError()
-        with patch('agent.source.preparation.build_preparation', side_effect=index), \
-                patch('agent.source.probe_preparation.prepare_copy') as copy:
+
+        with patch('agent.source.preparation.build_preparation', side_effect=index), patch(
+            'agent.source.probe_preparation.prepare_copy'
+        ) as copy:
             preparation.start(view)
             self.assertTrue(entered.wait(5))
             self.assertIsNone(preparation.probes.take(view.version))

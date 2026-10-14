@@ -1,4 +1,5 @@
-"""Append-only display fragments; display failures never change task execution."""
+"""只追加的展示片段；展示失败不改变任务执行。"""
+
 import json
 import logging
 from pathlib import Path
@@ -13,11 +14,18 @@ log = logging.getLogger(__name__)
 
 class LiveReasoning:
     def __init__(self, root, call, after_id):
-        self.path = Path(root)/'display/model.jsonl'
-        self.row = {'id': f'{root.name}-thinking-{call}', 'task_id': root.name,
-                    'after_id': after_id, 'kind': 'thinking', 'label': '正在思考',
-                    'status': 'running', 'detail': '', 'started_at': time.time(),
-                    'version': call * 1_000_000}
+        self.path = Path(root) / 'display/model.jsonl'
+        self.row = {
+            'id': f'{root.name}-thinking-{call}',
+            'task_id': root.name,
+            'after_id': after_id,
+            'kind': 'thinking',
+            'label': '正在思考',
+            'status': 'running',
+            'detail': '',
+            'started_at': time.time(),
+            'version': call * 1_000_000,
+        }
         self.pending, self.updated, self.error = [], time.monotonic(), None
         self.lock = RLock()
         with _lock:
@@ -37,7 +45,7 @@ class LiveReasoning:
     def append(self, text):
         with self.lock:
             self.pending.append(text)
-            if not self.row['detail'] or time.monotonic() - self.updated >= .2:
+            if not self.row['detail'] or time.monotonic() - self.updated >= 0.2:
                 self.flush()
 
     def flush(self):
@@ -53,8 +61,11 @@ class LiveReasoning:
     def finish(self, status, detail=None):
         with self.lock:
             self.flush()
-            self.row.update(status=status, label='思考' if status == 'completed' else '回复中断',
-                            seconds=max(0, time.time() - self.row['started_at']))
+            self.row.update(
+                status=status,
+                label='思考' if status == 'completed' else '回复中断',
+                seconds=max(0, time.time() - self.row['started_at']),
+            )
             if detail is not None:
                 self.row['detail'] = detail
             self.row['version'] += 1
@@ -62,12 +73,13 @@ class LiveReasoning:
 
 
 def read_live(root, cursor=0, version=0):
-    """Consume complete UTF-8 lines only, without an execution lease."""
+    """仅读取完整的 UTF-8 行，不获取执行租约。"""
     rows, more, error, position = {}, False, None, cursor
     try:
-        path = Path(root)/'display/model.jsonl'
+        path = Path(root) / 'display/model.jsonl'
         if path.exists():
             from agent.source.snapshots import _safe_file
+
             path = _safe_file(Path(root), Path('display/model.jsonl'))
             with path.open('rb') as stream:
                 stream.seek(cursor)

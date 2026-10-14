@@ -134,6 +134,15 @@ function ProjectEnvironmentCard({
         {status?.message ||
           "首次工作时自动检查项目、下载所需工具并安装依赖，之后复用。聊天与资料查询无需准备。"}
       </p>
+      {status?.projects && (
+        <p className="text-muted-foreground mt-2 text-xs">
+          {status.projects.length
+            ? `项目：${status.projects.map((project) => `${project.path}（${project.language}）`).join("、")}`
+            : "未发现项目依赖，使用基础工具环境。"}
+          {status.materials &&
+            ` 安装资料：${status.materials.file_count} 个文件，${status.materials.total_bytes.toLocaleString()} 字节。`}
+        </p>
+      )}
       {status?.error && (
         <p
           role="alert"

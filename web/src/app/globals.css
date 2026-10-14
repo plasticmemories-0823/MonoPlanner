@@ -4,6 +4,7 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* 默认主题颜色与尺寸 */
 :root {
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -40,6 +41,7 @@
   --sidebar-ring: oklch(0.87 0 0);
 }
 
+/* 深色主题覆盖 */
 .dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
@@ -75,6 +77,7 @@
   --sidebar-ring: oklch(0.439 0 0);
 }
 
+/* Tailwind 主题变量映射 */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -114,6 +117,7 @@
   --color-sidebar-ring: var(--sidebar-ring);
 }
 
+/* 基础元素与图表配色 */
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -140,6 +144,7 @@
   }
 }
 
+/* 布局辅助样式 */
 @layer utilities {
   .shadow-inner-right {
     box-shadow: inset -9px 0 6px -1px rgb(0 0 0 / 0.02);

@@ -1,4 +1,4 @@
-"""Offline contracts for the adapter; these are NOT SWE-bench success scores."""
+"""离线验证适配器约定；这些结果不是 SWE-bench 成功率分数。"""
 
 from dataclasses import asdict
 from contextlib import redirect_stderr
@@ -34,16 +34,22 @@ class ManifestTests(unittest.TestCase):
     def test_default_and_explicit_task_use_one_planner(self):
         with tempfile.TemporaryDirectory() as name:
             for extra in ([], ["--workflow", "task"]):
-                args = runner.parse_args(["--tasks", "tasks.json", "--images", "images.json", "--run-dir", name, *extra])
+                args = runner.parse_args(
+                    ["--tasks", "tasks.json", "--images", "images.json", "--run-dir", name, *extra]
+                )
                 self.assertEqual(args.workflow, "task")
                 from agent.task.runner import TaskRunner
+
                 selected = runner.create_task_controller(object(), object(), Path(name), args)
                 self.assertIsInstance(selected, TaskRunner)
 
-
     def test_manifest_selection_errors_stop_before_model_or_archive(self):
-        task = {"instance_id": "example__repo-1", "repo": "example/repo",
-                "base_commit": "a" * 40, "problem_statement": "Fix the issue"}
+        task = {
+            "instance_id": "example__repo-1",
+            "repo": "example/repo",
+            "base_commit": "a" * 40,
+            "problem_statement": "Fix the issue",
+        }
         for selection, images, message in (
             (["--instance-id", "missing"], [], "Unknown instance id"),
             ([], [], "Missing image mapping"),
@@ -59,9 +65,17 @@ class ManifestTests(unittest.TestCase):
                     redirect_stderr(io.StringIO()) as output,
                     self.assertRaises(SystemExit) as error,
                 ):
-                    runner.main(["--tasks", str(root / "tasks.json"), "--images",
-                                 str(root / "images.json"), "--run-dir", str(root / "run"),
-                                 *selection])
+                    runner.main(
+                        [
+                            "--tasks",
+                            str(root / "tasks.json"),
+                            "--images",
+                            str(root / "images.json"),
+                            "--run-dir",
+                            str(root / "run"),
+                            *selection,
+                        ]
+                    )
                 self.assertEqual(error.exception.code, 2)
                 self.assertIn(message, output.getvalue())
                 self.assertFalse((root / "run").exists())
@@ -70,8 +84,12 @@ class ManifestTests(unittest.TestCase):
                 archive.assert_not_called()
 
     def test_answer_material_is_rejected_before_model_setup(self):
-        task = {"instance_id": "example__repo-1", "repo": "example/repo",
-                "base_commit": "a" * 40, "problem_statement": "Fix the issue"}
+        task = {
+            "instance_id": "example__repo-1",
+            "repo": "example/repo",
+            "base_commit": "a" * 40,
+            "problem_statement": "Fix the issue",
+        }
         with tempfile.TemporaryDirectory() as name:
             path = Path(name) / "tasks.json"
             path.write_text(json.dumps([task]), encoding="utf-8")
@@ -84,11 +102,22 @@ class ManifestTests(unittest.TestCase):
     def test_predictions_keep_failed_and_empty_patches(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
-            save_predictions(directory, [
-                {"instance_id": "r__r-1", "agent_status": "api_error", "model_patch": ""},
-                {"instance_id": "r__r-2", "agent_status": "verified_success", "model_patch": "diff"},
-            ], "fake-offline-only")
-            rows = [json.loads(line) for line in (directory / "predictions.jsonl").read_text().splitlines()]
+            save_predictions(
+                directory,
+                [
+                    {"instance_id": "r__r-1", "agent_status": "api_error", "model_patch": ""},
+                    {
+                        "instance_id": "r__r-2",
+                        "agent_status": "verified_success",
+                        "model_patch": "diff",
+                    },
+                ],
+                "fake-offline-only",
+            )
+            rows = [
+                json.loads(line)
+                for line in (directory / "predictions.jsonl").read_text().splitlines()
+            ]
             self.assertEqual([row["instance_id"] for row in rows], ["r__r-1", "r__r-2"])
             self.assertEqual(rows[0]["model_patch"], "")
 
@@ -96,13 +125,22 @@ class ManifestTests(unittest.TestCase):
 class RecordingTests(unittest.TestCase):
     def test_context_rejection_survives_wrapper_and_missing_usage_is_not_zero(self):
         from agent.model.errors import ModelCallError, is_context_overflow
+
         class Rejected(Exception):
             status_code = 400
-            body = {'error': {'code': 'context_length_exceeded', 'message': 'Explicit context rejection'}}
+            body = {
+                'error': {
+                    'code': 'context_length_exceeded',
+                    'message': 'Explicit context rejection',
+                }
+            }
+
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             ledger = TokenLedger()
-            model = RecordingModel(FakeModel(Rejected()), root / 'calls', ledger, root / 'ledger.json')
+            model = RecordingModel(
+                FakeModel(Rejected()), root / 'calls', ledger, root / 'ledger.json'
+            )
             with self.assertRaises(ModelCallError) as caught:
                 model.invoke([HumanMessage(content='task')])
             self.assertTrue(is_context_overflow(caught.exception))
@@ -116,9 +154,22 @@ class RecordingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             ledger = TokenLedger()
-            model = RecordingModel(FakeModel(AIMessage(content="answer", usage_metadata={
-                "input_tokens": 3, "output_tokens": 2, "total_tokens": 5,
-            })), directory / "calls", ledger, directory / "ledger.json", secrets=("SECRET",))
+            model = RecordingModel(
+                FakeModel(
+                    AIMessage(
+                        content="answer",
+                        usage_metadata={
+                            "input_tokens": 3,
+                            "output_tokens": 2,
+                            "total_tokens": 5,
+                        },
+                    )
+                ),
+                directory / "calls",
+                ledger,
+                directory / "ledger.json",
+                secrets=("SECRET",),
+            )
             model.invoke([HumanMessage(content="task SECRET")])
             self.assertEqual(ledger.reported_tokens, 5)
             self.assertEqual(ledger.unknown_calls, 0)
@@ -131,8 +182,13 @@ class RecordingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
             ledger = TokenLedger()
-            wrapped = RecordingModel(FakeModel(RuntimeError("key SECRET")), directory,
-                                     ledger, directory / "ledger.json", secrets=("SECRET",))
+            wrapped = RecordingModel(
+                FakeModel(RuntimeError("key SECRET")),
+                directory,
+                ledger,
+                directory / "ledger.json",
+                secrets=("SECRET",),
+            )
             with self.assertRaisesRegex(RuntimeError, "REDACTED"):
                 wrapped.invoke([HumanMessage(content="hello")])
             self.assertEqual(ledger.reported_tokens, 0)
@@ -153,16 +209,30 @@ class RecordingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             ledger = TokenLedger(limit=20000)
-            response = AIMessage(content="done", usage_metadata={
-                "input_tokens": 4500, "output_tokens": 300, "total_tokens": 4800})
+            response = AIMessage(
+                content="done",
+                usage_metadata={"input_tokens": 4500, "output_tokens": 300, "total_tokens": 4800},
+            )
             first_raw = FakeModel(response)
-            first = RecordingModel(first_raw, root / "first", ledger, root / "ledger.json",
-                                   max_output_tokens=10, task_token_limit=5000)
+            first = RecordingModel(
+                first_raw,
+                root / "first",
+                ledger,
+                root / "ledger.json",
+                max_output_tokens=10,
+                task_token_limit=5000,
+            )
             first.invoke([HumanMessage(content="task one")])
             with self.assertRaisesRegex(RuntimeError, "per-task"):
                 first.invoke([HumanMessage(content="continue")])
-            second = RecordingModel(FakeModel(response), root / "second", ledger,
-                                    root / "ledger.json", max_output_tokens=10, task_token_limit=5000)
+            second = RecordingModel(
+                FakeModel(response),
+                root / "second",
+                ledger,
+                root / "ledger.json",
+                max_output_tokens=10,
+                task_token_limit=5000,
+            )
             second.invoke([HumanMessage(content="task two")])
             self.assertEqual(ledger.calls, 2)
             self.assertEqual(ledger.reported_tokens, 9600)
@@ -175,9 +245,12 @@ class PatchTests(unittest.TestCase):
             root = Path(name)
             repo = root / "repo"
             repo.mkdir()
+
             def git(*args):
-                return subprocess.check_output(["git", "-c", "core.autocrlf=false", *args],
-                                               cwd=repo, stderr=subprocess.STDOUT)
+                return subprocess.check_output(
+                    ["git", "-c", "core.autocrlf=false", *args], cwd=repo, stderr=subprocess.STDOUT
+                )
+
             git("init")
             git("config", "user.name", "Offline Test")
             git("config", "user.email", "offline@example.invalid")
@@ -204,8 +277,12 @@ class PatchTests(unittest.TestCase):
             options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
             def git(*args):
-                return subprocess.check_output(["git", "-c", "core.autocrlf=false", *args],
-                                               cwd=repo, stderr=subprocess.STDOUT, **options)
+                return subprocess.check_output(
+                    ["git", "-c", "core.autocrlf=false", *args],
+                    cwd=repo,
+                    stderr=subprocess.STDOUT,
+                    **options,
+                )
 
             git("init")
             git("config", "user.email", "offline@example.invalid")
@@ -250,7 +327,9 @@ class PatchTests(unittest.TestCase):
                     self.commands = []
 
                 def host_to_container(self, path):
-                    return "/agent-artifacts/" + Path(path).relative_to(self.artifact_root).as_posix()
+                    return (
+                        "/agent-artifacts/" + Path(path).relative_to(self.artifact_root).as_posix()
+                    )
 
                 def run_process(self, command, *, stdout_path, stderr_path, timeout, shell):
                     self.commands.append(command)
@@ -265,15 +344,19 @@ class PatchTests(unittest.TestCase):
                     return {"exit_code": 0, "timed_out": False}
 
             backend = Backend()
-            with patch("eval.swebench_runner.run_logged", side_effect=AssertionError("Host Git forbidden")):
-                exported = export_patch(root / "repo", "a" * 40, backend.artifact_root / "patch",
-                                        environment=backend)
+            with patch(
+                "eval.swebench_runner.run_logged", side_effect=AssertionError("Host Git forbidden")
+            ):
+                exported = export_patch(
+                    root / "repo", "a" * 40, backend.artifact_root / "patch", environment=backend
+                )
             self.assertIn("diff --git", exported)
             self.assertGreater(len(backend.commands), 5)
             self.assertTrue(all(command[0] == "/usr/bin/env" for command in backend.commands))
             index_commands = [command for command in backend.commands if "read-tree" in command]
-            self.assertEqual(index_commands[0][1],
-                             "GIT_INDEX_FILE=/agent-artifacts/patch/patch.index")
+            self.assertEqual(
+                index_commands[0][1], "GIT_INDEX_FILE=/agent-artifacts/patch/patch.index"
+            )
             self.assertTrue(all(str(root) not in " ".join(command) for command in backend.commands))
 
 

@@ -44,7 +44,7 @@ export const PasswordInput = React.forwardRef<
         </span>
       </Button>
 
-      {/* hides browsers password toggles */}
+      {/* 隐藏浏览器自带的密码显示开关。 */}
       <style>{`
 					.hide-password-toggle::-ms-reveal,
 					.hide-password-toggle::-ms-clear {

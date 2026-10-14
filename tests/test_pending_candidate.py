@@ -1,4 +1,5 @@
-"""An explicit pending replacement is reviewed before its exact edits can run."""
+"""明确待替换的候选方案须经审查后才能执行其准确修改。"""
+
 import copy
 import json
 import unittest
@@ -23,7 +24,9 @@ class PendingCandidateTests(unittest.TestCase):
         return json.loads(messages[-1].content)
 
     def read_record(self, ref):
-        return json.loads((self.root / "state" / ref["record"].removeprefix("$record/")).read_text())
+        return json.loads(
+            (self.root / "state" / ref["record"].removeprefix("$record/")).read_text()
+        )
 
     def test_same_acceptance_replacement_reuses_baseline_but_needs_new_approval(self):
         seen = []
@@ -38,19 +41,45 @@ class PendingCandidateTests(unittest.TestCase):
             self.assertNotEqual(seen[0]["trial_id"], seen[1]["trial_id"])
             self.assertTrue(seen[1]["baseline_reused"])
             self.assertEqual(seen[1]["superseded_candidate"], seen[0]["selected_candidate"])
-            self.assertNotEqual(seen[0]["selected_candidate"]["work_sha256"],
-                                seen[1]["selected_candidate"]["work_sha256"])
-            return AIMessage(content="", tool_calls=[{"name": "freeze_acceptance", "id": "stale-freeze",
-                "args": {"trial_id": seen[0]["trial_id"], "reason": "This approval is stale"}}])
+            self.assertNotEqual(
+                seen[0]["selected_candidate"]["work_sha256"],
+                seen[1]["selected_candidate"]["work_sha256"],
+            )
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "freeze_acceptance",
+                        "id": "stale-freeze",
+                        "args": {
+                            "trial_id": seen[0]["trial_id"],
+                            "reason": "This approval is stale",
+                        },
+                    }
+                ],
+            )
 
         def freeze_selected(messages):
             self.assertIn("current acceptance trial_id", messages[-1].content)
             self.assertIn("return 0", (self.repo / "sample.py").read_text())
-            return AIMessage(content="", tool_calls=[{"name": "freeze_acceptance", "id": "fresh-freeze",
-                "args": {"trial_id": seen[1]["trial_id"], "reason": "Approve the selected replacement"}}])
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "freeze_acceptance",
+                        "id": "fresh-freeze",
+                        "args": {
+                            "trial_id": seen[1]["trial_id"],
+                            "reason": "Approve the selected replacement",
+                        },
+                    }
+                ],
+            )
 
         with patch.object(revisions, "run_report", wraps=revisions.run_report) as reports:
-            result = self.run_replies([f.reply(self.candidate(2)), replace, freeze_old, freeze_selected])
+            result = self.run_replies(
+                [f.reply(self.candidate(2)), replace, freeze_old, freeze_selected]
+            )
         self.assertEqual(result["status"], "verified_success", result)
         self.assertEqual(sum(call.args[4] == "baseline" for call in reports.call_args_list), 1)
         self.assertEqual(len(result["rounds"]), 1)
@@ -58,8 +87,14 @@ class PendingCandidateTests(unittest.TestCase):
         for feedback in seen:
             record = self.read_record(feedback["selected_candidate"])
             self.assertEqual(record["plan"]["test_code"], f.CODE)
-        self.assertIn("return 2", self.read_record(seen[0]["selected_candidate"])["plan"]["steps"][0]["command"])
-        self.assertIn("return 4", self.read_record(seen[1]["selected_candidate"])["plan"]["steps"][0]["command"])
+        self.assertIn(
+            "return 2",
+            self.read_record(seen[0]["selected_candidate"])["plan"]["steps"][0]["command"],
+        )
+        self.assertIn(
+            "return 4",
+            self.read_record(seen[1]["selected_candidate"])["plan"]["steps"][0]["command"],
+        )
 
     def test_changed_tests_retrial_and_revision_keeps_selected_replacement(self):
         seen = []
@@ -82,7 +117,9 @@ class PendingCandidateTests(unittest.TestCase):
             return a.review(messages)
 
         with patch.object(revisions, "run_report", wraps=revisions.run_report) as reports:
-            result = self.run_replies([f.reply(self.candidate(2, test_code=first_code)), replace, revise, freeze])
+            result = self.run_replies(
+                [f.reply(self.candidate(2, test_code=first_code)), replace, revise, freeze]
+            )
         self.assertEqual(result["status"], "verified_success", result)
         self.assertEqual(sum(call.args[4] == "baseline" for call in reports.call_args_list), 3)
         selected = self.read_record(seen[-1]["selected_candidate"])
@@ -101,8 +138,19 @@ class PendingCandidateTests(unittest.TestCase):
 
         def freeze_original(messages):
             self.assertIn("test_code", messages[-1].content)
-            return AIMessage(content="", tool_calls=[{"name": "freeze_acceptance", "id": "freeze-original",
-                "args": {"trial_id": original[0]["trial_id"], "reason": "The replacement was rejected"}}])
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "freeze_acceptance",
+                        "id": "freeze-original",
+                        "args": {
+                            "trial_id": original[0]["trial_id"],
+                            "reason": "The replacement was rejected",
+                        },
+                    }
+                ],
+            )
 
         result = self.run_replies([f.reply(self.candidate()), invalid, freeze_original])
         self.assertEqual(result["status"], "verified_success", result)
@@ -118,7 +166,9 @@ class PendingCandidateTests(unittest.TestCase):
             if args[4] == "baseline":
                 baselines.append(report)
                 if len(baselines) == 1:
-                    report.update(test_evidence_valid=False, tests_ready=False, error_kind="incomplete_result")
+                    report.update(
+                        test_evidence_valid=False, tests_ready=False, error_kind="incomplete_result"
+                    )
             return report
 
         def freeze(messages):
@@ -126,7 +176,9 @@ class PendingCandidateTests(unittest.TestCase):
             return a.review(messages)
 
         with patch.object(revisions, "run_report", side_effect=incomplete_once):
-            result = self.run_replies([f.reply(self.candidate(2)), f.reply(self.candidate()), freeze])
+            result = self.run_replies(
+                [f.reply(self.candidate(2)), f.reply(self.candidate()), freeze]
+            )
         self.assertEqual(result["status"], "verified_success", result)
         self.assertEqual(len(baselines), 2)
 
@@ -171,8 +223,13 @@ class PendingCandidateTests(unittest.TestCase):
 
     def test_freeze_then_resume_releases_replacement_once(self):
         replacement = self.candidate()
-        replacement["steps"].insert(0, self.shell(
-            "from pathlib import Path; p=Path('counter'); p.write_text(str(int(p.read_text())+1 if p.exists() else 1))", "count"))
+        replacement["steps"].insert(
+            0,
+            self.shell(
+                "from pathlib import Path; p=Path('counter'); p.write_text(str(int(p.read_text())+1 if p.exists() else 1))",
+                "count",
+            ),
+        )
         interrupt, error = self.crash("acceptance_frozen")
         with interrupt, self.assertRaises(error):
             self.run_replies([f.reply(self.candidate(2)), f.reply(replacement), a.review])
@@ -191,15 +248,23 @@ class PendingCandidateTests(unittest.TestCase):
             self.run_replies([f.reply(self.candidate()), a.review])
         state = self.state()
         self.engine.state = copy.deepcopy(state)
-        self.engine.state["acceptance_release"]["plan"]["steps"][0]["command"] = "echo wrong candidate"
+        self.engine.state["acceptance_release"]["plan"]["steps"][0][
+            "command"
+        ] = "echo wrong candidate"
         with self.assertRaisesRegex(Exception, "candidate|Candidate"):
             revisions.validate(self.engine)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
     def test_replacement_path_does_not_reopen_frozen_acceptance(self):
         weakened = self.candidate(2, test_code=f.CODE.replace("value(), 4", "value(), 2"))
-        result = self.run_replies([f.reply(self.candidate(2)), a.review, f.reply(weakened),
-                                  f.reply({"kind": "blocked", "note": "Repair source, retain frozen behavior"})])
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(2)),
+                a.review,
+                f.reply(weakened),
+                f.reply({"kind": "blocked", "note": "Repair source, retain frozen behavior"}),
+            ]
+        )
         self.assertEqual(result["status"], "task_blocked", result)
         self.assertEqual(len(self.state()["acceptance_trials"]), 1)
         self.assertEqual(self.state()["verification_spec"]["test_code"], f.CODE)

@@ -1,4 +1,4 @@
-"""Narrow adapter for a provider field omitted by the installed LangChain SDK."""
+"""为已安装 LangChain SDK 遗漏的服务商字段提供专用适配。"""
 
 from langchain_deepseek import ChatDeepSeek
 from agent.model.payload import retain_provider_calls, wire_input
@@ -8,8 +8,8 @@ class DeepSeekClient(ChatDeepSeek):
     def _create_chat_result(self, response, generation_info=None):
         result = super()._create_chat_result(response, generation_info)
         raw = response if isinstance(response, dict) else response.model_dump()
-        # Non-streaming invoke/ainvoke is this application's production path.
-        # Preserve argument strings before parsing loses whitespace and escapes.
+        # 应用的生产路径使用非流式 invoke/ainvoke。
+        # 解析前保留参数字符串，避免丢失空白与转义。
         for generation, choice in zip(result.generations, raw.get("choices", [])):
             calls = choice.get("message", {}).get("tool_calls")
             if calls:

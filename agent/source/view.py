@@ -1,4 +1,5 @@
-"""Read an existing SourceVersions version, never the mutable workspace."""
+"""读取 SourceVersions 中的已有版本，不读取可变工作目录。"""
+
 import hashlib
 import json
 import re
@@ -15,7 +16,8 @@ def digest(value):
 
 
 class SourceView:
-    """Immutable bytes with bounded in-memory reuse; the archive owns versions."""
+    """以有界内存缓存复用不可变字节；版本归归档管理。"""
+
     def __init__(self, evidence, version=None, max_cache_bytes=32 * 1024 * 1024):
         self.root, self.baseline = evidence.root, evidence.baseline
         self.origin_root = evidence.environment.repo_root
@@ -74,7 +76,7 @@ class SourceView:
         return raw
 
     def export(self, destination, *, cancel=None):
-        """Materialize only archived bytes for an isolated probe, never live files."""
+        """隔离调查只使用归档字节生成副本，不使用实时文件。"""
         destination = Path(destination)
         destination.mkdir(parents=True, exist_ok=False)
         target = destination / 'source'
@@ -82,6 +84,7 @@ class SourceView:
         for name in self.files:
             if cancel is not None and cancel.is_set():
                 from concurrent.futures import CancelledError
+
                 raise CancelledError()
             raw = self.read_bytes(name)
             path = target / name
@@ -90,17 +93,30 @@ class SourceView:
                 for offset in range(0, len(raw), 1024 * 1024):
                     if cancel is not None and cancel.is_set():
                         from concurrent.futures import CancelledError
+
                         raise CancelledError()
-                    stream.write(raw[offset:offset + 1024 * 1024])
+                    stream.write(raw[offset : offset + 1024 * 1024])
             if self.baseline is not None and name in self.baseline.files:
                 original = _safe_file(self.baseline.root, Path(name))
                 path.chmod(original.stat().st_mode)
         payload = {'files': dict(self.files), 'excluded_files': dict(self.excluded)}
-        sha = hashlib.sha256(json.dumps(payload, sort_keys=True,
-                                       separators=(',', ':')).encode()).hexdigest()
+        sha = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
+        ).hexdigest()
         manifest = destination / 'manifest.json'
-        manifest.write_text(json.dumps({**payload, 'root': str(target.resolve()),
-            'digest': sha, 'status': 'captured', 'source_version': self.version,
-            'origin': 'SourceVersions archived bytes; no live workspace read'},
-            ensure_ascii=False, indent=2), encoding='utf-8')
+        manifest.write_text(
+            json.dumps(
+                {
+                    **payload,
+                    'root': str(target.resolve()),
+                    'digest': sha,
+                    'status': 'captured',
+                    'source_version': self.version,
+                    'origin': 'SourceVersions archived bytes; no live workspace read',
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding='utf-8',
+        )
         return SourceSnapshot(target, dict(self.files), sha, manifest, dict(self.excluded))

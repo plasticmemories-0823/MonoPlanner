@@ -1,9 +1,7 @@
-"""Independent source views for preparation and acceptance, with explicit evidence.
+"""为准备和验收提供独立源码视图，并保留明确证据。
 
-Snapshots retain files and manifests on disk. They are not a security sandbox: use
-the Docker backend for untrusted commands. Capture only while the source worker
-is paused; concurrent file changes detected during capture make it fail.
-"""
+快照将文件及清单保存在磁盘上，不构成安全沙盒；不可信命令应使用 Docker 后端。
+仅在源码工作线程暂停时捕获快照；捕获期间检测到并发文件修改就失败。"""
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -22,23 +20,42 @@ from agent.execution.local import LocalEnvironment
 
 
 _DERIVED_DIRS = {
-    ".git", ".venv", "venv", "node_modules", "__pycache__", ".vs", ".idea",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", "htmlcov",
-    ".coding_agent", "build", "dist",
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".vs",
+    ".idea",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    "htmlcov",
+    ".coding_agent",
+    "build",
+    "dist",
 }
 _DERIVED_PATHS = {("eval", "runs"), ("eval", "checks"), ("eval", "vendor")}
 _SECRET_REASONS = {"environment_credentials", "possible_private_key", "private_key_content"}
 _PRIVATE_MARKERS = (
-    b"-----BEGIN PRIVATE KEY-----", b"-----BEGIN RSA PRIVATE KEY-----",
-    b"-----BEGIN EC PRIVATE KEY-----", b"-----BEGIN OPENSSH PRIVATE KEY-----",
-    b"-----BEGIN DSA PRIVATE KEY-----", b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    b"-----BEGIN PRIVATE KEY-----",
+    b"-----BEGIN RSA PRIVATE KEY-----",
+    b"-----BEGIN EC PRIVATE KEY-----",
+    b"-----BEGIN OPENSSH PRIVATE KEY-----",
+    b"-----BEGIN DSA PRIVATE KEY-----",
+    b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
 )
 
 
 class SnapshotError(RuntimeError):
-    """Source cannot be copied faithfully or its saved version changed."""
+    """无法忠实复制源码，或已保存的版本发生变化。"""
 
 
+# ========================================================================
+# 路径、链接与文件排除规则
+# ========================================================================
 def _within(path, root):
     try:
         path.relative_to(root)
@@ -58,12 +75,17 @@ def _link(path):
 def _reason(relative):
     parts = tuple(part.lower() for part in relative.parts)
     name = parts[-1]
-    # Secrets must win before generated-directory rules: tracked ordinary files
-    # may override those directory rules, but must never override this exclusion.
+    # 敏感文件排除规则优先于生成目录规则；受版本控制的普通文件
+    # 可以覆盖目录规则，但不能覆盖此排除规则。
     if name == ".env" or name.startswith(".env."):
         return "environment_credentials"
-    if (name in {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
-            or relative.suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".dpapi"}):
+    if name in {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"} or relative.suffix.lower() in {
+        ".pem",
+        ".key",
+        ".p12",
+        ".pfx",
+        ".dpapi",
+    }:
         return "possible_private_key"
     if any(part in _DERIVED_DIRS for part in parts[:-1]):
         return "generated_directory"
@@ -101,8 +123,11 @@ def _safe_file(root, relative):
     return path
 
 
+# ========================================================================
+# 源码发现与版本控制文件选择
+# ========================================================================
 def _walk(root, preserve_files=(), ignored_directories=()):
-    """Never follow even an internal link; report it instead of copying a target."""
+    """即使链接指向内部也不跟随；报告链接而非复制其目标。"""
     retained_directories = {parent for name in preserve_files for parent in Path(name).parents}
     ignored_directories = set(ignored_directories)
     for directory, directories, files in os.walk(root, followlinks=False):
@@ -112,58 +137,99 @@ def _walk(root, preserve_files=(), ignored_directories=()):
             if relative in ignored_directories and relative not in retained_directories:
                 directories.remove(name)
                 yield relative, "git_ignored_directory"
-            elif (relative not in retained_directories and (name.lower() in _DERIVED_DIRS or tuple(
-                    part.lower() for part in relative.parts[:2]) in _DERIVED_PATHS)):
+            elif relative not in retained_directories and (
+                name.lower() in _DERIVED_DIRS
+                or tuple(part.lower() for part in relative.parts[:2]) in _DERIVED_PATHS
+            ):
                 directories.remove(name)
                 yield relative, "generated_directory"
             elif _link(parent / name):
-                raise SnapshotError(f"Links and Windows reparse points are not supported: {relative}")
+                raise SnapshotError(
+                    f"Links and Windows reparse points are not supported: {relative}"
+                )
         for name in files:
             yield (parent / name).relative_to(root), None
 
 
 def _selected_files(root, runtime_files=()):
-    """Git includes staged, dirty and new files; fallback is a pruned source walk."""
+    """通过 Git 纳入暂存、已修改和新增文件；后备方案按排除规则遍历源码。"""
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
-    # Source discovery is trusted host work, so repository fsmonitor hooks must
-    # not execute on the host merely because Git reads an index.
+    # 源码发现属于可信主机操作；不能仅因 Git 读取索引，
+    # 就在主机上执行仓库的 fsmonitor 钩子。
     git = ["git", "-c", "core.fsmonitor=false", "-C", str(root)]
     try:
-        probe = subprocess.run([*git, "rev-parse", "--show-toplevel"],
-                               capture_output=True, timeout=10, **options)
+        probe = subprocess.run(
+            [*git, "rev-parse", "--show-toplevel"], capture_output=True, timeout=10, **options
+        )
     except FileNotFoundError:
         probe = None
-    if (probe is not None and probe.returncode == 0
-            and Path(os.fsdecode(probe.stdout.strip())).resolve() == root):
-        listed = subprocess.run([
-            *git, "ls-files", "--cached", "--others",
-            "--exclude-standard", "-z", "--", ".",
-        ], capture_output=True, timeout=30, **options)
+    if (
+        probe is not None
+        and probe.returncode == 0
+        and Path(os.fsdecode(probe.stdout.strip())).resolve() == root
+    ):
+        listed = subprocess.run(
+            [
+                *git,
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+            ],
+            capture_output=True,
+            timeout=30,
+            **options,
+        )
         if listed.returncode != 0:
             raise SnapshotError("git ls-files failed; source selection was not complete.")
-        tracked_result = subprocess.run([*git, "ls-files", "--cached", "-z"],
-                                        capture_output=True, timeout=30, **options)
+        tracked_result = subprocess.run(
+            [*git, "ls-files", "--cached", "-z"], capture_output=True, timeout=30, **options
+        )
         if tracked_result.returncode != 0:
             raise SnapshotError("git ls-files failed to distinguish tracked source files.")
         tracked = {Path(os.fsdecode(item)) for item in tracked_result.stdout.split(b"\0") if item}
         selected = {Path(os.fsdecode(item)) for item in listed.stdout.split(b"\0") if item}
-        ignored_result = subprocess.run([
-            *git, "ls-files", "--others", "--ignored",
-            "--exclude-standard", "--directory", "-z",
-        ], capture_output=True, timeout=30, **options)
+        ignored_result = subprocess.run(
+            [
+                *git,
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
+            capture_output=True,
+            timeout=30,
+            **options,
+        )
         if ignored_result.returncode != 0:
             raise SnapshotError("git ls-files failed to identify ignored directories.")
-        ignored_directories = {Path(os.fsdecode(item).rstrip("/"))
-                               for item in ignored_result.stdout.split(b"\0") if item.endswith(b"/")}
+        ignored_directories = {
+            Path(os.fsdecode(item).rstrip("/"))
+            for item in ignored_result.stdout.split(b"\0")
+            if item.endswith(b"/")
+        }
         for name in runtime_files:
             relative = Path(name)
-            if not relative.parts or relative.is_absolute() or ".." in relative.parts or _reason(relative):
+            if (
+                not relative.parts
+                or relative.is_absolute()
+                or ".." in relative.parts
+                or _reason(relative)
+            ):
                 raise SnapshotError(f"Invalid runtime material path: {name}")
             selected.add(relative)
-        # Include named secret exclusions in the manifest even when Git ignores
-        # them. Hashes let a later candidate report unverified changes safely.
-        selected.update(relative for relative, skip in _walk(root, tracked, ignored_directories)
-                        if not skip and _reason(relative) in _SECRET_REASONS)
+        # 即使 Git 忽略指定的敏感文件，也要在清单记录其排除项；
+        # 通过哈希，使后续候选能够安全报告未验证的改动。
+        selected.update(
+            relative
+            for relative, skip in _walk(root, tracked, ignored_directories)
+            if not skip and _reason(relative) in _SECRET_REASONS
+        )
         return "git", [(relative, None, relative in tracked) for relative in sorted(selected)]
     return "source_walk", [(relative, skip, False) for relative, skip in _walk(root)]
 
@@ -172,6 +238,9 @@ def _save(path, payload):
     Path(path).write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
+# ========================================================================
+# 快照捕获、隔离副本与完整性校验
+# ========================================================================
 @dataclass(frozen=True)
 class SourceSnapshot:
     root: Path
@@ -197,14 +266,21 @@ class SourceSnapshot:
         root = destination / "source"
         root.mkdir()
         manifest_path = destination / "manifest.json"
-        manifest = {"source_root": str(source), "root": str(root), "status": "capturing",
-                    "files": {}, "excluded_files": {}, "excluded": [], "notes": [
-                        "Git selection applies only to the selected repository root; independent subdirectories use a source walk.",
-                        "Tracked ordinary source files are retained even under names usually used for generated files.",
-                        "Git-ignored untracked files are omitted; named secret files outside generated directories are fingerprinted.",
-                        "Environment secrets, private keys, links, VCS data and generated caches are not copied.",
-                        "Run capture while the worker is paused; this is not a transactional filesystem snapshot.",
-                    ]}
+        manifest = {
+            "source_root": str(source),
+            "root": str(root),
+            "status": "capturing",
+            "files": {},
+            "excluded_files": {},
+            "excluded": [],
+            "notes": [
+                "Git selection applies only to the selected repository root; independent subdirectories use a source walk.",
+                "Tracked ordinary source files are retained even under names usually used for generated files.",
+                "Git-ignored untracked files are omitted; named secret files outside generated directories are fingerprinted.",
+                "Environment secrets, private keys, links, VCS data and generated caches are not copied.",
+                "Run capture while the worker is paused; this is not a transactional filesystem snapshot.",
+            ],
+        }
         _save(manifest_path, manifest)
         try:
             selection, candidates = _selected_files(source, runtime_files)
@@ -229,7 +305,9 @@ class SourceSnapshot:
                 before = path.stat()
                 sha, private = _inspect_file(path)
                 if private:
-                    manifest["excluded"].append({"path": relative.as_posix(), "reason": "private_key_content"})
+                    manifest["excluded"].append(
+                        {"path": relative.as_posix(), "reason": "private_key_content"}
+                    )
                     manifest["excluded_files"][relative.as_posix()] = sha
                     continue
                 target = root / relative
@@ -238,20 +316,35 @@ class SourceSnapshot:
                 copied_sha, copied_private = _inspect_file(target)
                 after = path.stat()
                 if copied_private:
-                    # This file is newly created inside this snapshot; never remove source data.
+                    # 此文件是在快照内部新建的，不能删除源码数据。
                     target.resolve().relative_to(root)
                     target.unlink()
-                    raise SnapshotError(f"Source changed to secret content during capture: {relative}")
-                if (copied_sha != sha or before.st_size != after.st_size
-                        or before.st_mtime_ns != after.st_mtime_ns):
+                    raise SnapshotError(
+                        f"Source changed to secret content during capture: {relative}"
+                    )
+                if (
+                    copied_sha != sha
+                    or before.st_size != after.st_size
+                    or before.st_mtime_ns != after.st_mtime_ns
+                ):
                     raise SnapshotError(f"Source changed during capture: {relative}")
                 manifest["files"][relative.as_posix()] = sha
-            digest = hashlib.sha256(json.dumps({"files": manifest["files"],
-                                               "excluded_files": manifest["excluded_files"]}, sort_keys=True,
-                                               separators=(",", ":")).encode()).hexdigest()
+            digest = hashlib.sha256(
+                json.dumps(
+                    {"files": manifest["files"], "excluded_files": manifest["excluded_files"]},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
             manifest.update(status="captured", digest=digest, file_count=len(manifest["files"]))
             _save(manifest_path, manifest)
-            return cls(root, dict(manifest["files"]), digest, manifest_path, dict(manifest["excluded_files"]))
+            return cls(
+                root,
+                dict(manifest["files"]),
+                digest,
+                manifest_path,
+                dict(manifest["excluded_files"]),
+            )
         except Exception as exc:
             manifest.update(status="failed", error=f"{type(exc).__name__}: {exc}")
             _save(manifest_path, manifest)
@@ -259,11 +352,14 @@ class SourceSnapshot:
 
     @contextmanager
     def environment_like(self, environment, artifact_root, *, read_only=False):
-        """Preserve the execution backend; own and close only the new container."""
+        """保留执行后端；仅管理和关闭新建的容器。"""
         if isinstance(environment, DockerEnvironment):
             child = DockerEnvironment(
-                self.root, environment.image, f"agent-snapshot-{uuid.uuid4().hex}",
-                timeout=environment.timeout, artifact_root=artifact_root,
+                self.root,
+                environment.image,
+                f"agent-snapshot-{uuid.uuid4().hex}",
+                timeout=environment.timeout,
+                artifact_root=artifact_root,
                 **environment.clone_options(),
             )
             child.repo_read_only = read_only
@@ -274,21 +370,29 @@ class SourceSnapshot:
             finally:
                 child.close()
         elif isinstance(environment, LocalEnvironment):
-            child = LocalEnvironment(self.root, timeout=environment.timeout, artifact_root=artifact_root)
+            child = LocalEnvironment(
+                self.root, timeout=environment.timeout, artifact_root=artifact_root
+            )
             child.python_executable = environment.python_executable
             yield child
         else:
-            raise TypeError("Snapshot supports LocalEnvironment and DockerEnvironment backends only.")
+            raise TypeError(
+                "Snapshot supports LocalEnvironment and DockerEnvironment backends only."
+            )
 
     def verify_integrity(self):
-        """Check source files and newly created source paths; ignore derived caches."""
+        """检查源码文件和新增源码路径，忽略派生缓存。"""
         current, errors = {}, []
         try:
             if not self.root.is_dir() or _link(self.root):
                 raise SnapshotError("Source snapshot root is missing or replaced by a link.")
             for relative, skip in _walk(self.root, preserve_files=self.files):
                 reason = _reason(relative)
-                if skip or (relative.as_posix() not in self.files and reason and reason not in _SECRET_REASONS):
+                if skip or (
+                    relative.as_posix() not in self.files
+                    and reason
+                    and reason not in _SECRET_REASONS
+                ):
                     continue
                 path = _safe_file(self.root, relative)
                 sha, private = _inspect_file(path)
@@ -298,25 +402,33 @@ class SourceSnapshot:
         except (OSError, SnapshotError) as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
         change = _changes(self.files, current)
-        return {"valid": not any(change.values()) and not errors, **change, "errors": errors,
-                "digest": self.digest}
+        return {
+            "valid": not any(change.values()) and not errors,
+            **change,
+            "errors": errors,
+            "digest": self.digest,
+        }
 
+    # ========================================================================
+    # 变更比较与可交付补丁
+    # ========================================================================
     def changes_from(self, base):
         return _changes(base.files, self.files)
 
     def excluded_changes_from(self, base):
-        """Changes omitted from executable copies cannot be claimed as verified."""
+        """未进入可执行副本的改动不能声称已经验证。"""
         return _changes(base.excluded_files, self.excluded_files)
 
     def write_patch(self, base, path, max_text_bytes=1024 * 1024):
-        """Write UTF-8 textual changes; manifest explicitly lists omitted changes.
+        """写入 UTF-8 文本改动，并在清单中明确列出省略项。
 
-        Binary/non-UTF-8/large files are retained in the snapshot, not embedded in
-        the patch. File permission changes and empty directories are not patches.
-        """
+        二进制、非 UTF-8 和大文件保存在快照中，不嵌入补丁。
+        文件权限变化和空目录不属于文本补丁。"""
         for snapshot in (base, self):
             if not snapshot.verify_integrity()["valid"]:
-                raise SnapshotError("Source snapshot changed; refusing to export an unverified patch.")
+                raise SnapshotError(
+                    "Source snapshot changed; refusing to export an unverified patch."
+                )
         path = Path(path).resolve()
         if _within(path, base.root) or _within(path, self.root):
             raise SnapshotError("Patch evidence must be outside the source snapshots.")
@@ -327,7 +439,10 @@ class SourceSnapshot:
             try:
                 if any(char in relative for char in "\t\r\n"):
                     raise ValueError("filename requires unsupported patch quoting")
-                if any(item.exists() and item.stat().st_size > max_text_bytes for item in (before, after)):
+                if any(
+                    item.exists() and item.stat().st_size > max_text_bytes
+                    for item in (before, after)
+                ):
                     raise ValueError("file exceeds textual patch size limit")
                 old = before.read_bytes() if relative in base.files else b""
                 new = after.read_bytes() if relative in self.files else b""
@@ -335,25 +450,42 @@ class SourceSnapshot:
                     raise ValueError("binary file")
                 old_text, new_text = old.decode("utf-8"), new.decode("utf-8")
                 if not old and not new:
-                    raise ValueError("empty file addition/deletion is not represented by unified text diff")
-                diff = difflib.unified_diff(old_text.splitlines(keepends=True), new_text.splitlines(keepends=True),
+                    raise ValueError(
+                        "empty file addition/deletion is not represented by unified text diff"
+                    )
+                diff = difflib.unified_diff(
+                    old_text.splitlines(keepends=True),
+                    new_text.splitlines(keepends=True),
                     fromfile="a/" + relative if relative in base.files else "/dev/null",
-                    tofile="b/" + relative if relative in self.files else "/dev/null")
+                    tofile="b/" + relative if relative in self.files else "/dev/null",
+                )
                 for line in diff:
-                    lines.append(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n")
+                    lines.append(
+                        line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                    )
             except (UnicodeError, ValueError) as exc:
                 omitted.append({"path": relative, "reason": str(exc)})
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes("".join(lines).encode("utf-8"))
-        report = {"base_digest": base.digest, "candidate_digest": self.digest, "changes": changes,
-                  "patch": str(path), "omitted": omitted, "excluded_changes": excluded_changes,
-                  "complete_text_patch": not omitted and not any(excluded_changes.values()),
-                  "limitations": ["File modes and empty directories are not represented."]}
+        report = {
+            "base_digest": base.digest,
+            "candidate_digest": self.digest,
+            "changes": changes,
+            "patch": str(path),
+            "omitted": omitted,
+            "excluded_changes": excluded_changes,
+            "complete_text_patch": not omitted and not any(excluded_changes.values()),
+            "limitations": ["File modes and empty directories are not represented."],
+        }
         _save(path.with_suffix(path.suffix + ".manifest.json"), report)
         return report
 
 
 def _changes(before, after):
-    return {"added": sorted(after.keys() - before.keys()),
-            "deleted": sorted(before.keys() - after.keys()),
-            "modified": sorted(path for path in before.keys() & after.keys() if before[path] != after[path])}
+    return {
+        "added": sorted(after.keys() - before.keys()),
+        "deleted": sorted(before.keys() - after.keys()),
+        "modified": sorted(
+            path for path in before.keys() & after.keys() if before[path] != after[path]
+        ),
+    }

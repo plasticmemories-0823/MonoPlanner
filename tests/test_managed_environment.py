@@ -1,4 +1,5 @@
-"""Automatic project setup is separate from the frozen solver and task sandbox."""
+"""项目自动准备与冻结后的求解器及任务沙盒彼此独立。"""
+
 import concurrent.futures
 import ipaddress
 import json
@@ -13,8 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from agent.execution.managed import ManagedEnvironments, PreparationCancelled
-from agent.execution.managed_plan import (PreparationError, inspect_project, source_files,
-                                         _version)
+from agent.execution.managed_plan import PreparationError, inspect_project, source_files, _version
 from agent.execution import managed_proxy
 
 
@@ -39,18 +39,25 @@ class ManagedFixture(unittest.TestCase):
 class ManagedPlanTests(ManagedFixture):
 
     def test_empty_project_gets_general_base_without_docker_or_model(self):
-        with patch('subprocess.Popen', side_effect=AssertionError('no execution during inspection')):
+        with patch(
+            'subprocess.Popen', side_effect=AssertionError('no execution during inspection')
+        ):
             plan = inspect_project(self.repo)
         self.assertEqual((plan.python, plan.node), ('3.12', '22'))
         self.assertEqual(plan.projects, [])
         self.assertEqual(plan.public()['mode'], 'automatic')
 
     def test_own_root_and_nested_constraints_locks_and_requirements_are_used(self):
-        self.write('backend/pyproject.toml', '[project]\nname="mine"\nrequires-python=">=3.10,<3.12"\n')
+        self.write(
+            'backend/pyproject.toml', '[project]\nname="mine"\nrequires-python=">=3.10,<3.12"\n'
+        )
         self.write('backend/uv.lock', 'version = 1\n')
         self.write('backend/requirements-dev.txt', '-r requirements/test.txt\n')
         self.write('backend/requirements/test.txt', 'pytest==8.4.2\n')
-        self.write('frontend/package.json', json.dumps({'engines': {'node': '>=20 <23'}, 'packageManager': 'pnpm@10.17.1'}))
+        self.write(
+            'frontend/package.json',
+            json.dumps({'engines': {'node': '>=20 <23'}, 'packageManager': 'pnpm@10.17.1'}),
+        )
         self.write('frontend/pnpm-lock.yaml', 'lockfileVersion: 9\n')
         plan = inspect_project(self.repo)
         self.assertEqual(plan.python, '3.11')
@@ -90,16 +97,26 @@ class ManagedPlanTests(ManagedFixture):
         self.write('app.py', 'VALUE=2')
         self.write('libs/helper/helper.py', 'VALUE=3')
         self.assertEqual(inspect_project(self.repo).fingerprint, before)
-        self.write('libs/helper/setup.py', 'from setuptools import setup; setup(name="helper", install_requires=["requests"])')
+        self.write(
+            'libs/helper/setup.py',
+            'from setuptools import setup; setup(name="helper", install_requires=["requests"])',
+        )
         self.assertNotEqual(inspect_project(self.repo).fingerprint, before)
 
     def test_private_files_caches_and_keys_never_enter_preparation_copy(self):
-        for relative, value in {'.env': 'SECRET=abc', '.env.production': 'SECRET=xyz',
-                '.npmrc': '//registry/:_authToken=private', '.yarnrc.yml': 'npmAuthToken: private',
-                '.git/config': 'credential helper', '.venv/Lib/site.py': 'host runtime',
-                'node_modules/private/file': 'host deps', 'key.txt': '-----BEGIN PRIVATE KEY-----',
-                'settings.py': 'API_KEY = "a-real-looking-secret-123456789"',
-                'run.py': 'print(1)', 'config.json': '{"theme":"light"}'}.items():
+        for relative, value in {
+            '.env': 'SECRET=abc',
+            '.env.production': 'SECRET=xyz',
+            '.npmrc': '//registry/:_authToken=private',
+            '.yarnrc.yml': 'npmAuthToken: private',
+            '.git/config': 'credential helper',
+            '.venv/Lib/site.py': 'host runtime',
+            'node_modules/private/file': 'host deps',
+            'key.txt': '-----BEGIN PRIVATE KEY-----',
+            'settings.py': 'API_KEY = "a-real-looking-secret-123456789"',
+            'run.py': 'print(1)',
+            'config.json': '{"theme":"light"}',
+        }.items():
             self.write(relative, value)
         copied = {path.as_posix() for path, _ in source_files(self.repo)}
         self.assertEqual(copied, {'run.py', 'config.json'})
@@ -126,7 +143,9 @@ class ManagedPlanTests(ManagedFixture):
 
     def test_source_bounds_stop_before_large_copy(self):
         self.write('large.txt', 'abcd')
-        with patch('agent.execution.managed_plan.MAX_BYTES', 3), self.assertRaisesRegex(PreparationError, '过大'):
+        with patch('agent.execution.managed_plan.MAX_BYTES', 3), self.assertRaisesRegex(
+            PreparationError, '过大'
+        ):
             list(source_files(self.repo))
 
     def test_project_can_never_include_private_application_state(self):
@@ -145,7 +164,9 @@ class ManagedPlanTests(ManagedFixture):
     def test_old_python_stops_before_download_without_silently_upgrading(self):
         with patch('subprocess.Popen', side_effect=AssertionError('no download')):
             for constraint in ('3.8', '3.7.17', '>=3.6,<3.9'):
-                with self.subTest(constraint=constraint), self.assertRaisesRegex(PreparationError, 'Python 3.9'):
+                with self.subTest(constraint=constraint), self.assertRaisesRegex(
+                    PreparationError, 'Python 3.9'
+                ):
                     _version([constraint], 'python')
 
     def test_workspace_members_are_not_installed_independently(self):
@@ -156,7 +177,10 @@ class ManagedPlanTests(ManagedFixture):
 
     def test_private_registry_is_not_silently_replaced_with_public_registry(self):
         self.write('package.json', '{"dependencies":{"company-internal":"1.0.0"}}')
-        self.write('.npmrc', '@company:registry=https://private.example/\n//private.example/:_authToken=secret-token')
+        self.write(
+            '.npmrc',
+            '@company:registry=https://private.example/\n//private.example/:_authToken=secret-token',
+        )
         with self.assertRaisesRegex(PreparationError, '不会改用公开包源') as caught:
             inspect_project(self.repo)
         self.assertNotIn('secret-token', str(caught.exception))
@@ -182,11 +206,12 @@ class FakeDockerManager(ManagedEnvironments):
 
     def _run(self, arguments, *, log, cancelled=None, timeout=60, check=True):
         from agent.execution.managed import _check_cancel
+
         _check_cancel(cancelled)
         self.calls.append(list(arguments))
         log.parent.mkdir(parents=True, exist_ok=True)
         stdout, code = '', 0
-        if self.failure and arguments[:len(self.failure)] == self.failure:
+        if self.failure and arguments[: len(self.failure)] == self.failure:
             raise PreparationError('fixture installation failure')
         if arguments[:2] == ['image', 'inspect']:
             found = self.images.get(arguments[2])
@@ -199,8 +224,16 @@ class FakeDockerManager(ManagedEnvironments):
             self.images[arguments[arguments.index('--tag') + 1]] = image
             self.images[image] = image
         elif arguments[:2] == ['network', 'inspect']:
-            stdout = json.dumps([{'Internal': True, 'EnableIPv6': False, 'Driver': 'bridge',
-                                  'Options': {'com.docker.network.bridge.gateway_mode_ipv4': 'isolated'}}])
+            stdout = json.dumps(
+                [
+                    {
+                        'Internal': True,
+                        'EnableIPv6': False,
+                        'Driver': 'bridge',
+                        'Options': {'com.docker.network.bridge.gateway_mode_ipv4': 'isolated'},
+                    }
+                ]
+            )
         elif arguments[:2] == ['volume', 'inspect']:
             code, stdout = 1, 'Error: No such volume'
         elif arguments[:2] == ['start', '--attach']:
@@ -228,16 +261,24 @@ class ManagedPreparationTests(ManagedFixture):
         events = []
         with patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'never-forward-this'}):
             binding = self.manager.prepare(self.repo, progress=events.append)
-        self.assertEqual(binding['runtime'], {'python': '/opt/monoplanner/venv/bin/python', 'conda_env': ''})
-        self.assertEqual([e['stage'] for e in events], ['checking', 'downloading', 'installing', 'saving', 'ready'])
+        self.assertEqual(
+            binding['runtime'], {'python': '/opt/monoplanner/venv/bin/python', 'conda_env': ''}
+        )
+        self.assertEqual(
+            [e['stage'] for e in events],
+            ['checking', 'materials', 'downloading', 'installing', 'saving', 'ready'],
+        )
         create = next(c for c in self.manager.calls if c[0] == 'create')
         self.assertIn('--network', create)
         self.assertTrue(create[create.index('--network') + 1].endswith('-net'))
-        self.assertIn('--internal', next(c for c in self.manager.calls if c[:2] == ['network', 'create']))
+        self.assertIn(
+            '--internal', next(c for c in self.manager.calls if c[:2] == ['network', 'create'])
+        )
         self.assertNotIn('--mount', create)
         self.assertNotIn('--privileged', create)
         self.assertIn('no-new-privileges', create)
         from agent.execution.docker import PROXY_VARIABLES
+
         env = [create[i + 1] for i, item in enumerate(create[:-1]) if item == '--env']
         for name in PROXY_VARIABLES:
             self.assertTrue(any(item.startswith(name + '=') for item in env))
@@ -258,6 +299,7 @@ class ManagedPreparationTests(ManagedFixture):
 
     def test_preparation_containers_own_deadline_when_host_controller_exits(self):
         from agent.execution.managed import SETUP_TIMEOUT, PROXY_LIFETIME
+
         self.manager.prepare(self.repo)
         proxy = next(c for c in self.manager.calls if c[:2] == ['run', '--detach'])
         setup = next(c for c in self.manager.calls if c[0] == 'create')
@@ -294,6 +336,7 @@ class ManagedPreparationTests(ManagedFixture):
     def test_cancel_after_proxy_creation_cleans_owned_resources_and_never_commits(self):
         def cancelled():
             return any(c[:2] == ['run', '--detach'] for c in self.manager.calls)
+
         with self.assertRaises(PreparationCancelled):
             self.manager.prepare(self.repo, cancelled=cancelled)
         self.assertTrue(any(c[:2] == ['rm', '--force'] for c in self.manager.calls))
@@ -315,13 +358,16 @@ class ManagedPreparationTests(ManagedFixture):
     def test_display_failure_does_not_abort_preparation(self):
         def broken(event):
             raise OSError('disconnected display')
+
         self.assertIn('image', self.manager.prepare(self.repo, progress=broken))
 
     def test_manifest_change_during_install_cannot_publish_stale_ready_environment(self):
         self.write('requirements.txt', 'requests==2.32.4')
+
         def changed(event):
             if event['stage'] == 'installing':
                 self.write('requirements.txt', 'requests==2.32.5')
+
         with self.assertRaisesRegex(PreparationError, '变化'):
             self.manager.prepare(self.repo, progress=changed)
         self.assertFalse(self.manager._record(self.repo).exists())
@@ -330,18 +376,33 @@ class ManagedPreparationTests(ManagedFixture):
 class DownloadProxyTests(unittest.TestCase):
     def test_dns_rebinding_cannot_change_validated_connect_target(self):
         result = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443))]
-        with patch.object(socket, 'getaddrinfo', return_value=result) as resolve, patch.object(socket, 'socket') as make:
+        with patch.object(socket, 'getaddrinfo', return_value=result) as resolve, patch.object(
+            socket, 'socket'
+        ) as make:
             connection = managed_proxy.connect_public('packages.example', 443)
         self.assertIs(connection, make.return_value)
         resolve.assert_called_once()
         connection.connect.assert_called_once_with(('93.184.216.34', 443))
 
     def test_any_private_dns_answer_rejects_destination_without_connection(self):
-        for address in ('127.0.0.1', '10.0.0.1', '172.17.0.1', '192.168.1.1', '169.254.169.254', '::1', '::ffff:127.0.0.1', '224.0.0.1'):
+        for address in (
+            '127.0.0.1',
+            '10.0.0.1',
+            '172.17.0.1',
+            '192.168.1.1',
+            '169.254.169.254',
+            '::1',
+            '::ffff:127.0.0.1',
+            '224.0.0.1',
+        ):
             with self.subTest(address=address):
-                result = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443)),
-                          (socket.AF_INET, socket.SOCK_STREAM, 6, '', (address, 443))]
-                with patch.object(socket, 'getaddrinfo', return_value=result), patch.object(socket, 'socket') as make:
+                result = [
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443)),
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, '', (address, 443)),
+                ]
+                with patch.object(socket, 'getaddrinfo', return_value=result), patch.object(
+                    socket, 'socket'
+                ) as make:
                     with self.assertRaises(ValueError):
                         managed_proxy.connect_public('packages.example', 443)
                     make.assert_not_called()
@@ -350,10 +411,13 @@ class DownloadProxyTests(unittest.TestCase):
 class EditableSourceTests(ManagedFixture):
     def test_only_generated_import_maps_point_to_live_task_source(self):
         from agent.execution.managed_setup import bind_live_python_source
+
         site = self.root / 'lib/python3.12/site-packages'
         site.mkdir(parents=True)
         (site / 'editable.pth').write_text('/monoplanner-source/src\n')
-        (site / '__editable___project_finder.py').write_text("MAPPING={'project':'/monoplanner-source/src/project'}\n")
+        (site / '__editable___project_finder.py').write_text(
+            "MAPPING={'project':'/monoplanner-source/src/project'}\n"
+        )
         ordinary = site / 'ordinary.py'
         ordinary.write_text("MESSAGE='/monoplanner-source'\n")
         bind_live_python_source(self.root / 'lib')

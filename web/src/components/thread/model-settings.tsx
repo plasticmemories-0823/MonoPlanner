@@ -63,14 +63,25 @@ export function ModelSettings({
     setConnectionError("");
     async function load(attempt = 0) {
       try {
-        const r = await fetch(`${apiUrl}/settings`, { cache: "no-store", signal: controller.signal });
+        const r = await fetch(`${apiUrl}/settings`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
         const result = await r.json();
         if (!r.ok) throw new Error(result.error || "无法读取模型设置");
-        if (!controller.signal.aborted) { setValue(result); setReady(true); setConnectionError(""); }
+        if (!controller.signal.aborted) {
+          setValue(result);
+          setReady(true);
+          setConnectionError("");
+        }
       } catch (e) {
         if (controller.signal.aborted) return;
         setConnectionError(e instanceof Error ? e.message : "无法连接设置服务");
-        if (attempt < 2) timer = setTimeout(() => void load(attempt + 1), 1000 * (attempt + 1));
+        if (attempt < 2)
+          timer = setTimeout(
+            () => void load(attempt + 1),
+            1000 * (attempt + 1),
+          );
       }
     }
     void load();
@@ -223,9 +234,7 @@ export function ModelSettings({
         >
           <DialogHeader className="mb-1 px-3 pt-1">
             <DialogTitle className="text-base">工具与设置</DialogTitle>
-            <DialogDescription>
-              管理额外可读资料及模型密钥。
-            </DialogDescription>
+            <DialogDescription>管理额外可读资料及模型密钥。</DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-1">
             {menuItems}
@@ -280,9 +289,11 @@ export function ModelSettings({
             role="status"
             className="text-muted-foreground text-sm"
           >
-            {!ready ? "尚未连接设置服务，密钥状态暂未知" : value.has_api_key
-              ? `已配置（${value.key_source === "local" ? "本机加密保存" : "环境变量 / .env"}）`
-              : "尚未配置"}
+            {!ready
+              ? "尚未连接设置服务，密钥状态暂未知"
+              : value.has_api_key
+                ? `已配置（${value.key_source === "local" ? "本机加密保存" : "环境变量 / .env"}）`
+                : "尚未配置"}
           </p>
           <div className="bg-muted/50 text-muted-foreground rounded-xl p-3 text-xs leading-6">
             <p>
@@ -298,7 +309,22 @@ export function ModelSettings({
             )}
             <p>设置改动从下个新任务生效，当前任务和暂停恢复保持原配置。</p>
           </div>
-      {connectionError && <p role="alert" className="text-muted-foreground text-xs">设置服务暂不可用。<Button type="button" variant="ghost" size="sm" onClick={() => reconnect(v => v + 1)}>重新连接</Button></p>}
+          {connectionError && (
+            <p
+              role="alert"
+              className="text-muted-foreground text-xs"
+            >
+              设置服务暂不可用。
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => reconnect((v) => v + 1)}
+              >
+                重新连接
+              </Button>
+            </p>
+          )}
           <p className="text-muted-foreground text-sm">
             联网使用同一个 Key。网页搜索会增加 DeepSeek API 调用和 Token
             费用；读取网页不额外调用模型。

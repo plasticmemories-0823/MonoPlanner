@@ -1,4 +1,5 @@
-"""Real original-source trials, explicit review, version comparison and recovery."""
+"""验证原始源码的真实试跑、明确审查、版本比较和恢复。"""
+
 import json
 from pathlib import Path
 import unittest
@@ -22,8 +23,11 @@ def review(messages, name="freeze_acceptance", code=None):
     args = {"trial_id": identifier, "reason": "Use the recorded original-source execution evidence"}
     if code is not None:
         args["test_code"] = code
-    return AIMessage(content="", tool_calls=[{"name": name, "id": name + "-call", "args": args}],
-                     usage_metadata={"input_tokens": 10, "output_tokens": 10, "total_tokens": 20})
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "id": name + "-call", "args": args}],
+        usage_metadata={"input_tokens": 10, "output_tokens": 10, "total_tokens": 20},
+    )
 
 
 class ScriptModel:
@@ -77,7 +81,8 @@ class AcceptanceReviewTests(unittest.TestCase):
 
     def test_repository_driver_survives_trial_freeze_and_recovery(self):
         (self.repo / "native_support.py").write_text(
-            "import unittest\nclass NativeCase(unittest.TestCase):\n    pass\n")
+            "import unittest\nclass NativeCase(unittest.TestCase):\n    pass\n"
+        )
         (self.repo / "runtests.py").write_text(
             "import sys, unittest\n"
             "class RepoChecks(unittest.TestCase):\n"
@@ -86,58 +91,109 @@ class AcceptanceReviewTests(unittest.TestCase):
             "suite = unittest.defaultTestLoader.loadTestsFromName(sys.argv[1])\n"
             "suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(RepoChecks))\n"
             "result = unittest.TextTestRunner().run(suite)\n"
-            "sys.exit(0 if result.wasSuccessful() else 1)\n")
-        code = f.CODE.replace("import unittest", "from native_support import NativeCase").replace("unittest.TestCase", "NativeCase")
+            "sys.exit(0 if result.wasSuccessful() else 1)\n"
+        )
+        code = f.CODE.replace("import unittest", "from native_support import NativeCase").replace(
+            "unittest.TestCase", "NativeCase"
+        )
         interrupt, error = self.crash("acceptance_trial_finished")
         with interrupt, self.assertRaises(error):
-            self.run_replies([f.reply(self.candidate(test_code=code, test_driver=["runtests.py", "{test_module}"]))])
+            self.run_replies(
+                [
+                    f.reply(
+                        self.candidate(test_code=code, test_driver=["runtests.py", "{test_module}"])
+                    )
+                ]
+            )
         result = self.run_replies([review])
         self.assertEqual(result["status"], "verified_success", result)
         frozen = json.loads((self.root / "state/frozen-acceptance.json").read_text())
         self.assertEqual(frozen["spec"]["test_driver"], ["runtests.py", "{test_module}"])
         self.assertEqual(result["calls_this_invocation"], 1)
-        self.assertEqual(result["verification"]["test_groups"]["generated"]["counts"], {"passed": 1})
-        self.assertEqual(result["verification"]["test_groups"]["repository"]["counts"], {"skipped": 1})
+        self.assertEqual(
+            result["verification"]["test_groups"]["generated"]["counts"], {"passed": 1}
+        )
+        self.assertEqual(
+            result["verification"]["test_groups"]["repository"]["counts"], {"skipped": 1}
+        )
         self.assertTrue(result["verification"]["repository_baseline_matched"])
 
     def test_missing_initialization_can_be_revised_before_freeze(self):
         bad = "import missing_setup_module\n" + f.CODE
-        result = self.run_replies([f.reply(self.candidate(test_code=bad)),
-            lambda m: review(m, "revise_acceptance", f.CODE), review])
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(test_code=bad)),
+                lambda m: review(m, "revise_acceptance", f.CODE),
+                review,
+            ]
+        )
         self.assertEqual(result["status"], "verified_success", result)
         trial = json.loads(self.model.calls[1][-1].content)
         self.assertFalse(trial["baseline"]["tests_ready"])
         self.assertEqual(trial["baseline"]["execution_exception"]["phase"], "load")
-        self.assertIn("missing_setup_module", (self.root / "state" / trial["proposal_record"][8:]).read_text())
+        self.assertIn(
+            "missing_setup_module", (self.root / "state" / trial["proposal_record"][8:]).read_text()
+        )
         self.assertEqual(len(self.state()["acceptance_trials"]), 2)
         self.assertEqual(len(self.state()["acceptance_versions"]), 1)
 
     def test_model_can_correct_fixture_expectation_before_first_freeze(self):
         bad = f.CODE.replace("value(), 4", "value(), 2")
-        result = self.run_replies([f.reply(self.candidate(test_code=bad)),
-            lambda m: review(m, "revise_acceptance", f.CODE), review])
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(test_code=bad)),
+                lambda m: review(m, "revise_acceptance", f.CODE),
+                review,
+            ]
+        )
         self.assertEqual(result["status"], "verified_success", result)
-        self.assertEqual(json.loads((self.root / "state/frozen-acceptance.json").read_text())["spec"]["test_code"], f.CODE)
+        self.assertEqual(
+            json.loads((self.root / "state/frozen-acceptance.json").read_text())["spec"][
+                "test_code"
+            ],
+            f.CODE,
+        )
 
     def test_unrunnable_trial_cannot_be_frozen_or_execute_retained_steps(self):
         bad = "import missing_setup_module\n" + f.CODE
-        result = self.run_replies([f.reply(self.candidate(test_code=bad)), review,
-            f.reply({"kind": "blocked", "note": "Need a valid test setup"})])
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(test_code=bad)),
+                review,
+                f.reply({"kind": "blocked", "note": "Need a valid test setup"}),
+            ]
+        )
         self.assertEqual(result["status"], "task_blocked", result)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
         self.assertFalse((self.root / "state/frozen-acceptance.json").exists())
 
     def test_skipped_trial_is_not_runnable_acceptance(self):
-        code = f.CODE.replace("    def test_value", "    @unittest.skip('invalid')\n    def test_value")
-        result = self.run_replies([f.reply(self.candidate(test_code=code)), review,
-            f.reply({"kind": "blocked", "note": "Skipped test cannot validate the requirement"})])
+        code = f.CODE.replace(
+            "    def test_value", "    @unittest.skip('invalid')\n    def test_value"
+        )
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(test_code=code)),
+                review,
+                f.reply(
+                    {"kind": "blocked", "note": "Skipped test cannot validate the requirement"}
+                ),
+            ]
+        )
         self.assertEqual(result["status"], "task_blocked", result)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
     def test_zero_case_trial_is_not_frozen(self):
-        code = f.CODE + "\ndef load_tests(loader, tests, pattern):\n    return unittest.TestSuite()\n"
-        result = self.run_replies([f.reply(self.candidate(test_code=code)), review,
-            f.reply({"kind": "blocked", "note": "No real cases ran"})])
+        code = (
+            f.CODE + "\ndef load_tests(loader, tests, pattern):\n    return unittest.TestSuite()\n"
+        )
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(test_code=code)),
+                review,
+                f.reply({"kind": "blocked", "note": "No real cases ran"}),
+            ]
+        )
         self.assertEqual(result["status"], "task_blocked", result)
         self.assertFalse(self.state().get("verification_spec"))
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
@@ -145,8 +201,12 @@ class AcceptanceReviewTests(unittest.TestCase):
     def test_fixed_user_command_does_not_need_generated_test_review(self):
         self.model = ScriptModel([f.reply(self.candidate())])
         self.engine = TaskRunner(self.model, self.env, state_dir=self.root / "state")
-        result = self.engine.run([], "return 4", StepBudget(max_steps=4),
-                                 verify_command=self.shell("from sample import value; assert value() == 4")["command"])
+        result = self.engine.run(
+            [],
+            "return 4",
+            StepBudget(max_steps=4),
+            verify_command=self.shell("from sample import value; assert value() == 4")["command"],
+        )
         self.assertEqual(result["status"], "verified_success", result)
         self.assertEqual(len(self.model.calls), 1)
         self.assertFalse(self.state().get("acceptance_trials"))
@@ -163,18 +223,34 @@ class AcceptanceReviewTests(unittest.TestCase):
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
     def test_runnable_behavior_failure_cannot_open_frozen_revision(self):
-        result = self.run_replies([f.reply(self.candidate(2)), review,
-            lambda m: review(m, "revise_acceptance", f.CODE.replace("value(), 4", "value(), 2")),
-            f.reply({"kind": "blocked", "note": "Repair actual source behavior"})])
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(2)),
+                review,
+                lambda m: review(
+                    m, "revise_acceptance", f.CODE.replace("value(), 4", "value(), 2")
+                ),
+                f.reply({"kind": "blocked", "note": "Repair actual source behavior"}),
+            ]
+        )
         self.assertEqual(result["status"], "task_blocked", result)
         self.assertIn("Runnable behavior failed", self.model.calls[-1][-1].content)
         self.assertEqual(len(self.state()["acceptance_versions"]), 1)
 
     def test_frozen_setup_revision_retains_behavior_and_compares_both_versions(self):
-        code = "from sample import value\nif value() == 2:\n    raise RuntimeError('setup broken')\n" + f.CODE
-        result = self.run_replies([f.reply(self.candidate(2, test_code=code)), review,
-            lambda m: review(m, "revise_acceptance", f.CODE), review,
-            f.reply(self.candidate(test_code=""))])
+        code = (
+            "from sample import value\nif value() == 2:\n    raise RuntimeError('setup broken')\n"
+            + f.CODE
+        )
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(2, test_code=code)),
+                review,
+                lambda m: review(m, "revise_acceptance", f.CODE),
+                review,
+                f.reply(self.candidate(test_code="")),
+            ]
+        )
         self.assertEqual(result["status"], "verified_success", result)
         self.assertEqual(len(self.state()["acceptance_versions"]), 2)
         compare = result["verification"]["acceptance_comparison"]
@@ -183,20 +259,41 @@ class AcceptanceReviewTests(unittest.TestCase):
         self.assertTrue(all(row["candidate"]["status"] == "passed" for row in data["versions"]))
 
     def test_new_pass_does_not_erase_old_runnable_failure(self):
-        code = "from sample import value\nif value() != 0:\n    raise RuntimeError('old setup conflict')\n" + f.CODE
-        result = self.run_replies([f.reply(self.candidate(2, test_code=code)), review,
-            lambda m: review(m, "revise_acceptance", f.CODE), review,
-            f.reply(self.candidate(test_code="")),
-            f.reply({"kind": "blocked", "note": "Old runnable baseline still conflicts"})])
+        code = (
+            "from sample import value\nif value() != 0:\n    raise RuntimeError('old setup conflict')\n"
+            + f.CODE
+        )
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(2, test_code=code)),
+                review,
+                lambda m: review(m, "revise_acceptance", f.CODE),
+                review,
+                f.reply(self.candidate(test_code="")),
+                f.reply({"kind": "blocked", "note": "Old runnable baseline still conflicts"}),
+            ]
+        )
         self.assertEqual(result["status"], "task_blocked", result)
         self.assertEqual(result["rounds"][-1]["verification"]["status"], "failed")
         self.assertTrue(result["verification"]["acceptance_comparison"]["conflicts"])
 
     def test_frozen_revision_cannot_change_assertions_or_inputs(self):
-        code = "from sample import value\nif value() == 2:\n    raise RuntimeError('setup broken')\n" + f.CODE
-        result = self.run_replies([f.reply(self.candidate(2, test_code=code)), review,
-            lambda m: review(m, "revise_acceptance", f.CODE.replace("value(), 4", "value(), 2")),
-            f.reply({"kind": "blocked", "note": "Changing expected behavior is not a setup repair"})])
+        code = (
+            "from sample import value\nif value() == 2:\n    raise RuntimeError('setup broken')\n"
+            + f.CODE
+        )
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(2, test_code=code)),
+                review,
+                lambda m: review(
+                    m, "revise_acceptance", f.CODE.replace("value(), 4", "value(), 2")
+                ),
+                f.reply(
+                    {"kind": "blocked", "note": "Changing expected behavior is not a setup repair"}
+                ),
+            ]
+        )
         self.assertEqual(result["status"], "task_blocked", result)
         self.assertIn("must remain unchanged", self.model.calls[-1][-1].content)
 
@@ -204,7 +301,9 @@ class AcceptanceReviewTests(unittest.TestCase):
         interrupt, error = self.crash("acceptance_trial_started")
         with interrupt, self.assertRaises(error):
             self.run_replies([f.reply(self.candidate())])
-        with patch("agent.acceptance.revisions.run_report", side_effect=AssertionError("no replay")):
+        with patch(
+            "agent.acceptance.revisions.run_report", side_effect=AssertionError("no replay")
+        ):
             result = self.run_replies([])
         self.assertEqual(result["status"], "execution_unknown", result)
         self.assertFalse(self.model.calls)
@@ -212,7 +311,13 @@ class AcceptanceReviewTests(unittest.TestCase):
     def test_completed_freeze_resume_releases_original_edits_once(self):
         interrupt, error = self.crash("acceptance_frozen")
         plan = self.candidate()
-        plan["steps"].insert(0, self.shell("from pathlib import Path; p=Path('counter'); p.write_text(str(int(p.read_text())+1 if p.exists() else 1))", "count"))
+        plan["steps"].insert(
+            0,
+            self.shell(
+                "from pathlib import Path; p=Path('counter'); p.write_text(str(int(p.read_text())+1 if p.exists() else 1))",
+                "count",
+            ),
+        )
         with interrupt, self.assertRaises(error):
             self.run_replies([f.reply(plan), review])
         self.assertFalse((self.repo / "counter").exists())
@@ -232,9 +337,17 @@ class AcceptanceReviewTests(unittest.TestCase):
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
     def test_trial_cannot_modify_retained_original_or_live_workspace(self):
-        code = "from pathlib import Path\nPath('sample.py').write_text('def value():\\n    return 4\\n')\n" + f.CODE
-        result = self.run_replies([f.reply(self.candidate(test_code=code)), review,
-            f.reply({"kind": "blocked", "note": "Trial modified its scratch source"})])
+        code = (
+            "from pathlib import Path\nPath('sample.py').write_text('def value():\\n    return 4\\n')\n"
+            + f.CODE
+        )
+        result = self.run_replies(
+            [
+                f.reply(self.candidate(test_code=code)),
+                review,
+                f.reply({"kind": "blocked", "note": "Trial modified its scratch source"}),
+            ]
+        )
         self.assertEqual(result["status"], "task_blocked", result)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
         self.assertIn("return 0", (self.engine.baseline.root / "sample.py").read_text())
@@ -245,20 +358,31 @@ class AcceptanceReviewTests(unittest.TestCase):
         self.assertTrue(all(tools == self.model.tools[0] for tools in self.model.tools))
         for tool in self.model.tools[0]:
             self.assertTrue(tool["function"]["strict"])
-        revise = next(t for t in self.model.tools[0] if t["function"]["name"] == "revise_acceptance")
-        self.assertEqual(set(revise["function"]["parameters"]["properties"]), {"trial_id", "reason", "test_code", "test_driver"})
+        revise = next(
+            t for t in self.model.tools[0] if t["function"]["name"] == "revise_acceptance"
+        )
+        self.assertEqual(
+            set(revise["function"]["parameters"]["properties"]),
+            {"trial_id", "reason", "test_code", "test_driver"},
+        )
         self.assertNotEqual(behavior(f.CODE), behavior(f.CODE.replace("value(), 4", "value(), 2")))
 
     def test_revision_resource_is_in_restore_fingerprint(self):
         original = code_key()
         from agent.settings import PROJECT_ROOT
+
         (self.root / "resources").mkdir()
         p = self.root / "resources/acceptance-review.schema.json"
-        p.write_bytes((PROJECT_ROOT / "resources/acceptance-review.schema.json").read_bytes() + b"\n")
+        p.write_bytes(
+            (PROJECT_ROOT / "resources/acceptance-review.schema.json").read_bytes() + b"\n"
+        )
 
         class Root:
             def __truediv__(self, name):
-                return p if name == "resources/acceptance-review.schema.json" else PROJECT_ROOT / name
+                return (
+                    p if name == "resources/acceptance-review.schema.json" else PROJECT_ROOT / name
+                )
+
         with patch("agent.storage.recovery.PROJECT_ROOT", Root()):
             self.assertNotEqual(code_key(), original)
 

@@ -1,4 +1,5 @@
-"""Local defaults and a Windows-user encrypted provider credential."""
+"""本地默认设置及按 Windows 用户加密的服务商凭据。"""
+
 import base64
 import ctypes
 import json
@@ -11,14 +12,16 @@ EFFORTS = ('none', 'low', 'high', 'max')
 
 
 def state_root():
-    return Path(os.getenv('MONOPLANER_STATE_DIR', Path.home()/'.local/state/monoplaner')).resolve()
+    return Path(
+        os.getenv('MONOPLANER_STATE_DIR', Path.home() / '.local/state/monoplaner')
+    ).resolve()
 
 
 def private_path(path):
-    """Application state and launcher credentials never become model materials."""
+    """应用状态和启动器凭据不会成为模型材料。"""
     roots = [state_root()]
     if os.getenv('LOCALAPPDATA'):
-        roots.append(Path(os.environ['LOCALAPPDATA'])/'MonoPlanner')
+        roots.append(Path(os.environ['LOCALAPPDATA']) / 'MonoPlanner')
     return any(Path(path).resolve().is_relative_to(root.resolve()) for root in roots)
 
 
@@ -26,14 +29,27 @@ def protect(value, *, decrypt=False):
     if os.name != 'nt':
         raise ValueError('持久保存密钥需要 Windows DPAPI；其他系统请使用环境变量')
     from ctypes import wintypes
+
     class Blob(ctypes.Structure):
         _fields_ = [('size', wintypes.DWORD), ('data', ctypes.POINTER(ctypes.c_ubyte))]
+
     buffer = ctypes.create_string_buffer(value)
     source = Blob(len(value), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
     target = Blob()
-    method = ctypes.windll.crypt32.CryptUnprotectData if decrypt else ctypes.windll.crypt32.CryptProtectData
-    method.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.c_void_p,
-                       ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
+    method = (
+        ctypes.windll.crypt32.CryptUnprotectData
+        if decrypt
+        else ctypes.windll.crypt32.CryptProtectData
+    )
+    method.argtypes = [
+        ctypes.POINTER(Blob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(Blob),
+    ]
     method.restype = wintypes.BOOL
     if not method(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(target)):
         raise ValueError('Windows 无法读取或保存密钥，请在当前用户下重新配置')
@@ -66,8 +82,8 @@ def atomic_write(path, value):
 class Preferences:
     def __init__(self, root=None):
         self.root = Path(root) if root else state_root()
-        self.path = self.root/'preferences.json'
-        self.secret = self.root/'deepseek-key.dpapi'
+        self.path = self.root / 'preferences.json'
+        self.secret = self.root / 'deepseek-key.dpapi'
 
     @staticmethod
     def validate(value):
@@ -80,27 +96,40 @@ class Preferences:
         return {name: value[name] for name in DEFAULTS}
 
     def defaults(self):
-        return self.validate(json.loads(self.path.read_text(encoding='utf-8'))) if self.path.exists() else dict(DEFAULTS)
+        return (
+            self.validate(json.loads(self.path.read_text(encoding='utf-8')))
+            if self.path.exists()
+            else dict(DEFAULTS)
+        )
 
     def key(self):
         if self.secret.exists():
             if self.secret.is_symlink():
                 raise ValueError('密钥文件不能是链接')
-            return protect(base64.b64decode(self.secret.read_bytes(), validate=True), decrypt=True).decode('utf-8')
+            return protect(
+                base64.b64decode(self.secret.read_bytes(), validate=True), decrypt=True
+            ).decode('utf-8')
         from dotenv import load_dotenv
         from agent.settings import PROJECT_ROOT
-        load_dotenv(PROJECT_ROOT/'.env')
+
+        load_dotenv(PROJECT_ROOT / '.env')
         return os.getenv('DEEPSEEK_API_KEY', '').strip()
 
     def public(self):
-        return {**self.defaults(), 'has_api_key': bool(self.key()),
-                'key_source': 'local' if self.secret.exists() else 'environment',
-                'models': [{'id': 'deepseek-flash', 'name': 'DeepSeek Flash'}], 'efforts': list(EFFORTS)}
+        return {
+            **self.defaults(),
+            'has_api_key': bool(self.key()),
+            'key_source': 'local' if self.secret.exists() else 'environment',
+            'models': [{'id': 'deepseek-flash', 'name': 'DeepSeek Flash'}],
+            'efforts': list(EFFORTS),
+        }
 
     def update(self, value):
         if not isinstance(value, dict) or set(value) - {*DEFAULTS, 'api_key'}:
             raise ValueError('配置包含未知字段')
-        public = self.validate({**self.defaults(), **{k: v for k, v in value.items() if k in DEFAULTS}})
+        public = self.validate(
+            {**self.defaults(), **{k: v for k, v in value.items() if k in DEFAULTS}}
+        )
         key = value.get('api_key', '')
         if not isinstance(key, str) or '\n' in key or '\r' in key:
             raise ValueError('API Key 必须是单行文本')

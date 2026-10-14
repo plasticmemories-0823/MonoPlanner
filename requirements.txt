@@ -4,3 +4,5 @@ langchain-core==1.6.9
 python-dotenv==1.2.4
 httpx==0.28.1
 socksio==1.0.0
+pathspec==1.1.1
+PyYAML==6.0.3

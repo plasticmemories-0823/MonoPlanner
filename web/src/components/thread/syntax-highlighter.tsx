@@ -4,7 +4,7 @@ import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
 import { coldarkDark } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { FC } from "react";
 
-// Register languages you want to support
+// 注册需要支持的语言。
 SyntaxHighlighterPrism.registerLanguage("js", tsx);
 SyntaxHighlighterPrism.registerLanguage("jsx", tsx);
 SyntaxHighlighterPrism.registerLanguage("ts", tsx);

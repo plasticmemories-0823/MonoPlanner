@@ -1,7 +1,4 @@
-import {
-  Copy,
-  CopyCheck,
-} from "lucide-react";
+import { Copy, CopyCheck } from "lucide-react";
 import { TooltipIconButton } from "../tooltip-icon-button";
 import { AnimatePresence, motion } from "framer-motion";
 import { useState } from "react";
@@ -59,8 +56,17 @@ function ContentCopyable({
   );
 }
 
-export function CommandBar({ content, isLoading }: {
-  content: string; isLoading: boolean;
+export function CommandBar({
+  content,
+  isLoading,
+}: {
+  content: string;
+  isLoading: boolean;
 }) {
-  return <ContentCopyable content={content} disabled={isLoading} />;
+  return (
+    <ContentCopyable
+      content={content}
+      disabled={isLoading}
+    />
+  );
 }

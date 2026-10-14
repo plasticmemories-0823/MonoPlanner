@@ -1,4 +1,5 @@
-"""Plan-scoped reuse with fail-closed cleanup; no network or model requests."""
+"""验证计划内复用及失败即停止的清理；不发起网络或模型请求。"""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +13,15 @@ class FakeDocker:
     instances = []
     outcomes = []
 
-    def __init__(self, repo_root, image='test', container_name='test', timeout=5, artifact_root=None, **options):
+    def __init__(
+        self,
+        repo_root,
+        image='test',
+        container_name='test',
+        timeout=5,
+        artifact_root=None,
+        **options
+    ):
         self.repo_root, self.image = Path(repo_root), image
         self.artifact_root = Path(artifact_root)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
@@ -49,7 +58,9 @@ class ProbeBatchTests(unittest.TestCase):
         self.patch = patch('agent.execution.probe_batch.DockerEnvironment', FakeDocker)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        self.capture = patch('agent.execution.probe_batch.SourceSnapshot.capture', side_effect=self.snapshot).start()
+        self.capture = patch(
+            'agent.execution.probe_batch.SourceSnapshot.capture', side_effect=self.snapshot
+        ).start()
         self.addCleanup(patch.stopall)
         self.batch = ProbeBatch(self.environment, self.root / 'sessions')
         self.addCleanup(self.batch.close)

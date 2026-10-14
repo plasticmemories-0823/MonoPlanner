@@ -1,4 +1,5 @@
-"""Create, inspect or resume a persistent task."""
+"""创建、查看或恢复已保存的任务。"""
+
 from agent.cli.tasks import main
 
 

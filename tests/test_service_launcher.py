@@ -1,4 +1,5 @@
-"""Local lifecycle checks use disposable servers, never product tasks or models."""
+"""本地生命周期检查使用临时服务器，不运行产品任务或模型。"""
+
 import json
 import ctypes
 import os
@@ -21,9 +22,13 @@ class ServiceIdentityTests(unittest.TestCase):
     def test_named_local_origin_can_update_settings_but_other_names_cannot(self):
         with patch('agent.server.app.Preferences') as preferences, TestClient(app) as client:
             preferences.return_value.update.return_value = {'configured': True}
-            allowed = client.post('/settings', json={}, headers={'Origin': 'http://monoplanner.localhost:3000'})
+            allowed = client.post(
+                '/settings', json={}, headers={'Origin': 'http://monoplanner.localhost:3000'}
+            )
             self.assertEqual(allowed.status_code, 200)
-            denied = client.post('/settings', json={}, headers={'Origin': 'http://monoplanner:3000'})
+            denied = client.post(
+                '/settings', json={}, headers={'Origin': 'http://monoplanner:3000'}
+            )
             self.assertEqual(denied.status_code, 403)
             preferences.return_value.update.assert_called_once_with({})
 
@@ -71,7 +76,7 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.script = Path(__file__).resolve().parents[1] / 'scripts/start-app.ps1'
 
     def cleanup_fixture(self):
-        # WebView2 can finish writing its disposable profile just after the host exits.
+        # WebView2 可能在宿主程序退出后才完成临时配置目录的写入。
         root = Path(self.temp.name).resolve()
         self.assertEqual(root.parent, Path(tempfile.gettempdir()).resolve())
         self.assertTrue(root.name.startswith('monoplanner-launcher-'))
@@ -83,7 +88,7 @@ class ServiceLifecycleTests(unittest.TestCase):
             except OSError as error:
                 if error.winerror not in {5, 32, 145} or time.monotonic() >= deadline:
                     raise
-                time.sleep(.1)
+                time.sleep(0.1)
 
     @staticmethod
     def unused_port():
@@ -95,43 +100,75 @@ class ServiceLifecycleTests(unittest.TestCase):
         port = self.unused_port()
         file = (self.project if owned else self.root) / 'fixture.py'
         file.write_text(SERVER)
-        child = subprocess.Popen([sys.executable, '-B', str(file), str(self.config), str(port)],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        child = subprocess.Popen(
+            [sys.executable, '-B', str(file), str(self.config), str(port)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
         def cleanup():
             if child.poll() is None:
                 child.terminate()
             child.wait(timeout=5)
+
         self.addCleanup(cleanup)
         for _ in range(100):
             try:
-                with socket.create_connection(('127.0.0.1', port), timeout=.1):
+                with socket.create_connection(('127.0.0.1', port), timeout=0.1):
                     return port, child
             except OSError:
-                time.sleep(.03)
+                time.sleep(0.03)
         self.fail('Fixture server did not start')
 
     def stop(self, port):
         shell = Path(os.environ['WINDIR']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
-        return subprocess.run([str(shell), '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-            str(self.script), '-Action', 'Stop', '-NoBrowser', '-ProjectRoot', str(self.project),
-            '-BackendPort', str(port), '-FrontendPort', str(self.unused_port())],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        return subprocess.run(
+            [
+                str(shell),
+                '-NoProfile',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                str(self.script),
+                '-Action',
+                'Stop',
+                '-NoBrowser',
+                '-ProjectRoot',
+                str(self.project),
+                '-BackendPort',
+                str(port),
+                '-FrontendPort',
+                str(self.unused_port()),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
 
     def test_idle_owned_service_stops_and_foreign_service_is_untouched(self):
         port, child = self.server()
         result = self.stop(port)
         self.assertEqual(result.returncode, 0, result.stderr)
         child.wait(timeout=5)
-        self.assertTrue(json.loads((self.project / 'validation/launcher-logs/latest.json').read_text(encoding='utf-8-sig'))['stopped'])
+        self.assertTrue(
+            json.loads(
+                (self.project / 'validation/launcher-logs/latest.json').read_text(
+                    encoding='utf-8-sig'
+                )
+            )['stopped']
+        )
         port, foreign = self.server(owned=False)
         self.assertNotEqual(self.stop(port).returncode, 0)
         self.assertIsNone(foreign.poll())
 
     def test_running_queued_and_unknown_requests_prevent_shutdown(self):
         port, child = self.server()
-        for state in [{'queue': {'n_running': 1, 'n_pending': 0}},
-                      {'queue': {'n_running': 0, 'n_pending': 1}},
-                      {'queue': None}, {'status': 500}]:
+        for state in [
+            {'queue': {'n_running': 1, 'n_pending': 0}},
+            {'queue': {'n_running': 0, 'n_pending': 1}},
+            {'queue': None},
+            {'status': 500},
+        ]:
             with self.subTest(state=state):
                 self.config.write_text(json.dumps(state))
                 self.assertNotEqual(self.stop(port).returncode, 0)
@@ -140,12 +177,15 @@ class ServiceLifecycleTests(unittest.TestCase):
     def test_desktop_is_single_instance_and_close_stops_services(self):
         executable = self.project / 'MonoPlanner.exe'
         shutil.copyfile(self.script.parents[1] / executable.name, executable)
-        shutil.copytree(self.script.parents[1] / 'launcher/runtime', self.project / 'launcher/runtime')
+        shutil.copytree(
+            self.script.parents[1] / 'launcher/runtime', self.project / 'launcher/runtime'
+        )
         (self.project / 'scripts').mkdir()
         (self.project / 'scripts/start-app.ps1').write_text(
             "param([string]$Action, [switch]$NoBrowser)\n"
             "Add-Content -LiteralPath (Join-Path $PSScriptRoot '../actions.txt') -Value ($Action + ':' + $NoBrowser.IsPresent)\n",
-            encoding='utf-8-sig')
+            encoding='utf-8-sig',
+        )
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 0
@@ -156,7 +196,7 @@ class ServiceLifecycleTests(unittest.TestCase):
         for _ in range(100):
             if actions.exists():
                 break
-            time.sleep(.05)
+            time.sleep(0.05)
         self.assertTrue(actions.exists(), 'Desktop did not start its service controller')
         time.sleep(1.5)
         second = subprocess.Popen([str(executable)], startupinfo=startup)
@@ -164,12 +204,16 @@ class ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(actions.read_text().splitlines(), ['Start:True'])
         handles = []
         callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
         def visit(handle, _):
             owner = ctypes.c_ulong()
-            ctypes.windll.user32.GetWindowThreadProcessId(ctypes.c_void_p(handle), ctypes.byref(owner))
+            ctypes.windll.user32.GetWindowThreadProcessId(
+                ctypes.c_void_p(handle), ctypes.byref(owner)
+            )
             if owner.value == first.pid:
                 handles.append(handle)
             return True
+
         ctypes.windll.user32.EnumWindows(callback_type(visit), 0)
         self.assertTrue(handles)
         for handle in handles:

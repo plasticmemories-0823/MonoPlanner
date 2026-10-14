@@ -32,7 +32,7 @@ export type Activity = {
 
 type Usage = ReturnType<typeof combineUsage>;
 
-// Display records never become chat messages or model input.
+// 展示记录不会成为聊天消息或模型输入。
 export function useActivity(
   apiUrl: string,
   threadId: string | null,

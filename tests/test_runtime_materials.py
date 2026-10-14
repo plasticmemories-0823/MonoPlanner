@@ -1,4 +1,5 @@
-"""Generated runtime inputs survive independent copies; no model or Docker needed."""
+"""生成的运行时输入可在独立副本中保留；无需模型或 Docker。"""
+
 import json
 from pathlib import Path
 import shutil
@@ -28,7 +29,9 @@ class RuntimeMaterialsTests(unittest.TestCase):
         self.write("sample_pkg/__init__.py", "from ._version import version\n")
         self.write(".gitignore", "sample_pkg/_version.py\n*.so\nprivate/\n")
         self.git("add", ".")
-        self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
+        self.git(
+            "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base"
+        )
         self.base = self.git("rev-parse", "HEAD").decode().strip()
         self.write("sample_pkg/_version.py", "version = '1.0'\n")
         self.write("sample_pkg/native.so", "FROZEN_NATIVE_BYTES")
@@ -37,7 +40,9 @@ class RuntimeMaterialsTests(unittest.TestCase):
         self.write("private/unrelated.py", "PRIVATE")
 
     def git(self, *args):
-        return subprocess.check_output(["git", "-C", str(self.repo), *args], stderr=subprocess.STDOUT)
+        return subprocess.check_output(
+            ["git", "-C", str(self.repo), *args], stderr=subprocess.STDOUT
+        )
 
     def write(self, name, text):
         path = self.repo / name
@@ -46,7 +51,9 @@ class RuntimeMaterialsTests(unittest.TestCase):
 
     def test_inventory_keeps_runtime_modules_without_ignored_secrets_or_caches(self):
         files = runtime_inventory(self.repo)["files"]
-        self.assertEqual(set(files), {"sample_pkg/__init__.py", "sample_pkg/_version.py", "sample_pkg/native.so"})
+        self.assertEqual(
+            set(files), {"sample_pkg/__init__.py", "sample_pkg/_version.py", "sample_pkg/native.so"}
+        )
         before = SourceSnapshot.capture(self.repo, self.root / "plain")
         self.assertNotIn("sample_pkg/_version.py", before.files)
         after = SourceSnapshot.capture(self.repo, self.root / "complete", runtime_files=files)
@@ -58,7 +65,9 @@ class RuntimeMaterialsTests(unittest.TestCase):
 
     def test_runtime_import_probe_proves_baseline_parity_and_keeps_generation(self):
         inventory = runtime_inventory(self.repo)
-        snapshot = SourceSnapshot.capture(self.repo, self.root / "baseline", runtime_files=inventory["files"])
+        snapshot = SourceSnapshot.capture(
+            self.repo, self.root / "baseline", runtime_files=inventory["files"]
+        )
         for index, repo in enumerate((self.repo, snapshot.root)):
             env = LocalEnvironment(repo, artifact_root=self.root / f"logs-{index}")
             result = probe_runtime(env, inventory["packages"], env.artifact_root / "probe")
@@ -73,7 +82,12 @@ class RuntimeMaterialsTests(unittest.TestCase):
         self.assertFalse(result["ok"])
 
     def test_saved_initial_fingerprints_match_for_fresh_copies_but_dirty_copy_is_rejected(self):
-        task = {"instance_id": "repo__repo-1", "base_commit": self.base, "problem_statement": "Fix bug", "repo": "repo/repo"}
+        task = {
+            "instance_id": "repo__repo-1",
+            "base_commit": self.base,
+            "problem_statement": "Fix bug",
+            "repo": "repo/repo",
+        }
         first = record_initial_workspace(self.repo, task, "sha256:fixture", self.root / "first")
         copy = self.root / "independent"
         shutil.copytree(self.repo, copy)
@@ -86,7 +100,9 @@ class RuntimeMaterialsTests(unittest.TestCase):
         self.assertNotIn("OLD SOLUTION", (self.repo / "sample_pkg/__init__.py").read_text())
 
     def test_runtime_manifest_cannot_override_secret_or_path_boundaries(self):
-        for n, name in enumerate(("../outside.py", "sample_pkg/.env", "sample_pkg/__pycache__/x.pyc")):
+        for n, name in enumerate(
+            ("../outside.py", "sample_pkg/.env", "sample_pkg/__pycache__/x.pyc")
+        ):
             with self.subTest(name=name), self.assertRaises(SnapshotError):
                 SourceSnapshot.capture(self.repo, self.root / f"bad-{n}", runtime_files=[name])
 
@@ -94,30 +110,73 @@ class RuntimeMaterialsTests(unittest.TestCase):
         name = "sample_pkg/" + "long_directory/" * 13 + "fixture_name_with_long_suffix.txt"
         self.write(name, "UNCHANGED")
         self.git("-c", "core.longpaths=true", "add", name)
-        self.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "long fixture")
+        self.git(
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "long fixture",
+        )
         base = self.git("rev-parse", "HEAD").decode().strip()
         prepare_base_checkout(self.repo, base, self.root / "long-path-check")
 
     def task_environment(self):
-        return TaskDocker(self.repo, 'sha256:' + '1' * 64, self.root/'state/tasks/owned',
-                          runtime={'python': '/usr/bin/python3', 'conda_env': ''})
+        return TaskDocker(
+            self.repo,
+            'sha256:' + '1' * 64,
+            self.root / 'state/tasks/owned',
+            runtime={'python': '/usr/bin/python3', 'conda_env': ''},
+        )
 
     def inspected(self, environment):
-        return subprocess.CompletedProcess([], 0, json.dumps([{
-            'Image': environment.image, 'Name': '/' + environment.container_name,
-            'State': {'Running': True}, 'HostConfig': {'NetworkMode': 'none', 'Privileged': False,
-                'CapDrop': ['ALL'], 'SecurityOpt': ['no-new-privileges']},
-            'Mounts': [{'Source': str(environment.repo_root), 'Destination': '/testbed', 'RW': True},
-                       {'Source': str(environment.artifact_root), 'Destination': '/agent-artifacts', 'RW': True}]}]), '')
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                [
+                    {
+                        'Image': environment.image,
+                        'Name': '/' + environment.container_name,
+                        'State': {'Running': True},
+                        'HostConfig': {
+                            'NetworkMode': 'none',
+                            'Privileged': False,
+                            'CapDrop': ['ALL'],
+                            'SecurityOpt': ['no-new-privileges'],
+                        },
+                        'Mounts': [
+                            {
+                                'Source': str(environment.repo_root),
+                                'Destination': '/testbed',
+                                'RW': True,
+                            },
+                            {
+                                'Source': str(environment.artifact_root),
+                                'Destination': '/agent-artifacts',
+                                'RW': True,
+                            },
+                        ],
+                    }
+                ]
+            ),
+            '',
+        )
 
     def test_chat_bootstrap_probe_and_acceptance_copy_keep_ignored_runtime_files(self):
         from agent.server.runtime import ConversationRunner
         from agent.execution.docker import DockerEnvironment
         from agent.execution.probe_batch import ProbeBatch
+
         environment = self.task_environment()
         runner = object.__new__(ConversationRunner)
         runner.environment, runner.root = environment, environment.binding_path.parent
-        runner.state = {'history': [], 'request': 'Fix a normal code issue', 'public_conversation': []}
+        runner.state = {
+            'history': [],
+            'request': 'Fix a normal code issue',
+            'public_conversation': [],
+        }
         runner.rules, runner.runtime_settings, runner.history_store = 'chat rules', {}, None
         runner.optimize_source = True
         runner.activate, runner.initial_material, runner.persist = lambda: None, lambda: {}, Mock()
@@ -127,15 +186,20 @@ class RuntimeMaterialsTests(unittest.TestCase):
         manifest = json.loads(runner.baseline.manifest_path.read_text())
         self.assertEqual(set(manifest['runtime_files']), expected)
         self.assertEqual(runner.state['environment_key'], environment_key(environment))
-        probe = ProbeBatch(environment, self.root/'probes', source_factory=runner.evidence.view)
+        probe = ProbeBatch(environment, self.root / 'probes', source_factory=runner.evidence.view)
         with patch.object(DockerEnvironment, 'start'), patch.object(DockerEnvironment, 'close'):
             try:
                 probe._start(runner.evidence.current, 20)
                 self.assertTrue(expected <= set(probe.snapshot.files))
-                self.assertEqual((probe.snapshot.root/'sample_pkg/native.so').read_bytes(), b'FROZEN_NATIVE_BYTES')
+                self.assertEqual(
+                    (probe.snapshot.root / 'sample_pkg/native.so').read_bytes(),
+                    b'FROZEN_NATIVE_BYTES',
+                )
             finally:
                 probe.close()
-        candidate = SourceSnapshot.capture(self.repo, self.root/'candidate', runtime_files=environment.runtime_files)
+        candidate = SourceSnapshot.capture(
+            self.repo, self.root / 'candidate', runtime_files=environment.runtime_files
+        )
         self.assertTrue(expected <= set(candidate.files))
         self.assertEqual(candidate.files, dict(runner.evidence.view().files))
         for original in (runner.baseline, candidate):
@@ -145,27 +209,34 @@ class RuntimeMaterialsTests(unittest.TestCase):
 
     def test_resume_reuses_frozen_inventory_while_source_versions_check_actual_bytes(self):
         from agent.source.versions import SourceVersions
+
         environment = self.task_environment()
         environment._container_id = '2' * 64
         save(environment.binding_path, environment._binding(environment._container_id))
-        baseline = SourceSnapshot.capture(self.repo, self.root/'baseline', runtime_files=environment.runtime_files)
-        versions = SourceVersions(environment, self.root/'versions', baseline=baseline)
+        baseline = SourceSnapshot.capture(
+            self.repo, self.root / 'baseline', runtime_files=environment.runtime_files
+        )
+        versions = SourceVersions(environment, self.root / 'versions', baseline=baseline)
         previous = versions.current
         self.write('sample_pkg/native.so', 'CHANGED_NATIVE_BYTES')
         self.write('sample_pkg/new_native.so', 'NEW_IGNORED_NATIVE')
-        with patch('agent.execution.runtime_inventory.runtime_inventory', side_effect=AssertionError('no reinventory')), \
-                patch.object(TaskDocker, '_docker', return_value=self.inspected(environment)):
+        with patch(
+            'agent.execution.runtime_inventory.runtime_inventory',
+            side_effect=AssertionError('no reinventory'),
+        ), patch.object(TaskDocker, '_docker', return_value=self.inspected(environment)):
             resumed = self.task_environment()
         self.assertEqual(environment_key(resumed), environment_key(environment))
         self.assertNotIn('sample_pkg/new_native.so', resumed.runtime_files)
-        resumed_versions = SourceVersions(resumed, self.root/'resumed-versions', baseline=baseline)
+        resumed_versions = SourceVersions(
+            resumed, self.root / 'resumed-versions', baseline=baseline
+        )
         self.assertNotEqual(resumed_versions.current, previous)
         self.assertTrue(baseline.verify_integrity()['valid'])
 
     def test_missing_or_changed_runtime_manifest_cannot_replace_frozen_binding(self):
         environment = self.task_environment()
         save(environment.binding_path, environment._binding('2' * 64))
-        record = environment.binding_path.parent/'execution-runtime-materials.json'
+        record = environment.binding_path.parent / 'execution-runtime-materials.json'
         original = json.loads(record.read_text())
         for change in ('hash', 'file_list', 'missing'):
             with self.subTest(change=change):

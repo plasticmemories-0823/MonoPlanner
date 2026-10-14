@@ -1,4 +1,5 @@
-"""Directory selection reads names, never source contents or task state."""
+"""目录选择仅读取名称，不读取源码内容或任务状态。"""
+
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,7 +20,9 @@ class WorkspacePickerTests(unittest.TestCase):
             (folder / 'private.key').write_text('not a directory')
             page = directory_page(str(folder))
             self.assertEqual(page['path'], str(folder.resolve()))
-            self.assertEqual([p['name'] for p in page['directories']], ['alpha', 'Beta', '中文目录'])
+            self.assertEqual(
+                [p['name'] for p in page['directories']], ['alpha', 'Beta', '中文目录']
+            )
             self.assertEqual(page['parent'], str(folder.parent.resolve()))
             self.assertNotIn('nested', repr(page))
             self.assertNotIn('private.key', repr(page))
@@ -33,8 +36,16 @@ class WorkspacePickerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 directory_page(str(file))
             with TestClient(app) as client:
-                self.assertEqual(client.get('/workspace/directories', params={'path': str(file)}).status_code, 400)
-                self.assertEqual(client.get('/workspace/directories', params={'path': str(file / 'missing')}).status_code, 400)
+                self.assertEqual(
+                    client.get('/workspace/directories', params={'path': str(file)}).status_code,
+                    400,
+                )
+                self.assertEqual(
+                    client.get(
+                        '/workspace/directories', params={'path': str(file / 'missing')}
+                    ).status_code,
+                    400,
+                )
 
     def test_http_browse_and_select_do_not_change_user_files(self):
         with tempfile.TemporaryDirectory(prefix='picker 中文 ') as root, TestClient(app) as client:
@@ -52,7 +63,9 @@ class WorkspacePickerTests(unittest.TestCase):
         self.assertEqual(page['path'], '')
         self.assertIsNone(page['parent'])
         self.assertTrue(page['directories'])
-        with patch('agent.server.workspaces.os.scandir', side_effect=PermissionError('access denied')), TestClient(app) as client:
+        with patch(
+            'agent.server.workspaces.os.scandir', side_effect=PermissionError('access denied')
+        ), TestClient(app) as client:
             denied = client.get('/workspace/directories', params={'path': str(Path.home())})
             self.assertEqual(denied.status_code, 400)
             self.assertIn('access denied', denied.json()['error'])

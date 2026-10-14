@@ -1,4 +1,5 @@
-"""Atomic JSON records and bounded excerpts; originals stay on disk."""
+"""原子 JSON 记录与有界摘录；原始内容保留在磁盘。"""
+
 import json
 import hashlib
 from pathlib import Path
@@ -19,4 +20,8 @@ def save(path, data):
 def clip(text, maximum=6000):
     if len(text) <= maximum:
         return text
-    return text[:maximum // 2] + "\n[excerpt; complete content retained in record]\n" + text[-maximum // 2:]
+    return (
+        text[: maximum // 2]
+        + "\n[excerpt; complete content retained in record]\n"
+        + text[-maximum // 2 :]
+    )

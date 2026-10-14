@@ -12,6 +12,7 @@ def load_settings(overrides=None) -> dict:
     load_dotenv(dotenv_path=env_path)
 
     from agent.storage.preferences import Preferences
+
     preferences = Preferences()
     api_key = preferences.key()
     if not api_key:

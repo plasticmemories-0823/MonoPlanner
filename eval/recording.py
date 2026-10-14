@@ -1,4 +1,4 @@
-"""Record real model calls without credentials; share a finite evaluation budget."""
+"""记录真实模型调用且不保存凭据，共用有上限的评测预算。"""
 
 from dataclasses import asdict, dataclass
 from copy import copy
@@ -12,12 +12,18 @@ import uuid
 from langchain_core.messages import message_to_dict, messages_to_dict
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from agent.model.errors import ModelRequestNotSent, ModelResponseNotSaved, ModelCallError, is_transient_model_error, is_context_overflow
+from agent.model.errors import (
+    ModelRequestNotSent,
+    ModelResponseNotSaved,
+    ModelCallError,
+    is_transient_model_error,
+    is_context_overflow,
+)
 from agent.model.client import configure_call
 
 
-# Serialize reservations and ledger snapshots, never the actual model call.
-# This lock is intentionally not a dataclass field (JSON snapshots stay plain).
+# 只串行处理额度预留和账本快照，不串行限制真实模型调用。
+# 锁不作为 dataclass 字段，确保 JSON 快照中只保留普通数据。
 _LEDGER_LOCK = RLock()
 
 
@@ -25,19 +31,20 @@ def write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=str),
-                         encoding="utf-8")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
     try:
-        # Windows readers or antivirus can briefly deny replacement. Retry
-        # this local write only; never repeat the paid model request.
-        for delay in (0, .02, .05, .1, .2, .4, .8):
+        # Windows 读取方或杀毒软件可能短暂阻止文件替换。
+        # 只重试这次本地写入，不重复付费模型请求。
+        for delay in (0, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8):
             if delay:
                 time.sleep(delay)
             try:
                 temporary.replace(path)
                 return
             except PermissionError:
-                if delay == .8:
+                if delay == 0.8:
                     raise
     finally:
         temporary.unlink(missing_ok=True)
@@ -56,9 +63,12 @@ def redact(value, secrets):
     return value
 
 
+# ============================================================
+# 共享调用预算与真实用量账本
+# ============================================================
 @dataclass
 class TokenLedger:
-    """Reported usage is factual; uncertain usage is reserved, never called zero."""
+    """已报告的用量按事实记录；不确定用量保留额度，不能记为零。"""
 
     limit: int | None = 1_000_000
     reported_tokens: int = 0
@@ -73,18 +83,24 @@ class TokenLedger:
 
     def reserve(self, upper_bound, protected=0):
         with _LEDGER_LOCK:
-            if self.limit is not None and self.reported_tokens + self.reserved_unknown_tokens + upper_bound + protected > self.limit:
+            if (
+                self.limit is not None
+                and self.reported_tokens + self.reserved_unknown_tokens + upper_bound + protected
+                > self.limit
+            ):
                 raise ModelRequestNotSent(
-                    "token_budget_exhausted", "Evaluation token allowance cannot cover another request.")
+                    "token_budget_exhausted",
+                    "Evaluation token allowance cannot cover another request.",
+                )
             self.calls += 1
             self.request_sequence = max(self.request_sequence + 1, self.calls)
-            # Save this before sending: a crash cannot make an in-flight request free.
+            # 发送前先保存：进程崩溃不能让在途请求被当作免费。
             self.unknown_calls += 1
             self.reserved_unknown_tokens += upper_bound
             return self.request_sequence
 
     def cancel(self, reservation):
-        """Undo this unsent request only, even when another one is in flight."""
+        """只撤销本次尚未发送的请求，不影响其他正在进行的请求。"""
         with _LEDGER_LOCK:
             self.calls -= 1
             self.unknown_calls -= 1
@@ -104,12 +120,27 @@ class TokenLedger:
                     setattr(self, name, getattr(self, name) + value)
 
 
+# ============================================================
+# 模型调用的归档与续接
+# ============================================================
 class RecordingModel:
-    """The normal Agent still uses bind_tools/invoke; no second repair loop here."""
+    """正常 Agent 仍通过 bind_tools/invoke 调用模型，这里不另设修复循环。"""
 
-    def __init__(self, model, directory, ledger, ledger_path, max_output_tokens=8192,
-                 secrets=(), schemas=(), deadline=None, task_token_limit=None,
-                 task_started_charged=None, report_token_reserve=0, report_time_reserve=0):
+    def __init__(
+        self,
+        model,
+        directory,
+        ledger,
+        ledger_path,
+        max_output_tokens=8192,
+        secrets=(),
+        schemas=(),
+        deadline=None,
+        task_token_limit=None,
+        task_started_charged=None,
+        report_token_reserve=0,
+        report_time_reserve=0,
+    ):
         self.model = model
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -120,19 +151,29 @@ class RecordingModel:
         self.schemas = list(schemas)
         self.deadline = deadline
         self.task_token_limit = task_token_limit
-        self.task_started_charged = (ledger.reported_tokens + ledger.reserved_unknown_tokens
-                                     if task_started_charged is None else task_started_charged)
+        self.task_started_charged = (
+            ledger.reported_tokens + ledger.reserved_unknown_tokens
+            if task_started_charged is None
+            else task_started_charged
+        )
         self.report_token_reserve = report_token_reserve
         self.report_time_reserve = report_time_reserve
         self.purpose = "work"
 
     def bind_tools(self, tools):
         return RecordingModel(
-            self.model.bind_tools(tools), self.directory, self.ledger, self.ledger_path,
-            self.max_output_tokens, self.secrets,
-            [convert_to_openai_tool(tool, strict=True) for tool in tools], self.deadline,
-            self.task_token_limit, self.task_started_charged,
-            self.report_token_reserve, self.report_time_reserve,
+            self.model.bind_tools(tools),
+            self.directory,
+            self.ledger,
+            self.ledger_path,
+            self.max_output_tokens,
+            self.secrets,
+            [convert_to_openai_tool(tool, strict=True) for tool in tools],
+            self.deadline,
+            self.task_token_limit,
+            self.task_started_charged,
+            self.report_token_reserve,
+            self.report_time_reserve,
         )
 
     def for_purpose(self, purpose, timeout=None):
@@ -154,35 +195,55 @@ class RecordingModel:
         try:
             write_json(self.ledger_path, asdict(self.ledger))
         except OSError as exc:
-            raise ModelRequestNotSent("recording_error", f"请求未发送：无法保存评测账本（{type(exc).__name__}）。") from None
+            raise ModelRequestNotSent(
+                "recording_error", f"请求未发送：无法保存评测账本（{type(exc).__name__}）。"
+            ) from None
 
     def invoke(self, messages):
         reporting = self.purpose == "report"
         protected = 0 if reporting else self.report_token_reserve
-        cutoff = self.deadline - (0 if reporting else self.report_time_reserve) if self.deadline is not None else None
+        cutoff = (
+            self.deadline - (0 if reporting else self.report_time_reserve)
+            if self.deadline is not None
+            else None
+        )
         request = {"messages": messages_to_dict(messages), "tools": self.schemas}
         from agent.model.payload import request_reservation, wire_input
+
         reservation = request_reservation(messages, self.schemas, self.max_output_tokens)
         request["wire_input"] = wire_input(messages, self.schemas)
         options = getattr(self.model, "request_options", {})
-        request.update(started_utc=datetime.now(timezone.utc).isoformat(),
-                       reserved_tokens=reservation, purpose=self.purpose,
-                       request_options=options if isinstance(options, dict) else {},
-                       max_output_tokens=self.max_output_tokens)
+        request.update(
+            started_utc=datetime.now(timezone.utc).isoformat(),
+            reserved_tokens=reservation,
+            purpose=self.purpose,
+            request_options=options if isinstance(options, dict) else {},
+            max_output_tokens=self.max_output_tokens,
+        )
         with _LEDGER_LOCK:
             if cutoff is not None and time.monotonic() >= cutoff:
                 self.ledger.locally_blocked_calls += 1
                 self.ledger.last_guard_reason = "task_timeout"
                 self._save_before_request()
-                raise ModelRequestNotSent("task_timeout", "Evaluation task wall-time allowance exhausted.")
-            task_charged = (self.ledger.reported_tokens + self.ledger.reserved_unknown_tokens
-                            - self.task_started_charged)
-            if self.task_token_limit is not None and task_charged + reservation + protected > self.task_token_limit:
+                raise ModelRequestNotSent(
+                    "task_timeout", "Evaluation task wall-time allowance exhausted."
+                )
+            task_charged = (
+                self.ledger.reported_tokens
+                + self.ledger.reserved_unknown_tokens
+                - self.task_started_charged
+            )
+            if (
+                self.task_token_limit is not None
+                and task_charged + reservation + protected > self.task_token_limit
+            ):
                 self.ledger.locally_blocked_calls += 1
                 self.ledger.last_guard_reason = "task_token_allowance"
                 self._save_before_request()
                 raise ModelRequestNotSent(
-                    "token_budget_exhausted", "Evaluation per-task token allowance cannot cover another request.")
+                    "token_budget_exhausted",
+                    "Evaluation per-task token allowance cannot cover another request.",
+                )
             try:
                 call_id = self.ledger.reserve(reservation, protected)
             except ModelRequestNotSent:
@@ -203,7 +264,9 @@ class RecordingModel:
                     write_json(self.ledger_path, asdict(self.ledger))
                 except OSError:
                     pass
-                raise ModelRequestNotSent("recording_error", f"请求未发送：调用记录保存失败（{type(exc).__name__}）。") from None
+                raise ModelRequestNotSent(
+                    "recording_error", f"请求未发送：调用记录保存失败（{type(exc).__name__}）。"
+                ) from None
         started = time.monotonic()
         try:
             response = self.model.invoke(messages)
@@ -218,26 +281,45 @@ class RecordingModel:
             raise
         except Exception as exc:
             try:
-                write_json(self.directory / f"{stem}.response.json", redact({
-                    "status": "error", "error": f"{type(exc).__name__}: {exc}",
-                    "elapsed_seconds": time.monotonic() - started,
-                    "usage": None, "retryable": is_transient_model_error(exc),
-                    "context_overflow": is_context_overflow(exc),
-                }, self.secrets))
+                write_json(
+                    self.directory / f"{stem}.response.json",
+                    redact(
+                        {
+                            "status": "error",
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "elapsed_seconds": time.monotonic() - started,
+                            "usage": None,
+                            "retryable": is_transient_model_error(exc),
+                            "context_overflow": is_context_overflow(exc),
+                        },
+                        self.secrets,
+                    ),
+                )
             except OSError:
-                pass  # Preserve the actual API error and its unknown usage.
-            # Usage is unknown on transport errors; keep the conservative reserve.
-            raise ModelCallError(redact(f"{type(exc).__name__}: {exc}", self.secrets),
-                                 retryable=is_transient_model_error(exc),
-                                 context_overflow=is_context_overflow(exc)) from None
+                pass  # 保留真实 API 错误，并将未确认的用量标为未知。
+            # 通信出错时用量未知，继续保留保守预留额度。
+            raise ModelCallError(
+                redact(f"{type(exc).__name__}: {exc}", self.secrets),
+                retryable=is_transient_model_error(exc),
+                context_overflow=is_context_overflow(exc),
+            ) from None
         with _LEDGER_LOCK:
             self.ledger.settle(getattr(response, "usage_metadata", None), reservation)
             try:
-                write_json(self.directory / f"{stem}.response.json", redact({
-                    "status": "ok", "response": message_to_dict(response),
-                    "elapsed_seconds": time.monotonic() - started,
-                }, self.secrets))
+                write_json(
+                    self.directory / f"{stem}.response.json",
+                    redact(
+                        {
+                            "status": "ok",
+                            "response": message_to_dict(response),
+                            "elapsed_seconds": time.monotonic() - started,
+                        },
+                        self.secrets,
+                    ),
+                )
                 write_json(self.ledger_path, asdict(self.ledger))
             except OSError as exc:
-                raise ModelResponseNotSaved(response, f"API 已返回，但调用记录未保存（{type(exc).__name__}）。") from None
+                raise ModelResponseNotSaved(
+                    response, f"API 已返回，但调用记录未保存（{type(exc).__name__}）。"
+                ) from None
         return response

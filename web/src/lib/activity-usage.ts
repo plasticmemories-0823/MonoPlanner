@@ -16,8 +16,8 @@ export type ActivityUsage = {
   } | null;
 };
 
-// Cache percentages are weighted by input tokens. Context belongs to the
-// latest task request, rather than the sum of all calls in a conversation.
+// 缓存比例按输入 Token 加权；上下文占用取自
+// 最新一次任务请求，不累加整段对话的所有调用。
 export function combineUsage(rows: ActivityUsage[]) {
   const totals: ActivityUsage = {
     total_tokens: 0,

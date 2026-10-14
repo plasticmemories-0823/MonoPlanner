@@ -15,7 +15,8 @@ import {
 type Mode = "sandbox" | "ask" | "full";
 type Permission = { requested: Mode; effective: Mode };
 const sandbox: Permission = { requested: "sandbox", effective: "sandbox" };
-const name = (mode: Mode) => ({ sandbox: "沙盒权限", ask: "风险询问", full: "完全权限" })[mode];
+const name = (mode: Mode) =>
+  ({ sandbox: "沙盒权限", ask: "风险询问", full: "完全权限" })[mode];
 
 export function ExecutionPermissions({
   apiUrl,
@@ -194,7 +195,9 @@ export function ExecutionPermissions({
                   <span className="text-muted-foreground mt-1 block text-xs leading-5 font-normal">
                     {mode === "sandbox"
                       ? "编码和脚本在 Docker 中执行；允许受控预览，不启动外部软件或写入目录外文件。"
-                      : mode === "ask" ? "编码仍在 Docker；外部打开及明确的目录外文件操作须逐次批准。" : "本机文件操作与外部打开不逐次确认；编码仍在 Docker，不申请管理员权限。"}
+                      : mode === "ask"
+                        ? "编码仍在 Docker；外部打开及明确的目录外文件操作须逐次批准。"
+                        : "本机文件操作与外部打开不逐次确认；编码仍在 Docker，不申请管理员权限。"}
                   </span>
                 </span>
                 {permission.requested === mode && (
@@ -206,7 +209,8 @@ export function ExecutionPermissions({
           {confirmFull && (
             <div className="space-y-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
               <p>
-                完全权限允许本机文件操作与外部打开，无需逐次确认；编码仍在 Docker 中执行。不会申请管理员权限，此选择持续到你手动关闭。
+                完全权限允许本机文件操作与外部打开，无需逐次确认；编码仍在
+                Docker 中执行。不会申请管理员权限，此选择持续到你手动关闭。
               </p>
               <div className="flex justify-end gap-2">
                 <Button

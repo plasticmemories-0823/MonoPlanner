@@ -1,4 +1,5 @@
-"""Bounded live text reads; no source snapshot, model decisions or commands."""
+"""按范围读取当前文本，不创建源码快照、不调用模型决策或执行命令。"""
+
 import hashlib
 import os
 from pathlib import Path
@@ -27,11 +28,16 @@ def authorized_sources(values):
         raise ValueError('可读资料必须是文件或目录列表')
     result = []
     for item in values:
-        if (not isinstance(item, dict) or set(item) != {'path', 'kind'}
-                or item['kind'] not in {'file', 'directory'} or not isinstance(item['path'], str)):
+        if (
+            not isinstance(item, dict)
+            or set(item) != {'path', 'kind'}
+            or item['kind'] not in {'file', 'directory'}
+            or not isinstance(item['path'], str)
+        ):
             raise ValueError('资料须包含 path 和 kind（file 或 directory）')
         path = Path(item['path']).expanduser()
         from agent.storage.preferences import private_path
+
         if private_path(path):
             raise ValueError('不能授权助手私有记录目录')
         if not path.is_absolute() or '..' in path.parts or ':' in str(path)[2:]:
@@ -44,9 +50,13 @@ def authorized_sources(values):
         else:
             if not path.is_file() or path.stat().st_nlink != 1:
                 raise ValueError('资料必须是独立普通文件')
-            if path.suffix.lower() == '.dpapi' or _reason(Path(path.name)) in {'environment_credentials', 'possible_private_key'}:
+            if path.suffix.lower() == '.dpapi' or _reason(Path(path.name)) in {
+                'environment_credentials',
+                'possible_private_key',
+            }:
                 raise ValueError('不能授权密钥或环境凭据')
             from agent.source.snapshots import _inspect_file
+
             if _inspect_file(path)[1]:
                 raise ValueError('不能授权含私钥的文件')
         entry = {'path': str(path.resolve()), 'kind': item['kind']}
@@ -58,7 +68,9 @@ def authorized_sources(values):
 class AssistantFiles:
     def __init__(self, workspace, read_roots=(), *, read_sources=()):
         self.workspace = Path(workspace).resolve() if workspace else None
-        self.roots = [Path(v) for v in authorized_roots(([workspace] if workspace else []) + list(read_roots))]
+        self.roots = [
+            Path(v) for v in authorized_roots(([workspace] if workspace else []) + list(read_roots))
+        ]
         self.files = []
         for item in authorized_sources(list(read_sources)):
             (self.roots if item['kind'] == 'directory' else self.files).append(Path(item['path']))
@@ -72,6 +84,7 @@ class AssistantFiles:
         if '..' in path.parts:
             raise ValueError('路径不能包含 ..')
         from agent.storage.preferences import private_path
+
         if private_path(path):
             raise ValueError('不读取助手私有记录')
         if ':' in str(path)[2:]:
@@ -82,8 +95,10 @@ class AssistantFiles:
         for root in sorted(self.roots, key=lambda p: len(p.parts), reverse=True):
             if path.is_relative_to(root):
                 relative = path.relative_to(root)
-                if relative.parts and (_reason(relative) in {'environment_credentials', 'possible_private_key'}
-                                       or relative.suffix.lower() == '.dpapi'):
+                if relative.parts and (
+                    _reason(relative) in {'environment_credentials', 'possible_private_key'}
+                    or relative.suffix.lower() == '.dpapi'
+                ):
                     raise ValueError('不读取密钥或环境凭据')
                 if any(_link(p) for p in (path, *path.parents)):
                     raise ValueError('不跟随链接或 Windows 重解析点')
@@ -115,12 +130,19 @@ class AssistantFiles:
         base = self.path(path, directory=True)
         entries = []
         for p in sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.casefold())):
-            if _link(p) or p.suffix.lower() == '.dpapi' or _reason(Path(p.name)) in {'environment_credentials', 'possible_private_key'}:
+            if (
+                _link(p)
+                or p.suffix.lower() == '.dpapi'
+                or _reason(Path(p.name)) in {'environment_credentials', 'possible_private_key'}
+            ):
                 continue
             entries.append({'name': p.name, 'path': str(p), 'directory': p.is_dir()})
         stop = offset + min(limit, 200)
-        return {'path': str(base), 'entries': entries[offset:stop],
-                'next_offset': stop if stop < len(entries) else None}
+        return {
+            'path': str(base),
+            'entries': entries[offset:stop],
+            'next_offset': stop if stop < len(entries) else None,
+        }
 
     def read(self, path, offset, limit, history, repeat=False):
         ranges(offset, limit)
@@ -130,9 +152,10 @@ class AssistantFiles:
         sha = hashlib.sha256(raw).hexdigest()
         seen = []
         if not repeat:
-            # Only actual results in the request view count; local archives and summaries do not.
+            # 只有当前请求视图中的实际读取结果算作已读，本地归档和摘要不算。
             from agent.source.paging import read_pages
             import json
+
             for message in history:
                 if message.get('type') != 'tool':
                     continue
@@ -154,31 +177,51 @@ class AssistantFiles:
                 length += len(row) + 1
             if length >= 24000 or (selected and selected[-1][0] + 1 < stop):
                 break
-        visible = merged([[i, i+1] for i, _ in selected])
+        visible = merged([[i, i + 1] for i, _ in selected])
         gaps = unread(offset, min(len(lines), offset + limit), merged([*seen, *visible]))
-        return {'path': str(path), 'sha256': sha, 'offset': offset, 'total_lines': len(lines),
-                'text': '\n'.join(row for _, row in selected), 'visible_ranges': visible,
-                'already_visible': not missing, 'next_offset': gaps[0][0] if gaps else min(len(lines), offset + limit)}
+        return {
+            'path': str(path),
+            'sha256': sha,
+            'offset': offset,
+            'total_lines': len(lines),
+            'text': '\n'.join(row for _, row in selected),
+            'visible_ranges': visible,
+            'already_visible': not missing,
+            'next_offset': gaps[0][0] if gaps else min(len(lines), offset + limit),
+        }
 
     def search(self, path, query, offset, limit):
         ranges(offset, limit)
         if not query.strip() or len(query) > 2000:
             raise ValueError('query 必须是 1..2000 字符的文字，使用字面量匹配')
-        scope = self.path(path, directory=Path(path).is_dir() if Path(path).is_absolute() else
-                          bool(self.workspace and (self.workspace/path).is_dir()))
+        scope = self.path(
+            path,
+            directory=(
+                Path(path).is_dir()
+                if Path(path).is_absolute()
+                else bool(self.workspace and (self.workspace / path).is_dir())
+            ),
+        )
         paths = []
         if scope.is_file():
             paths = [scope]
         else:
             for directory, directories, files in os.walk(scope, followlinks=False):
-                directories[:] = sorted(d for d in directories if not _link(Path(directory)/d)
-                                        and _reason(Path(d)/'_') is None)
-                paths.extend(Path(directory)/f for f in sorted(files))
+                directories[:] = sorted(
+                    d
+                    for d in directories
+                    if not _link(Path(directory) / d) and _reason(Path(d) / '_') is None
+                )
+                paths.extend(Path(directory) / f for f in sorted(files))
                 if len(paths) > 10000:
                     raise ValueError('范围超过一万文件，请缩小至具体目录')
         hits, count = [], 0
         for path in paths:
-            if _link(path) or path.suffix.lower() == '.dpapi' or _reason(path.relative_to(scope if scope.is_dir() else scope.parent)):
+            if (
+                _link(path)
+                or path.suffix.lower() == '.dpapi'
+                or _reason(path.relative_to(scope if scope.is_dir() else scope.parent))
+            ):
                 continue
             try:
                 lines = self.bytes(path).decode('utf-8-sig').splitlines()
@@ -190,5 +233,9 @@ class AssistantFiles:
                         hits.append({'path': str(path), 'line': number, 'text': line[:500]})
                     count += 1
                     if len(hits) > min(limit, 50):
-                        return {'hits': hits[:-1], 'next_offset': offset + len(hits)-1, 'match_mode': 'literal_case_sensitive'}
+                        return {
+                            'hits': hits[:-1],
+                            'next_offset': offset + len(hits) - 1,
+                            'match_mode': 'literal_case_sensitive',
+                        }
         return {'hits': hits, 'next_offset': None, 'match_mode': 'literal_case_sensitive'}

@@ -1,4 +1,5 @@
-"""Declaration-only numeric behavior checks within the existing final acceptance."""
+"""在现有最终验收中，根据声明执行数值行为检查。"""
+
 import ast
 import hashlib
 import json
@@ -7,19 +8,22 @@ from agent.acceptance.artifact_checks import run_artifact_checks
 
 
 def declaration_only(code):
-    """Never silently discard an existing unittest or other executable statement."""
+    """不能静默丢弃已有的 unittest 用例或其他可执行语句。"""
     try:
         body = ast.parse(code).body
     except (SyntaxError, TypeError):
         return False
-    return (len(body) == 1 and isinstance(body[0], ast.Assign)
-            and len(body[0].targets) == 1
-            and isinstance(body[0].targets[0], ast.Name)
-            and body[0].targets[0].id == 'ARTIFACT_CHECKS')
+    return (
+        len(body) == 1
+        and isinstance(body[0], ast.Assign)
+        and len(body[0].targets) == 1
+        and isinstance(body[0].targets[0], ast.Name)
+        and body[0].targets[0].id == 'ARTIFACT_CHECKS'
+    )
 
 
 def run_behavior_contract(owner, phase, report, started):
-    """Only real compiler/consumer results can mark this contract as passed."""
+    """只有真实编译和使用结果才能判定该约定通过。"""
     directory = owner.artifact_dir / (phase + '.artifacts')
     try:
         if not owner._unchanged():
@@ -41,20 +45,42 @@ def run_behavior_contract(owner, phase, report, started):
         failures = sum(row['status'] == 'failed' for row in rows)
         passed = bool(rows) and all(row['status'] == 'passed' for row in rows)
         status = 'passed' if passed else 'error' if errors else 'failed'
-        report.update(status=status, exit_code=0 if passed else 1,
-            reason='Declared raw-output behavior passed.' if passed else 'Raw-output compilation or behavior did not pass.',
+        report.update(
+            status=status,
+            exit_code=0 if passed else 1,
+            reason=(
+                'Declared raw-output behavior passed.'
+                if passed
+                else 'Raw-output compilation or behavior did not pass.'
+            ),
             tests_run=sum(row['status'] != 'not_run' for row in rows),
-            failures=failures, errors=errors, skipped=0,
-            expected_failures=0, unexpected_successes=0,
-            test_ids=list(ids), test_results=rows, artifact_results=rows,
-            test_evidence_valid=True, error_kind='result_error' if errors else None,
-            acceptance_mode='artifact_behavior_only')
+            failures=failures,
+            errors=errors,
+            skipped=0,
+            expected_failures=0,
+            unexpected_successes=0,
+            test_ids=list(ids),
+            test_results=rows,
+            artifact_results=rows,
+            test_evidence_valid=True,
+            error_kind='result_error' if errors else None,
+            acceptance_mode='artifact_behavior_only',
+        )
     except (OSError, RuntimeError, ValueError) as exc:
-        report.update(status='error', error_kind='result_error', test_evidence_valid=False,
-                      reason='Behavior acceptance could not complete: ' + str(exc))
+        report.update(
+            status='error',
+            error_kind='result_error',
+            test_evidence_valid=False,
+            reason='Behavior acceptance could not complete: ' + str(exc),
+        )
     if not owner._unchanged():
-        report.update(status='error', integrity_ok=False, error_kind='integrity_error',
-                      test_evidence_valid=False, reason='Frozen acceptance was modified')
+        report.update(
+            status='error',
+            integrity_ok=False,
+            error_kind='integrity_error',
+            test_evidence_valid=False,
+            reason='Frozen acceptance was modified',
+        )
     for key in ('stdout', 'stderr'):
         log = directory / (key + '.log')
         if log.is_file():

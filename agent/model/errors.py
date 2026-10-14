@@ -20,7 +20,7 @@ class ModelResponseNotSaved(RuntimeError):
 
 
 class ModelInterrupted(RuntimeError):
-    """User cancelled a request; partial output is never executable or history input."""
+    """用户取消请求；部分输出不得执行，也不得作为历史输入。"""
 
     def __init__(self, kind, sent=True):
         super().__init__('Model request interrupted by user')
@@ -28,7 +28,7 @@ class ModelInterrupted(RuntimeError):
 
 
 class ModelCallError(RuntimeError):
-    """Redacted transport failure that retains its retry classification."""
+    """保留重试分类的脱敏传输错误。"""
 
     def __init__(self, reason, retryable=False, context_overflow=False):
         super().__init__(reason)
@@ -37,7 +37,7 @@ class ModelCallError(RuntimeError):
 
 
 def is_context_overflow(exc):
-    """Only an explicit provider rejection, never a timeout or arbitrary 400."""
+    """仅识别服务商明确拒绝，不将超时或任意 400 错误视为上下文溢出。"""
     if isinstance(exc, ModelCallError):
         return exc.context_overflow
     if getattr(exc, 'status_code', None) not in {400, 413}:
@@ -48,19 +48,29 @@ def is_context_overflow(exc):
     error = body.get('error', body)
     if not isinstance(error, dict):
         return False
-    if error.get('code') in {'context_length_exceeded', 'context_window_exceeded', 'CONTEXT_WINDOW_EXCEEDED'}:
+    if error.get('code') in {
+        'context_length_exceeded',
+        'context_window_exceeded',
+        'CONTEXT_WINDOW_EXCEEDED',
+    }:
         return True
     import re
+
     text = error.get('message', '')
-    return isinstance(text, str) and bool(re.search(
-        r'\b(?:maximum|max)(?:\s+(?:allowed|supported))?\s+context\s+(?:length|window)\b'
-        r'|\bcontext[\s_-](?:length|window)[\s_-](?:exceeded|overflow)\b'
-        r'|\b(?:request|prompt|input|messages?)\s+(?:is\s+|are\s+)?too\s+(?:large|long)\s+for\s+'
-        r'(?:(?:this|the)\s+)?(?:model(?:\'s)?\s+)?context(?:\s+window)?\b', text, re.I))
+    return isinstance(text, str) and bool(
+        re.search(
+            r'\b(?:maximum|max)(?:\s+(?:allowed|supported))?\s+context\s+(?:length|window)\b'
+            r'|\bcontext[\s_-](?:length|window)[\s_-](?:exceeded|overflow)\b'
+            r'|\b(?:request|prompt|input|messages?)\s+(?:is\s+|are\s+)?too\s+(?:large|long)\s+for\s+'
+            r'(?:(?:this|the)\s+)?(?:model(?:\'s)?\s+)?context(?:\s+window)?\b',
+            text,
+            re.I,
+        )
+    )
 
 
 def is_transient_model_error(exc):
-    """Use exception types/status codes, never a substring of an error message."""
+    """根据异常类型和状态码判断，不匹配错误消息中的子串。"""
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
@@ -70,8 +80,14 @@ def is_transient_model_error(exc):
         if isinstance(code, int):
             return code in {408, 429} or 500 <= code <= 599
         if isinstance(exc, (ConnectionError, TimeoutError)) or type(exc).__name__ in {
-            "APIConnectionError", "APITimeoutError", "OpenAIConnectionError", "RateLimitError",
-            "ConnectError", "ConnectTimeout", "ReadTimeout", "RemoteProtocolError",
+            "APIConnectionError",
+            "APITimeoutError",
+            "OpenAIConnectionError",
+            "RateLimitError",
+            "ConnectError",
+            "ConnectTimeout",
+            "ReadTimeout",
+            "RemoteProtocolError",
         }:
             return True
         exc = exc.__cause__ or exc.__context__

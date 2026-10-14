@@ -1,4 +1,3 @@
-
 import importlib.util
 import json
 from pathlib import Path
@@ -6,8 +5,9 @@ import sys
 import traceback
 import unittest
 
+
 def exception_evidence(test, err, phase=None):
-    """Facts only: source origin is not proof that a test's expectation is correct."""
+    """只记录事实：源码来源不能证明测试预期正确。"""
     frames = []
     for item in traceback.extract_tb(err[2]):
         path = Path(item.filename).resolve()
@@ -21,21 +21,37 @@ def exception_evidence(test, err, phase=None):
                 scope = "source"
             except ValueError:
                 scope, name = "external", str(path)
-        frames.append({"file": name, "line": item.lineno,
-                       "function": item.name, "scope": scope})
+        frames.append({"file": name, "line": item.lineno, "function": item.name, "scope": scope})
     if phase is None:
         method = getattr(test, "_testMethodName", None)
-        fixtures = {"setUp": "setup", "setUpClass": "setup", "setUpModule": "setup",
-                    "tearDown": "teardown", "tearDownClass": "teardown", "tearDownModule": "teardown"}
+        fixtures = {
+            "setUp": "setup",
+            "setUpClass": "setup",
+            "setUpModule": "setup",
+            "tearDown": "teardown",
+            "tearDownClass": "teardown",
+            "tearDownModule": "teardown",
+        }
         phase = next((fixtures[f["function"]] for f in frames if f["function"] in fixtures), None)
         if phase is None:
-            phase = "test" if any(f["scope"] == "test" and f["function"] == method for f in frames) else "unknown"
-    return {"type": err[0].__name__, "message": str(err[1]), "phase": phase,
-            "origin": frames[-1]["scope"] if frames else "unknown",
-            "ordinary_exception": issubclass(err[0], Exception), "frames": frames}
+            phase = (
+                "test"
+                if any(f["scope"] == "test" and f["function"] == method for f in frames)
+                else "unknown"
+            )
+    return {
+        "type": err[0].__name__,
+        "message": str(err[1]),
+        "phase": phase,
+        "origin": frames[-1]["scope"] if frames else "unknown",
+        "ordinary_exception": issubclass(err[0], Exception),
+        "frames": frames,
+    }
+
 
 class EvidenceResult(unittest.TextTestResult):
     """保留每个实际测试的结果；子测试失败必须反映到父测试。"""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.items = {}
@@ -43,8 +59,15 @@ class EvidenceResult(unittest.TextTestResult):
     def record(self, test, status, detail="", err=None):
         test = getattr(test, "test_case", test)
         key = test.id()
-        order = {"not_run": 0, "passed": 1, "skipped": 2, "expected_failure": 3,
-                 "unexpected_success": 4, "failed": 5, "error": 6}
+        order = {
+            "not_run": 0,
+            "passed": 1,
+            "skipped": 2,
+            "expected_failure": 3,
+            "unexpected_success": 4,
+            "failed": 5,
+            "error": 6,
+        }
         old = self.items.get(key, {"id": key, "status": "not_run", "detail": ""})
         exceptions = list(old.get("exceptions", []))
         if err is not None:
@@ -84,6 +107,7 @@ class EvidenceResult(unittest.TextTestResult):
             status = "failed" if issubclass(err[0], test.failureException) else "error"
             self.record(test, status, f"{subtest}: {err[0].__name__}: {err[1]}", err)
 
+
 def test_ids(suite):
     for item in suite:
         if isinstance(item, unittest.TestSuite):
@@ -91,13 +115,21 @@ def test_ids(suite):
         else:
             yield item.id()
 
+
 def main():
     global test_path, repo_root
     test_path, repo_root, output_path = sys.argv[1:]
     sys.path.insert(0, repo_root)
-    report = {"status": "error", "reason": "验收程序未完成。",
-              "tests_run": None, "failures": None, "errors": None, "skipped": None,
-              "test_ids": [], "test_results": []}
+    report = {
+        "status": "error",
+        "reason": "验收程序未完成。",
+        "tests_run": None,
+        "failures": None,
+        "errors": None,
+        "skipped": None,
+        "test_ids": [],
+        "test_results": [],
+    }
     phase = "load"
     try:
         spec = importlib.util.spec_from_file_location("agent_acceptance_tests", test_path)
@@ -112,12 +144,18 @@ def main():
         report["test_ids"] = collected
         phase = "run"
         result = unittest.TextTestRunner(verbosity=2, resultclass=EvidenceResult).run(suite)
-        report["test_results"] = [result.items.get(key, {"id": key, "status": "not_run", "detail": ""})
-                                  for key in sorted(set(collected) | set(result.items))]
-        report.update(tests_run=result.testsRun, failures=len(result.failures),
-                      errors=len(result.errors), skipped=len(result.skipped),
-                      expected_failures=len(result.expectedFailures),
-                      unexpected_successes=len(result.unexpectedSuccesses))
+        report["test_results"] = [
+            result.items.get(key, {"id": key, "status": "not_run", "detail": ""})
+            for key in sorted(set(collected) | set(result.items))
+        ]
+        report.update(
+            tests_run=result.testsRun,
+            failures=len(result.failures),
+            errors=len(result.errors),
+            skipped=len(result.skipped),
+            expected_failures=len(result.expectedFailures),
+            unexpected_successes=len(result.unexpectedSuccesses),
+        )
         if not result.testsRun:
             report.update(status="error", reason="没有实际执行任何测试。")
         elif result.skipped or result.expectedFailures:

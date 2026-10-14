@@ -17,12 +17,21 @@ from agent.acceptance.behavior import declaration_only, run_behavior_contract
 from agent.execution.process import log_excerpt
 
 
+# ============================================================
+# 验收原件与运行环境
+# ============================================================
 class AcceptanceRun:
     """同一对象的基线和各轮运行使用同一份验收标准。"""
 
-    def __init__(self, repo_root: Path, spec: VerificationSpec,
-                 artifacts_root: Path | None = None, timeout: int = 120, environment=None,
-                 repository_baseline=None):
+    def __init__(
+        self,
+        repo_root: Path,
+        spec: VerificationSpec,
+        artifacts_root: Path | None = None,
+        timeout: int = 120,
+        environment=None,
+        repository_baseline=None,
+    ):
         self.repo_root = Path(repo_root).resolve()
         if not self.repo_root.is_dir():
             raise ValueError(f"验收工作区不存在：{self.repo_root}")
@@ -32,13 +41,25 @@ class AcceptanceRun:
             raise ValueError('An explicit execution backend is required; host fallback is disabled')
         self.spec = spec
         self.behavior_only = bool(spec.test_code and declaration_only(spec.test_code))
-        self.artifact_checks = load_artifact_checks(spec.test_code, spec.required_consumer, spec.required_calls) if spec.test_code else []
-        self.version = hashlib.sha256(json.dumps({
-            "criteria": spec.criteria, "command": spec.command, "test_code": spec.test_code,
-            "required_consumer": spec.required_consumer,
-            "required_calls": spec.required_calls,
-            "test_driver": spec.test_driver,
-        }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        self.artifact_checks = (
+            load_artifact_checks(spec.test_code, spec.required_consumer, spec.required_calls)
+            if spec.test_code
+            else []
+        )
+        self.version = hashlib.sha256(
+            json.dumps(
+                {
+                    "criteria": spec.criteria,
+                    "command": spec.command,
+                    "test_code": spec.test_code,
+                    "required_consumer": spec.required_consumer,
+                    "required_calls": spec.required_calls,
+                    "test_driver": spec.test_driver,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
         self._test_ids = None
         self.timeout = timeout
         self.environment = environment
@@ -53,7 +74,8 @@ class AcceptanceRun:
         self.bootstrap_path = self.artifact_dir / "acceptance_runner.py"
         self.plan_path = self.artifact_dir / "plan.json"
         plan = {
-            "repo_root": str(self.repo_root), "criteria": list(spec.criteria),
+            "repo_root": str(self.repo_root),
+            "criteria": list(spec.criteria),
             "command": spec.command,
             "test_file": self.test_path.name if spec.test_code is not None else None,
             "test_driver": spec.test_driver,
@@ -62,8 +84,8 @@ class AcceptanceRun:
         paths = [self.plan_path]
         if spec.test_code is not None:
             self.test_path.write_text(spec.test_code, encoding="utf-8")
-            # Source files are UTF-8 even on Python 3.6 under an ASCII locale.
-            # Do not put a Unicode program in the process argument vector.
+            # 源码文件使用 UTF-8，即使任务运行于 ASCII 区域设置下的 Python 3.6。
+            # 不要通过进程参数直接传递含 Unicode 的程序正文。
             self.bootstrap_path.write_text(_BOOTSTRAP, encoding="utf-8")
             paths.extend((self.test_path, self.bootstrap_path))
             if spec.test_driver:
@@ -74,8 +96,10 @@ class AcceptanceRun:
 
     def _unchanged(self):
         try:
-            return all(hashlib.sha256(path.read_bytes()).digest() == digest
-                       for path, digest in self._hashes.items())
+            return all(
+                hashlib.sha256(path.read_bytes()).digest() == digest
+                for path, digest in self._hashes.items()
+            )
         except OSError:
             return False
 
@@ -84,6 +108,9 @@ class AcceptanceRun:
         # 完整输出已直接写入文件；只把尾部放回 Agent 上下文。
         return log_excerpt(path, notice="[前文已截断；完整内容见日志]\n")
 
+    # ============================================================
+    # 执行冻结验收并保留真实结果
+    # ============================================================
     def run(self, phase: str) -> dict:
         started = time.monotonic()
         if not isinstance(phase, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", phase):
@@ -92,15 +119,25 @@ class AcceptanceRun:
         stderr_path = self.artifact_dir / f"{phase}.stderr.log"
         outcome_path = self.artifact_dir / f"{phase}.tests.json"
         report = {
-            "status": "error", "exit_code": None, "reason": "验收未执行。",
-            "stdout": "", "stderr": "", "tests_run": None,
-            "failures": None, "errors": None, "skipped": None,
-            "artifact_dir": str(self.artifact_dir), "phase": phase,
+            "status": "error",
+            "exit_code": None,
+            "reason": "验收未执行。",
+            "stdout": "",
+            "stderr": "",
+            "tests_run": None,
+            "failures": None,
+            "errors": None,
+            "skipped": None,
+            "artifact_dir": str(self.artifact_dir),
+            "phase": phase,
             "integrity_ok": True,
             "verification_version": self.version,
-            "test_ids": None, "test_results": None, "test_evidence_valid": False,
+            "test_ids": None,
+            "test_results": None,
+            "test_evidence_valid": False,
             "error_kind": None,
-            "stdout_log": str(stdout_path), "stderr_log": str(stderr_path),
+            "stdout_log": str(stdout_path),
+            "stderr_log": str(stderr_path),
         }
         # 同一 phase 可显式重跑，不能把上次的结果误当成本次结果。
         outcome_path.unlink(missing_ok=True)
@@ -111,7 +148,8 @@ class AcceptanceRun:
             report = run_behavior_contract(self, phase, report, started)
             report["tests_ready"] = tests_ready_for_candidate(report)
             (self.artifact_dir / f"{phase}.result.json").write_text(
-                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             return report
         if not self._unchanged():
             report["integrity_ok"] = False
@@ -128,16 +166,25 @@ class AcceptanceRun:
                     cache_dir = tempfile.mkdtemp(prefix=f"{phase}.cache-", dir=self.artifact_dir)
                     command = [
                         backend.python_executable,
-                        "-B", "-X", "utf8", "-X", f"pycache_prefix={map_path(cache_dir)}",
-                        map_path(self.bootstrap_path), map_path(self.test_path),
-                        map_path(self.repo_root), map_path(outcome_path),
+                        "-B",
+                        "-X",
+                        "utf8",
+                        "-X",
+                        f"pycache_prefix={map_path(cache_dir)}",
+                        map_path(self.bootstrap_path),
+                        map_path(self.test_path),
+                        map_path(self.repo_root),
+                        map_path(outcome_path),
                     ]
                     if self.spec.test_driver:
                         command[6] = map_path(self.repository_runner)
                         command.append(json.dumps(self.spec.test_driver))
                 outcome = backend.run_process(
-                    command, stdout_path=stdout_path, stderr_path=stderr_path,
-                    timeout=self.timeout, shell=self.spec.command is not None,
+                    command,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    timeout=self.timeout,
+                    shell=self.spec.command is not None,
                 )
                 report["exit_code"] = outcome["exit_code"]
                 timed_out = outcome["timed_out"]
@@ -159,9 +206,14 @@ class AcceptanceRun:
                     report["reason"] = "验收执行没有返回退出码。"
                 elif self.spec.command is not None:
                     passed = report["exit_code"] == 0
-                    report.update(status="passed" if passed else "failed",
-                                  reason="指定验收命令退出码为 0。" if passed
-                                  else f"指定验收命令退出码为 {report['exit_code']}。")
+                    report.update(
+                        status="passed" if passed else "failed",
+                        reason=(
+                            "指定验收命令退出码为 0。"
+                            if passed
+                            else f"指定验收命令退出码为 {report['exit_code']}。"
+                        ),
+                    )
                 else:
                     self._read_test_result(outcome_path, report)
                     if self.spec.test_driver and report["test_evidence_valid"]:
@@ -171,8 +223,12 @@ class AcceptanceRun:
                         remaining = self.timeout - (time.monotonic() - started)
                         if remaining <= 0:
                             raise RuntimeError('验收总时间已用完，尚未运行原始产物检查。')
-                        rows = run_artifact_checks(self.artifact_checks, consumer_backend,
-                            self.artifact_dir / (phase + '.artifacts'), remaining)
+                        rows = run_artifact_checks(
+                            self.artifact_checks,
+                            consumer_backend,
+                            self.artifact_dir / (phase + '.artifacts'),
+                            remaining,
+                        )
                         report['artifact_results'] = rows
                         report['test_results'] += rows
                         report['test_ids'] = sorted([*report['test_ids'], *(r['id'] for r in rows)])
@@ -180,28 +236,50 @@ class AcceptanceRun:
                         report['failures'] += sum(r['status'] == 'failed' for r in rows)
                         report['errors'] += sum(r['status'] == 'error' for r in rows)
                         if any(r['status'] == 'error' for r in rows):
-                            report.update(status='error', reason='原始产物检查的配置或运行环境有误，不能确认验收。')
-                        elif any(r['status'] != 'passed' for r in rows) and report['status'] != 'error':
-                            report.update(status='failed', reason='原始产物未通过真实编译或执行；需修复源码后按同一标准返工。')
+                            report.update(
+                                status='error',
+                                reason='原始产物检查的配置或运行环境有误，不能确认验收。',
+                            )
+                        elif (
+                            any(r['status'] != 'passed' for r in rows)
+                            and report['status'] != 'error'
+                        ):
+                            report.update(
+                                status='failed',
+                                reason='原始产物未通过真实编译或执行；需修复源码后按同一标准返工。',
+                            )
                     if report["test_evidence_valid"] and report["test_ids"]:
                         inventory = tuple(report["test_ids"])
                         if self._test_ids is None:
                             self._test_ids = inventory
                             inventory_path = self.artifact_dir / "test_inventory.json"
-                            inventory_path.write_text(json.dumps(inventory, ensure_ascii=False), encoding="utf-8")
-                            self._hashes[inventory_path] = hashlib.sha256(inventory_path.read_bytes()).digest()
+                            inventory_path.write_text(
+                                json.dumps(inventory, ensure_ascii=False), encoding="utf-8"
+                            )
+                            self._hashes[inventory_path] = hashlib.sha256(
+                                inventory_path.read_bytes()
+                            ).digest()
                         elif inventory != self._test_ids:
-                            report.update(status="error", test_evidence_valid=False,
-                                          reason="测试 ID 清单发生变化，不能据此认定新增进展或验收通过。")
+                            report.update(
+                                status="error",
+                                test_evidence_valid=False,
+                                reason="测试 ID 清单发生变化，不能据此认定新增进展或验收通过。",
+                            )
             except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
-                report.update(status='error', test_evidence_valid=False,
-                              error_kind="result_error" if process_finished else "environment_error",
-                              reason=f"无法执行验收：{type(exc).__name__}: {exc}")
+                report.update(
+                    status='error',
+                    test_evidence_valid=False,
+                    error_kind="result_error" if process_finished else "environment_error",
+                    reason=f"无法执行验收：{type(exc).__name__}: {exc}",
+                )
             if not self._unchanged():
-                report.update(status="error", integrity_ok=False,
-                              error_kind="integrity_error",
-                              test_evidence_valid=False,
-                              reason="验收执行期间冻结文件被修改或删除，结果无效。")
+                report.update(
+                    status="error",
+                    integrity_ok=False,
+                    error_kind="integrity_error",
+                    test_evidence_valid=False,
+                    reason="验收执行期间冻结文件被修改或删除，结果无效。",
+                )
         report["stdout"] = self._summary(stdout_path)
         report["stderr"] = self._summary(stderr_path)
         if report["status"] == "error" and report["error_kind"] is None:
@@ -210,14 +288,21 @@ class AcceptanceRun:
         if self.spec.test_driver:
             report["test_driver"] = list(self.spec.test_driver)
         if report["status"] == "error" and report["tests_ready"]:
-            # Keep the raw unittest error rows/counts. The candidate failed these
-            # runnable checks; it is not a failed test launch or a passing patch.
-            report.update(status="failed", error_kind=None,
-                          reason="被测源码执行时抛出异常，未通过固定测试；测试执行证据可用于候选验收。")
+            # 保留 unittest 原始错误条目和计数。这些可运行检查的失败，
+            # 应视为候选未通过，不能改称测试未启动或补丁已通过。
+            report.update(
+                status="failed",
+                error_kind=None,
+                reason="被测源码执行时抛出异常，未通过固定测试；测试执行证据可用于候选验收。",
+            )
         (self.artifact_dir / f"{phase}.result.json").write_text(
-            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         return report
 
+    # ============================================================
+    # 仓库驱动结果的校验
+    # ============================================================
     def _repository_result(self, report, phase):
         return results._repository_result(self, report, phase)
 

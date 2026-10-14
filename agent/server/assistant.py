@@ -1,4 +1,5 @@
-"""Single-owner tool journal for general queries and existing repository tasks."""
+"""为一般查询和仓库已有任务提供单一执行者管理的工具日志。"""
+
 import json
 import time
 
@@ -31,12 +32,20 @@ def validate(name, args):
         field = schema['properties'].get(key)
         if not field:
             continue
-        if type(value) is not types[field['type']] or (field['type'] == 'array' and any(type(v) is not str for v in value)):
+        if type(value) is not types[field['type']] or (
+            field['type'] == 'array' and any(type(v) is not str for v in value)
+        ):
             errors.append(f'{key}: 实际值 {str(value)[:100]!r}；要求 {field["type"]}')
         if field.get('enum') and value not in field['enum']:
             errors.append(f'{key}: 实际值 {value!r}；要求 {field["enum"]}')
-    for key, minimum, maximum in (('offset', 0, None), ('limit', 1, 200 if name == 'list_files' else 50 if name == 'search_files' else 1000), ('timeout', 1, None)):
-        if type(args.get(key)) is int and (args[key] < minimum or (maximum and args[key] > maximum)):
+    for key, minimum, maximum in (
+        ('offset', 0, None),
+        ('limit', 1, 200 if name == 'list_files' else 50 if name == 'search_files' else 1000),
+        ('timeout', 1, None),
+    ):
+        if type(args.get(key)) is int and (
+            args[key] < minimum or (maximum and args[key] > maximum)
+        ):
             errors.append(f'{key}: 实际值 {args[key]}；要求 {minimum}..{maximum or "任务剩余时间"}')
     if errors:
         raise ValueError(name + ': ' + '; '.join(errors))
@@ -48,13 +57,23 @@ def invoke(loop, call, folder, history):
         if not loop.runtime_settings.get('online'):
             raise ValueError('Networking is disabled for this task')
         field = 'query' if name == 'web_search' else 'url'
-        if not isinstance(args, dict) or set(args) != {field} or not isinstance(args[field], str) or not 1 <= len(args[field]) <= 2000:
+        if (
+            not isinstance(args, dict)
+            or set(args) != {field}
+            or not isinstance(args[field], str)
+            or not 1 <= len(args[field]) <= 2000
+        ):
             raise ValueError(field + ': 要求一个非空文本参数，最多 2000 字符')
         provider = WebProvider()
-        return provider.search(args[field], loop, folder) if name == 'web_search' else provider.fetch(args[field], loop, folder)
+        return (
+            provider.search(args[field], loop, folder)
+            if name == 'web_search'
+            else provider.fetch(args[field], loop, folder)
+        )
     validate(name, args)
     if name in OPEN_NAMES or name == 'list_applications':
         from agent.execution.desktop import invoke as desktop_invoke
+
         return desktop_invoke(loop, name, args)
     files = AssistantFiles(loop.repo, read_sources=loop.state.get('read_sources', []))
     if name == 'list_files':
@@ -62,7 +81,13 @@ def invoke(loop, call, folder, history):
     if name == 'search_files':
         return files.search(args['path'], args['query'], args['offset'], args['limit'])
     if name == 'read_file':
-        return files.read(args['path'], args['offset'], args['limit'], history, bool(args['reread_reason'].strip()))
+        return files.read(
+            args['path'],
+            args['offset'],
+            args['limit'],
+            history,
+            bool(args['reread_reason'].strip()),
+        )
     return existing.execute(loop, args, folder)
 
 
@@ -70,20 +95,29 @@ def execute_calls(loop, response, history=None):
     pending = loop.state.get('assistant_pending')
     if pending is None:
         data = response['data']
-        pending = {'response': response, 'cursor': 0, 'results': [], 'call': loop.budget.used_steps,
-                   'calls': [*data.get('tool_calls', []), *data.get('invalid_tool_calls', [])]}
+        pending = {
+            'response': response,
+            'cursor': 0,
+            'results': [],
+            'call': loop.budget.used_steps,
+            'calls': [*data.get('tool_calls', []), *data.get('invalid_tool_calls', [])],
+        }
         loop.state['assistant_pending'] = pending
         loop.persist('assistant_prepared')
     calls = pending['calls']
-    conflict = (any(c['name'] not in ASSISTANT_NAMES | WEB_NAMES for c in calls)
-                or (any(c['name'] in {'run_existing', *OPEN_NAMES} for c in calls) and len(calls) != 1))
+    conflict = any(c['name'] not in ASSISTANT_NAMES | WEB_NAMES for c in calls) or (
+        any(c['name'] in {'run_existing', *OPEN_NAMES} for c in calls) and len(calls) != 1
+    )
     while pending['cursor'] < len(calls):
         call = calls[pending['cursor']]
-        folder = loop.root/'assistant'/('call-%04d-%02d' % (pending['call'], pending['cursor']))
-        save(folder/'request.json', call)
-        archive_file(loop, folder/'request.json', 'assistant_call')
+        folder = loop.root / 'assistant' / ('call-%04d-%02d' % (pending['call'], pending['cursor']))
+        save(folder / 'request.json', call)
+        archive_file(loop, folder / 'request.json', 'assistant_call')
         loop.state['assistant_running'] = call['id']
-        loop.persist('assistant_started', {**call, 'request_call': pending['call'], 'started_at': time.time()})
+        loop.persist(
+            'assistant_started',
+            {**call, 'request_call': pending['call'], 'started_at': time.time()},
+        )
         started = time.monotonic()
         try:
             if conflict:
@@ -91,6 +125,7 @@ def execute_calls(loop, response, history=None):
             target = loop.state['history'] if history is None else history
             if history is None:
                 from agent.model.compaction import history as request_view
+
                 target = request_view(loop.state, loop.root)
             result = invoke(loop, call, folder, [*target, *pending['results']])
             if result.get('status') in {'unknown', 'launching', 'executing'}:
@@ -100,11 +135,18 @@ def execute_calls(loop, response, history=None):
             if result.get('status') == 'awaiting_approval':
                 pending.setdefault('approval_ids', []).append(result['id'])
                 loop.state.setdefault('desktop_approvals', {})[result['id']] = 'awaiting_approval'
-            status = 'failed' if result.get('error') or (call['name'] == 'run_existing'
-                and (result['exit_code'] != 0 or result['timed_out'])) else 'succeeded'
+            status = (
+                'failed'
+                if result.get('error')
+                or (
+                    call['name'] == 'run_existing'
+                    and (result['exit_code'] != 0 or result['timed_out'])
+                )
+                else 'succeeded'
+            )
         except PreparationCancelled as exc:
-            # The entry has not started. Preserve its call/cursor for explicit
-            # resume; it is neither an unknown process nor a completed failure.
+            # 此条目尚未开始，保留调用及游标以供明确恢复；
+            # 它既不是结果不明的进程，也不是已完成的失败操作。
             loop.state.update(assistant_running=None, assistant_process=None)
             loop.environment_blocked(exc)
             return
@@ -112,40 +154,69 @@ def execute_calls(loop, response, history=None):
             result, status = {'error': str(exc)}, 'failed'
             pending['environment_required'] = str(exc)
         except WebUnknown:
-            loop.state.update(status='execution_unknown', reason='已发出的网络请求结果不明，不自动重试')
+            loop.state.update(
+                status='execution_unknown', reason='已发出的网络请求结果不明，不自动重试'
+            )
             loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
             return
         except (ValueError, OSError, KeyError, RuntimeError) as exc:
             if call['name'] == 'run_existing' and loop.state.get('assistant_process'):
-                loop.state.update(status='execution_unknown', reason='已有任务执行结果不明，不自动重试')
+                loop.state.update(
+                    status='execution_unknown', reason='已有任务执行结果不明，不自动重试'
+                )
                 loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
                 return
             result, status = {'error': str(exc)}, 'failed'
         seconds = time.monotonic() - started
         result['seconds'] = seconds
-        save(folder/'result.json', {'status': status, 'data': result})
+        save(folder / 'result.json', {'status': status, 'data': result})
         for filename in ('result.json', 'stdout.log', 'stderr.log', 'child-usage.json'):
-            if (folder/filename).is_file():
-                archive_file(loop, folder/filename, 'assistant_result')
-        pending['results'].append(message_to_dict(ToolMessage(content=json.dumps(result, ensure_ascii=False),
-                                  name=call['name'], tool_call_id=call['id'])))
+            if (folder / filename).is_file():
+                archive_file(loop, folder / filename, 'assistant_result')
+        pending['results'].append(
+            message_to_dict(
+                ToolMessage(
+                    content=json.dumps(result, ensure_ascii=False),
+                    name=call['name'],
+                    tool_call_id=call['id'],
+                )
+            )
+        )
         pending['cursor'] += 1
         loop.state.update(assistant_running=None, assistant_process=None)
         if call['name'] == 'run_existing':
             turn = loop.state.get('conversation_turn')
             loop.state['assistant_run_turn'] = turn['id'] if turn else 'initial'
-            loop.state.setdefault('existing_runs', []).append({'record': str(folder/'result.json'),
-                'entry': call['args'].get('entry') if isinstance(call['args'], dict) else None,
-                'status': status, 'seconds': seconds, 'child_usage': result.get('child_usage')})
-        loop.persist('assistant_finished', {**call, 'request_call': pending['call'], 'status': status, 'seconds': seconds,
-                                           'exit_code': result.get('exit_code'), 'child_usage': result.get('child_usage')})
+            loop.state.setdefault('existing_runs', []).append(
+                {
+                    'record': str(folder / 'result.json'),
+                    'entry': call['args'].get('entry') if isinstance(call['args'], dict) else None,
+                    'status': status,
+                    'seconds': seconds,
+                    'child_usage': result.get('child_usage'),
+                }
+            )
+        loop.persist(
+            'assistant_finished',
+            {
+                **call,
+                'request_call': pending['call'],
+                'status': status,
+                'seconds': seconds,
+                'exit_code': result.get('exit_code'),
+                'child_usage': result.get('child_usage'),
+            },
+        )
         if loop.yield_boundary and pending['cursor'] < len(calls):
             return
     target = loop.state['history'] if history is None else history
     target.extend([response, *pending['results']])
     approval = bool(pending.get('approval_ids'))
-    loop.state.update(assistant_pending=None, response_pending=None,
-                      status='awaiting_user' if approval or pending.get('environment_required') else 'needs_plan')
+    loop.state.update(
+        assistant_pending=None,
+        response_pending=None,
+        status='awaiting_user' if approval or pending.get('environment_required') else 'needs_plan',
+    )
     if pending.get('environment_required'):
         loop.state['reason'] = pending['environment_required']
     loop.persist('assistant_completed')

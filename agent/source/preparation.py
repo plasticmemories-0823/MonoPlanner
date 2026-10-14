@@ -1,4 +1,5 @@
-"""Optional local preparation while the sole planner waits; no model or SQL here."""
+"""唯一规划器等待时可进行本地准备；此处不调用模型或 SQL。"""
+
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 import time
@@ -45,23 +46,41 @@ def build_preparation(view, previous, cancel, max_seconds=8.0):
             try:
                 entry = _parse(raw, name)
             except (SyntaxError, UnicodeError, ValueError, RecursionError) as exc:
-                entry = {'module': _module(name), 'doc': '', 'symbols': [],
-                         'imports': [], 'calls': [], 'error': type(exc).__name__}
+                entry = {
+                    'module': _module(name),
+                    'doc': '',
+                    'symbols': [],
+                    'imports': [],
+                    'calls': [],
+                    'error': type(exc).__name__,
+                }
             entry = {**entry, 'digest': sha}
         entries[name] = entry
     cache = {(name, view.files[name]): entry for name, entry in entries.items()}
-    return {'version': view.version, 'entries': entries, 'line_offsets': offsets,
-            'lines': lines, 'parse_cache': cache, 'started': started,
-            'ended': time.monotonic(), 'parsed_files': parsed, 'reused_files': reused,
-            'warmed_files': warmed, 'prepared_bytes': total, 'incomplete': incomplete}
+    return {
+        'version': view.version,
+        'entries': entries,
+        'line_offsets': offsets,
+        'lines': lines,
+        'parse_cache': cache,
+        'started': started,
+        'ended': time.monotonic(),
+        'parsed_files': parsed,
+        'reused_files': reused,
+        'warmed_files': warmed,
+        'prepared_bytes': total,
+        'incomplete': incomplete,
+    }
 
 
 class Preparation:
-    """One worker; main thread alone publishes artifacts and updates SQLite."""
+    """仅使用一个工作线程；只有主线程发布产物并更新 SQLite。"""
+
     def __init__(self, directory, *, prepare_probes=False):
         self.directory = directory
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='source-prepare')
         from agent.source.probe_preparation import ProbePreparation
+
         self.probes = ProbePreparation(self.pool, directory / 'probes') if prepare_probes else None
         self.active = None
         self.cache, self.seen, self.jobs = {}, set(), []
@@ -81,8 +100,8 @@ class Preparation:
                 future = self.pool.submit(build_preparation, view, dict(self.cache), cancel)
                 self.active = {'version': view.version, 'future': future, 'cancel': cancel}
                 self.seen.add(view.version)
-        # Preserve the existing index priority. Short model waits can cancel a
-        # queued copy without competing with ordinary source preparation.
+        # 保持现有索引优先级；模型等待时间较短时，可以取消排队中的副本准备，
+        # 避免与常规源码准备竞争。
         if self.probes is not None:
             self.probes.start(view)
 
@@ -94,11 +113,15 @@ class Preparation:
         try:
             result = active['future'].result()
         except Exception as exc:
-            self.jobs.append({'version': active['version'], 'status': 'error',
-                              'error': type(exc).__name__})
+            self.jobs.append(
+                {'version': active['version'], 'status': 'error', 'error': type(exc).__name__}
+            )
             return None
-        meta = {k: v for k, v in result.items()
-                if k not in {'entries', 'line_offsets', 'lines', 'parse_cache'}}
+        meta = {
+            k: v
+            for k, v in result.items()
+            if k not in {'entries', 'line_offsets', 'lines', 'parse_cache'}
+        }
         meta['status'] = 'accepted' if result['version'] == version else 'stale'
         self.jobs.append(meta)
         self.cache = result['parse_cache']
@@ -107,6 +130,7 @@ class Preparation:
         started = time.monotonic()
         from agent.storage.records import save
         from agent.model.context import fingerprint
+
         data = {k: result[k] for k in ('version', 'entries', 'line_offsets', 'incomplete')}
         path = self.directory / (version + '-' + fingerprint(data)[:16] + '.json')
         if not path.exists():
@@ -145,10 +169,17 @@ class Preparation:
             if 'started' not in job:
                 continue
             total += job['ended'] - job['started']
-            overlap += sum(max(0.0, min(job['ended'], end) - max(job['started'], start))
-                           for start, end in self.model_intervals)
-        return {'jobs': self.jobs, 'probe_jobs': probe_jobs, 'worker_seconds': total,
-                'overlapped_model_seconds': overlap,
-                'main_commit_seconds': self.commit_seconds,
-                'cleanup_wait_seconds': self.close_seconds,
-                'worker_model_calls': 0, 'worker_sqlite_writes': 0}
+            overlap += sum(
+                max(0.0, min(job['ended'], end) - max(job['started'], start))
+                for start, end in self.model_intervals
+            )
+        return {
+            'jobs': self.jobs,
+            'probe_jobs': probe_jobs,
+            'worker_seconds': total,
+            'overlapped_model_seconds': overlap,
+            'main_commit_seconds': self.commit_seconds,
+            'cleanup_wait_seconds': self.close_seconds,
+            'worker_model_calls': 0,
+            'worker_sqlite_writes': 0,
+        }

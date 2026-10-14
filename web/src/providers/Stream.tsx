@@ -16,6 +16,7 @@ import { createClient } from "./client";
 import { toast } from "sonner";
 import type { RuntimeSettings } from "@/components/thread/model-settings";
 
+// 流状态与上下文约定
 export type ProgressEvent = { type: "progress"; phase: string; text: string };
 export type StateType = {
   messages: Message[];
@@ -48,10 +49,16 @@ type StreamContextType = ReturnType<typeof useTypedStream> & {
 };
 const StreamContext = createContext<StreamContextType | undefined>(undefined);
 
+// 本地服务状态检查
 async function checkGraphStatus(apiUrl: string): Promise<boolean> {
-  try { return (await fetch(`${apiUrl}/service`)).ok; } catch { return false; }
+  try {
+    return (await fetch(`${apiUrl}/service`)).ok;
+  } catch {
+    return false;
+  }
 }
 
+// 会话创建、流订阅与公开消息恢复
 const StreamSession = ({
   children,
   apiUrl,
@@ -115,8 +122,8 @@ const StreamSession = ({
       if (firstMessage) waitForTitle(created.thread_id, firstMessage);
       if (activeKey.current !== expectedKey)
         throw new Error("对话已切换，请在当前对话重新操作");
-      // URL updates can resolve before React commits. Desktop controls must
-      // finish binding to this conversation before saving its permissions.
+      // URL 更新可能先于 React 提交完成；桌面控件必须
+      // 先完成当前会话的绑定，再保存其权限。
       const committed = new Promise<void>((resolve, reject) => {
         threadCommit.current = { id: created.thread_id, resolve, reject };
       });
@@ -160,8 +167,8 @@ const StreamSession = ({
     assistantId,
     threadId: threadId ?? null,
     reconnectOnMount: true,
-    // Coalesce presentation updates from dense SDK streams; keep every event
-    // in the SDK store and leave request/execution timing unchanged.
+    // 合并密集 SDK 流引起的界面更新；在 SDK 存储中保留所有事件，
+    // 并保持请求和执行时序不变。
     throttle: 50,
     fetchStateHistory: { limit: 1 },
     onFinish: async (_state, metadata) => {
@@ -204,14 +211,14 @@ const StreamSession = ({
   });
   const [settledStreamKey, setSettledStreamKey] = useState(key);
   useEffect(() => {
-    // Runs after the SDK has reset its stream and started history loading.
-    // Until then its public messages still belong to the previous selection.
+    // 在 SDK 重置流并开始加载历史记录后执行。
+    // 在此之前，公开消息仍属于此前选中的会话。
     setSettledStreamKey(key);
   }, [key]);
   const latestStream = useRef(streamValue);
   latestStream.current = streamValue;
-  // ensureThread waits for the URL and React commit. The caller still holds
-  // its earlier render, so submit through the latest SDK closure explicitly.
+  // ensureThread 等待 URL 更新和 React 提交；调用方仍持有
+  // 此前的渲染结果，因此需明确通过最新的 SDK 闭包提交。
   const submit: typeof streamValue.submit = (values, options) => {
     if (options?.threadId && options.threadId !== selectedThread.current)
       return Promise.reject(new Error("对话已切换，消息尚未发送"));
@@ -244,8 +251,8 @@ const StreamSession = ({
     };
   }, [apiUrl, threadId]);
   const publicFallback = !streamValue.isLoading && recovered?.messages?.length;
-  // The SDK clears a previous thread in an effect. Do not archive its last
-  // render under the newly selected thread while that reset is pending.
+  // SDK 在副作用中清理此前的会话；重置完成前，不要将旧会话
+  // 最后一次渲染的消息归档到新选中的会话。
   const loadedThread = streamValue.history[0]?.checkpoint.thread_id;
   const liveMessages = messagesForThread(
     streamValue.messages,
@@ -311,11 +318,18 @@ const StreamSession = ({
   );
 };
 
-export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) => (
-  <StreamSession apiUrl={localApiUrl()} assistantId="monoplaner">{children}</StreamSession>
+export const StreamProvider: React.FC<{ children: ReactNode }> = ({
+  children,
+}) => (
+  <StreamSession
+    apiUrl={localApiUrl()}
+    assistantId="monoplaner"
+  >
+    {children}
+  </StreamSession>
 );
 
-// Create a custom hook to use the context
+// 提供读取上下文的自定义 Hook。
 export const useStreamContext = (): StreamContextType => {
   const context = useContext(StreamContext);
   if (context === undefined) {

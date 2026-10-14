@@ -1,4 +1,5 @@
-"""Interrupt current model waits; execution still commits at operation boundaries."""
+"""中断当前模型等待；执行仍在操作边界提交。"""
+
 from contextlib import contextmanager
 from contextvars import ContextVar
 from threading import RLock
@@ -53,6 +54,11 @@ class Signal:
 
 def current():
     return _current.get()
+
+
+def active_count(root):
+    with _lock:
+        return sum(saved_root == str(root) for saved_root, _ in _active)
 
 
 def interrupt(root, thread, kind, identity=None):

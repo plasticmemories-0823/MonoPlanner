@@ -1,4 +1,5 @@
-"""P0338 search must use repository bytes even with piped user input."""
+"""即使用户输入来自管道，P0338 搜索也必须使用仓库原始字节。"""
+
 import json
 from pathlib import Path
 import subprocess
@@ -30,9 +31,15 @@ executor = OperationExecutor(env, evidence, env.artifact_root)
 print(json.dumps({q: executor.search(Operation(id='s', op='search', query=q)) for q in
                  ('REPOSITORY_ONLY_MARKER', 'PIPE_ONLY_MARKER')}))
 """
-            result = subprocess.run([sys.executable, "-B", "-X", "utf8", "-c", script, str(repo)],
-                input="PIPE_ONLY_MARKER\n", cwd=Path(__file__).resolve().parents[1],
-                capture_output=True, text=True, encoding="utf-8", timeout=30)
+            result = subprocess.run(
+                [sys.executable, "-B", "-X", "utf8", "-c", script, str(repo)],
+                input="PIPE_ONLY_MARKER\n",
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             data = json.loads(result.stdout)
             self.assertEqual(data["REPOSITORY_ONLY_MARKER"]["hits"][0]["path"], "target.py")

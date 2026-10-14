@@ -11,11 +11,13 @@ export default function HomePage(): React.ReactNode {
   return (
     <React.Suspense fallback={<div>正在加载 MonoPlanner…</div>}>
       <Toaster />
-      <LocalSession><ThreadProvider>
-        <StreamProvider>
-          <Thread />
-        </StreamProvider>
-      </ThreadProvider></LocalSession>
+      <LocalSession>
+        <ThreadProvider>
+          <StreamProvider>
+            <Thread />
+          </StreamProvider>
+        </ThreadProvider>
+      </LocalSession>
     </React.Suspense>
   );
 }

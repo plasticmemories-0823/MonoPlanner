@@ -1,8 +1,9 @@
-"""Bounded background jobs shared by the UI, chat handoff and CLI.
+"""供界面、聊天交接和 CLI 共用的有界后台任务队列。
 
-Only disposable environment setup is retriable here. Model requests, source
-modifications and acceptance execution never pass through this job manager.
+这里只允许重试一次性的环境准备。模型请求、源码修改和验收执行
+不进入这个任务管理器。
 """
+
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -22,14 +23,14 @@ class PreparationCancelled(EnvironmentRequired):
 class PreparationJobs:
     def __init__(self, root):
         self.root = Path(root).resolve()
-        self.folder = self.root/'environment-jobs'
+        self.folder = self.root / 'environment-jobs'
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='environment-setup')
         self.lock = RLock()
         self.jobs = {}
         self.closed = False
 
     def _path(self, repo):
-        return self.folder/(hashlib.sha256(repo.encode()).hexdigest() + '.json')
+        return self.folder / (hashlib.sha256(repo.encode()).hexdigest() + '.json')
 
     def _read(self, repo):
         path = self._path(repo)
@@ -44,25 +45,46 @@ class PreparationJobs:
         repo = workspace_path(repo)
         binding = ProjectEnvironments(self.root).get(repo)
         if binding.get('image'):
-            return {'mode': 'manual', 'status': 'ready', 'stage': 'ready',
-                    'message': '使用已保存的高级环境配置', 'environment': binding}
+            return {
+                'mode': 'manual',
+                'status': 'ready',
+                'stage': 'ready',
+                'message': '使用已保存的高级环境配置',
+                'environment': binding,
+            }
         with self.lock:
             value = self._read(repo)
             if value and value['status'] == 'preparing':
                 if repo in self.jobs:
                     return {**value, 'mode': 'auto'}
-                value = self._save(repo, {**value, 'status': 'failed', 'stage': 'interrupted',
-                    'error': '上次环境准备被中断；可以重新准备，不会重放编码任务。',
-                    'message': '环境准备尚未完成'})
+                value = self._save(
+                    repo,
+                    {
+                        **value,
+                        'status': 'failed',
+                        'stage': 'interrupted',
+                        'error': '上次环境准备被中断；可以重新准备，不会重放编码任务。',
+                        'message': '环境准备尚未完成',
+                    },
+                )
         if value and value['status'] in {'failed', 'cancelled'}:
             return {**value, 'mode': 'auto'}
         from agent.execution.managed import ManagedEnvironments
+
         ready = ManagedEnvironments(self.root).status(repo)
         cached = ready.get('state') == 'ready'
-        result = {**ready, 'mode': 'auto', 'status': 'ready' if cached else 'idle',
-                  'stage': 'ready' if cached else 'checking'}
+        result = {
+            **ready,
+            'mode': 'auto',
+            'status': 'ready' if cached else 'idle',
+            'stage': 'ready' if cached else 'checking',
+        }
         if cached and ready.get('runtime'):
-            result['environment'] = {key: ready[key] for key in ('backend', 'image', 'runtime', 'managed') if key in ready}
+            result['environment'] = {
+                key: ready[key]
+                for key in ('backend', 'image', 'runtime', 'managed')
+                if key in ready
+            }
         return result
 
     def start(self, repo, *, background=True):
@@ -75,41 +97,82 @@ class PreparationJobs:
             if repo in self.jobs:
                 self.jobs[repo]['background'] |= background
                 return self._read(repo)
-            # Bound both active and queued work; browsing cannot enqueue builds.
+            # 同时限制执行中和排队中的任务；浏览目录不能触发构建排队。
             if len(self.jobs) >= 2:
                 raise EnvironmentRequired('已有两个项目正在准备环境，请稍后重试。')
-            value = self._save(repo, {'mode': 'auto', 'status': 'preparing',
-                'id': uuid.uuid4().hex, 'stage': 'checking', 'message': '正在检查项目环境'})
+            value = self._save(
+                repo,
+                {
+                    'mode': 'auto',
+                    'status': 'preparing',
+                    'id': uuid.uuid4().hex,
+                    'stage': 'checking',
+                    'message': '正在检查项目环境',
+                },
+            )
             cancel = Event()
-            self.jobs[repo] = {'cancel': cancel, 'id': value['id'], 'background': background, 'waiters': 0}
+            self.jobs[repo] = {
+                'cancel': cancel,
+                'id': value['id'],
+                'background': background,
+                'waiters': 0,
+            }
             self.pool.submit(self._run, repo, value, cancel)
             return value
 
     def _run(self, repo, value, cancel):
         def progress(update):
             nonlocal value
-            # The builder supplies human-facing stages, never raw subprocess
-            # output/URLs that can contain package credentials.
+            # 构建器只提供面向用户的阶段说明，不返回可能含包凭据的
+            # 原始子进程输出或 URL。
             with self.lock:
-                value = self._save(repo, {**value, 'stage': update['stage'],
-                    'message': update['message'], 'status': 'preparing'})
+                value = self._save(
+                    repo,
+                    {
+                        **value,
+                        'stage': update['stage'],
+                        'message': update['message'],
+                        'projects': update.get('projects'),
+                        'materials': update.get('materials'),
+                        'status': 'preparing',
+                    },
+                )
+
         try:
             from agent.execution.managed import ManagedEnvironments
-            binding = ManagedEnvironments(self.root).prepare(repo, progress=progress, cancelled=cancel.is_set)
+
+            binding = ManagedEnvironments(self.root).prepare(
+                repo, progress=progress, cancelled=cancel.is_set
+            )
             if cancel.is_set():
                 raise PreparationCancelled('环境准备已取消')
-            value = {**value, 'status': 'ready', 'stage': 'ready',
-                     'message': '项目环境已就绪', 'environment': binding}
+            value = {
+                **value,
+                'status': 'ready',
+                'stage': 'ready',
+                'message': '项目环境已就绪',
+                'environment': binding,
+            }
         except Exception as exc:
             from agent.execution.managed_plan import PreparationError
+
             cancelled = cancel.is_set() or isinstance(exc, PreparationCancelled)
-            # Technical logs remain in the private managed environment record.
-            value = {**value, 'status': 'cancelled' if cancelled else 'failed',
+            # 详细技术日志保留在私有环境准备记录中。
+            value = {
+                **value,
+                'status': 'cancelled' if cancelled else 'failed',
                 'stage': 'cancelled' if cancelled else 'failed',
                 'message': '环境准备已取消' if cancelled else '环境准备未完成',
-                'error': ('环境准备已取消，项目文件未修改。' if cancelled else
-                          str(exc) if isinstance(exc, (EnvironmentRequired, PreparationError)) else
-                          'Docker 环境准备未完成，请查看本地准备记录并重试。')}
+                'error': (
+                    '环境准备已取消，项目文件未修改。'
+                    if cancelled
+                    else (
+                        str(exc)
+                        if isinstance(exc, (EnvironmentRequired, PreparationError))
+                        else 'Docker 环境准备未完成，请查看本地准备记录并重试。'
+                    )
+                ),
+            }
         finally:
             with self.lock:
                 try:
@@ -123,7 +186,9 @@ class PreparationJobs:
             if repo in self.jobs:
                 self.jobs[repo]['cancel'].set()
                 value = self._read(repo)
-                return self._save(repo, {**value, 'stage': 'cancelling', 'message': '正在停止环境准备'})
+                return self._save(
+                    repo, {**value, 'stage': 'cancelling', 'message': '正在停止环境准备'}
+                )
         return self.status(repo)
 
     def wait(self, repo, *, progress=None, cancelled=None):
@@ -153,7 +218,7 @@ class PreparationJobs:
                     if value['status'] == 'cancelled':
                         raise PreparationCancelled(value.get('error', '环境准备已取消'))
                     raise EnvironmentRequired(value.get('error', 'Docker 环境准备未完成'))
-                time.sleep(.15)
+                time.sleep(0.15)
         finally:
             with self.lock:
                 job = self.jobs.get(repo)

@@ -1,4 +1,5 @@
-"""Small offline helpers for the retained P0338 tests."""
+"""为保留的 P0338 测试提供少量离线辅助函数。"""
+
 import os
 import shlex
 import subprocess
@@ -13,7 +14,7 @@ def python_command(code, executable=None):
 
 
 def interrupt_after_persist(event_name):
-    """Simulate power loss after the selected checkpoint is fully saved."""
+    """模拟在指定检查点完整保存后断电。"""
     from unittest.mock import patch
     from agent.task.runner import TaskRunner
 
@@ -37,11 +38,24 @@ def read_record(name: str) -> str:
 
 
 def tool_group(number, content, calls=1):
-    requests = [{"name": "read_record", "args": {"name": str(index)},
-                 "id": f"call-{number}-{index}", "type": "tool_call"}
-                for index in range(calls)]
-    return [AIMessage(content="", id=f"ai-{number}", tool_calls=requests), *[
-        ToolMessage(content=content, name="read_record", id=f"tool-{number}-{index}",
-                    tool_call_id=request["id"])
-        for index, request in enumerate(requests)
-    ]]
+    requests = [
+        {
+            "name": "read_record",
+            "args": {"name": str(index)},
+            "id": f"call-{number}-{index}",
+            "type": "tool_call",
+        }
+        for index in range(calls)
+    ]
+    return [
+        AIMessage(content="", id=f"ai-{number}", tool_calls=requests),
+        *[
+            ToolMessage(
+                content=content,
+                name="read_record",
+                id=f"tool-{number}-{index}",
+                tool_call_id=request["id"],
+            )
+            for index, request in enumerate(requests)
+        ],
+    ]
