@@ -255,7 +255,16 @@ class DownloadRelayTests(unittest.TestCase):
                 for _ in range(40):
                     with socket.create_connection(address, timeout=2) as rejected:
                         self.assertEqual(rejected.recv(1), b'')
-                self.assertEqual(len(relay.server._connections), 16)
+                # 客户端先看到 EOF，服务线程随后才完成 finally 的连接登记清理。
+                # 等待有界收尾后仍须恰好保留16个占用者，不能用一次竞态读取判断泄漏。
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    with relay.server._guard:
+                        remaining = len(relay.server._connections)
+                    if remaining == 16:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(remaining, 16)
             finally:
                 for client in clients:
                     client.close()

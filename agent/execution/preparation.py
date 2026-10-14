@@ -11,6 +11,7 @@ import uuid
 
 from agent.application.lease import ServiceLease
 from agent.execution.projects import EnvironmentRequired, ProjectEnvironments, workspace_path
+from agent.source.scope import ProjectScope, ProjectScopeError, project_scope as resolve_scope
 from agent.storage.resources import (
     resource_catalog, current_root, current_owner, container_owner,
     register_active_container, unregister_active_container, cancel_owned_containers,
@@ -86,8 +87,9 @@ class PreparationJobs:
             value['error'] = result['message']
         return value
 
-    def start(self, repo, *, background=True, retry=False):
+    def start(self, repo, *, background=True, retry=False, project_scope=None):
         repo = workspace_path(repo)
+        scope = resolve_scope(repo, project_scope)
         if ProjectEnvironments(self.root).get(repo).get('image'):
             return self.status(repo)
         with self.lock:
@@ -97,6 +99,8 @@ class PreparationJobs:
                 raise EnvironmentRequired('此数据目录已有环境管理者，请连接原服务。')
             existing = self.catalog.environment_job(repo)
             if existing and existing['id'] in self.workers:
+                if existing.get('project_scope') != scope.to_record():
+                    raise ProjectScopeError('同一目录的准备作业绑定了不同项目范围，未共享或替换原作业。')
                 if background and not existing.get('background'):
                     existing = self.catalog.save_environment_job({**existing, 'background': True})
                 return existing
@@ -115,6 +119,7 @@ class PreparationJobs:
                 'id': identity, 'repo': repo, 'owner': 'prepare:' + identity,
                 'mode': 'auto', 'status': 'preparing', 'stage': 'checking',
                 'message': '正在检查项目环境', 'background': background,
+                'project_scope': scope.to_record(),
             })
             cancel = Event()
             future = self.pool.submit(copy_context().run, self._run, value, cancel)
@@ -142,8 +147,9 @@ class PreparationJobs:
             try:
                 from agent.execution.managed import ManagedEnvironments
 
+                scope = ProjectScope.from_record(value['project_scope'], root=value['repo'])
                 binding = ManagedEnvironments(self.root).prepare(
-                    value['repo'], progress=progress, cancelled=cancel.is_set)
+                    value['repo'], progress=progress, cancelled=cancel.is_set, project_scope=scope)
                 if cancel.is_set():
                     raise PreparationCancelled('环境准备已取消')
                 result = {'status': 'ready', 'stage': 'ready', 'message': '项目环境已就绪',
@@ -158,7 +164,7 @@ class PreparationJobs:
                           'stage': 'cancelled' if stopped else 'failed',
                           'message': '环境准备已取消' if stopped else '环境准备未完成',
                           'error': '环境准备已取消，项目文件未修改。' if stopped else (
-                              str(exc) if isinstance(exc, (EnvironmentRequired, PreparationError))
+                              str(exc) if isinstance(exc, (EnvironmentRequired, PreparationError, ProjectScopeError))
                               else 'Docker 环境准备未完成，请查看本地记录后重试。')}
             current = self.catalog.environment_job(job_id=value['id'])
             self.catalog.save_environment_job({**current, **result})
@@ -214,9 +220,10 @@ class PreparationJobs:
                                 'error': type(exc).__name__})
         return results
 
-    def wait(self, repo, *, progress=None, cancelled=None):
+    def wait(self, repo, *, progress=None, cancelled=None, project_scope=None):
         repo = workspace_path(repo)
-        value = self.start(repo, background=False)
+        options = {"project_scope": project_scope} if project_scope is not None else {}
+        value = self.start(repo, background=False, **options)
         if value.get('mode') == 'manual':
             return value['environment']
         owner = current_owner()
@@ -375,5 +382,6 @@ def active_count(root=None):
         return sum(not item['future'].done() for item in service.workers.values())
 
 
-def ensure_prepared(repo, *, progress=None, cancelled=None, root=None):
-    return jobs(root).wait(repo, progress=progress, cancelled=cancelled)
+def ensure_prepared(repo, *, progress=None, cancelled=None, root=None, project_scope=None):
+    options = {"project_scope": project_scope} if project_scope is not None else {}
+    return jobs(root).wait(repo, progress=progress, cancelled=cancelled, **options)

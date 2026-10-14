@@ -12,7 +12,8 @@ import uuid
 
 from agent.source import excerpts
 from agent.source.syntax import _module, _tokens, _is_test, _parse, query_identifiers, query_focus
-from agent.source.snapshots import _link, _reason
+from agent.source.snapshots import _link, _reason, _selected_files
+from agent.source.scope import project_scope as resolve_scope
 
 
 SCHEMA = 1
@@ -22,8 +23,9 @@ MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
 
 class RepositoryNavigator:
-    def __init__(self, repo_root, cache_dir):
+    def __init__(self, repo_root, cache_dir, *, project_scope=None):
         self.root = Path(repo_root).resolve()
+        self.project_scope = project_scope
         cache = Path(cache_dir).resolve()
         if cache == self.root or self.root in cache.parents:
             raise ValueError("导航缓存必须位于被导航仓库外。")
@@ -73,19 +75,25 @@ class RepositoryNavigator:
             start = time.monotonic()
             entries, skipped, reused, parsed, total_bytes = {}, [], 0, 0, 0
             stopped = False
+            if self.project_scope is None:
+                self.project_scope = resolve_scope(self.root)
+            selected = {relative.as_posix() for relative, skip, tracked in
+                        _selected_files(self.root, project_scope=self.project_scope)[1]
+                        if not skip and (tracked or not _reason(relative))}
             for directory, dirs, names in os.walk(self.root, followlinks=False):
                 base = Path(directory)
                 dirs[:] = sorted(
                     d
                     for d in dirs
                     if not _reason((base / d).relative_to(self.root) / "_") and not _link(base / d)
+                    and not self.project_scope.excludes((base / d).relative_to(self.root))
                 )
                 for name in sorted(names):
                     if not name.endswith(".py"):
                         continue
                     path = base / name
                     relative = path.relative_to(self.root)
-                    if _reason(relative) or _link(path):
+                    if relative.as_posix() not in selected or _reason(relative) or _link(path):
                         continue
                     if len(entries) >= MAX_FILES or total_bytes >= MAX_TOTAL_BYTES:
                         stopped = True

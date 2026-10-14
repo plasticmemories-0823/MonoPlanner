@@ -29,7 +29,10 @@ def inspected_host_path(source):
 # 任务专属环境与只读资料
 # ============================================================
 class TaskDocker(DockerEnvironment):
-    def __init__(self, repo, image, task_root, *, runtime=None, read_sources=(), managed=None):
+    def __init__(
+        self, repo, image, task_root, *, runtime=None, read_sources=(), managed=None,
+        project_scope=None,
+    ):
         task_root = Path(task_root).resolve()
         super().__init__(
             repo,
@@ -38,6 +41,7 @@ class TaskDocker(DockerEnvironment):
             artifact_root=task_root.parent.parent / 'execution' / task_root.name,
             runtime=runtime,
             managed=managed,
+            project_scope=project_scope,
         )
         from agent.storage.preferences import state_root, private_path
         from agent.settings import PROJECT_ROOT
@@ -106,6 +110,7 @@ class TaskDocker(DockerEnvironment):
                 mounts[str(path)] = str(copied)
             self.material_mounts = mounts
             save(material_record, {'sources': sources, 'mounts': mounts})
+        self._prepare_project_masks(allow_create=not self.binding_path.exists(), full_check=True)
         if self.binding_path.exists():
             binding = json.loads(self.binding_path.read_text(encoding='utf-8'))
             if binding != self._binding(binding.get('container_id')) or not re.fullmatch(
@@ -139,6 +144,10 @@ class TaskDocker(DockerEnvironment):
                     target: ('volume', volume, False)
                     for target, volume in self.dependency_mounts.items()
                 }
+            )
+            expected.update(
+                {target: ('bind', Path(source), False)
+                 for target, source in self.project_masks.items()}
             )
             caches = [mount for mount in actual['Mounts'] if mount.get('Type') == 'tmpfs']
             mounts = [mount for mount in actual['Mounts'] if mount.get('Type') != 'tmpfs']
@@ -198,6 +207,10 @@ class TaskDocker(DockerEnvironment):
         if self.dependency_mounts:
             result['dependency_mounts'] = self.dependency_mounts
             result['dependency_caches'] = self.dependency_caches
+        result['project_scope'] = self.project_scope.to_record()
+        result['project_paths'] = self.project_paths
+        result['project_masks'] = self.project_masks
+        result['project_mask_identity'] = self.project_mask_identity
         return result
 
     def _runtime_materials(self, path):
@@ -222,7 +235,7 @@ class TaskDocker(DockerEnvironment):
                 )
             # 复用已有的包内运行材料清单；不能扩展到全部被忽略文件、
             # 虚拟环境、构建目录或秘密资料。
-            inventory = runtime_inventory(self.repo_root)
+            inventory = runtime_inventory(self.repo_root, project_scope=self.project_scope)
             save(path, inventory)
         self.runtime_files = tuple(inventory['files'])
         self.runtime_packages = tuple(inventory['packages'])
@@ -320,6 +333,7 @@ class TaskDocker(DockerEnvironment):
         }
 
     def restart_after_output_limit(self, receipt, *, allow_running=False):
+        self._prepare_project_masks(allow_create=False, full_check=True)
         actual = self._continuation_container()
         if receipt.get('container_id') != self._container_id or receipt.get(
             'identity'
@@ -353,6 +367,7 @@ class TaskDocker(DockerEnvironment):
 
     def start(self):
         self._check_cancelled()
+        self._prepare_project_masks(allow_create=self._container_id is None)
         if self._container_id is not None:
             self._prepare_dependencies(allow_create=False)
             if not self.running:

@@ -568,6 +568,7 @@ class TaskRunner:
             self.environment.repo_root,
             self.root / "baseline",
             runtime_files=getattr(self.environment, "runtime_files", ()),
+            project_scope=getattr(self.environment, "project_scope", None),
         )
         self.evidence = SourceVersions(
             self.environment, self.root / "source-records", baseline=self.baseline

@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from langchain_core.messages import messages_from_dict
 
 from agent.acceptance.artifact_checks import required_consumer
+from agent.application.project_location import ensure_location, ProjectLocationError
+from agent.source.scope import ProjectScope, ProjectScopeError
 from agent.execution.projects import prepare_binding, require_binding
 from agent.execution.task_docker import TaskDocker
 from agent.model.client import create_model
@@ -279,6 +281,18 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                     item["id"] for item in controls() if item["kind"] == "pause"
                 ]}
                 return result
+            if data.get("project_location"):
+                ensure_location(data["project_location"], directory)
+            scope_path = directory / "project-scope.json"
+            if scope_path.exists():
+                scope = ProjectScope.from_record(json.loads(scope_path.read_text("utf-8")),
+                                                 root=data["repo"])
+                scope.validate(full_check=True)
+            else:
+                scope = ProjectScope.discover(data["repo"])
+                save(scope_path, scope.to_record())
+            if cancelled():
+                return {"status": "paused", "pause_requested": True, "applied_inputs": []}
             binding_path = directory / "execution-binding.json"
             if binding_path.exists():
                 binding = json.loads(binding_path.read_text(encoding="utf-8"))
@@ -288,7 +302,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                     from agent.execution.preparation import PreparationCancelled
                     try:
                         binding = prepare_binding(
-                            data["repo"], cancelled=cancelled,
+                            data["repo"], cancelled=cancelled, project_scope=scope,
                             progress=lambda value: emit("environment", value),
                         )
                     except PreparationCancelled:
@@ -310,6 +324,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
             environment = environment_factory(
                 data["repo"], binding["image"], directory,
                 runtime=binding["runtime"], read_sources=data.get("read_sources", []),
+                project_scope=scope,
                 **({"managed": binding["managed"]} if binding.get("managed") else {}),
             )
             receipt_path = directory / "pause-container.json"
@@ -384,7 +399,8 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
             or str(exc).startswith("磁盘空间不足：")
         ):
             detail = "保存环境或源码时磁盘空间不足。"
-        elif isinstance(exc, (EnvironmentRequired, SnapshotError, ArtifactScopeError)):
+        elif isinstance(exc, (EnvironmentRequired, SnapshotError, ArtifactScopeError,
+                              ProjectLocationError, ProjectScopeError)):
             detail = str(exc)[:1000]
         elif isinstance(exc, InterruptedError):
             detail = "环境或源码准备已中止。"

@@ -19,6 +19,7 @@ from agent.execution.docker import DockerEnvironment
 from agent.execution.local import LocalEnvironment
 from agent.source.artifacts import generated_records, generated_archive
 from agent.source.errors import source_storage_boundary
+from agent.source.scope import ProjectScope, ProjectScopeError, project_scope as resolve_scope
 
 
 _DERIVED_DIRS = {
@@ -136,27 +137,50 @@ def _generated_records(directory):
     return generated_records(directory)
 
 
-def _walk(root, preserve_files=(), ignored_directories=(), cancel=None, check_projects=False):
+def _walk(root, preserve_files=(), ignored_directories=(), cancel=None,
+          project_scope=None, apply_ignores=False):
     """即使链接指向内部也不跟随；报告链接而非复制其目标。"""
     retained_directories = {parent for name in preserve_files for parent in Path(name).parents}
     ignored_directories = set(ignored_directories)
-    projects = []
+    scope = project_scope or resolve_scope(root, cancel=cancel)
+    rules = {}
     for directory, directories, files in os.walk(root, followlinks=False):
         from agent.storage.resources import owner_cancelled
 
         if owner_cancelled() or (cancel is not None and cancel.is_set()):
             raise InterruptedError('源码扫描已中断。')
         parent = Path(directory)
-        if check_projects and parent != root and (parent / '.git').exists():
-            projects.append(parent.relative_to(root).as_posix())
-            if len(projects) > 1:
-                raise SnapshotError(
-                    '所选目录包含多个独立 Git 项目，请选择实际工作项目：'
-                    + '、'.join(projects[:2])
-                )
+        if (parent != root and not scope.excludes(parent.relative_to(root))
+                and ((parent / '.git').exists() or (parent / '.git').is_symlink())):
+            raise ProjectScopeError('调查期间出现新的独立项目，已停止；请核对后新建任务。')
+        inherited = list(rules.get(parent.parent, []))
+        if apply_ignores and (parent / '.gitignore').is_file():
+            from pathspec import GitIgnoreSpec
+
+            ignore = _safe_file(root, (parent / '.gitignore').relative_to(root))
+            if ignore.stat().st_size > 1024 * 1024:
+                raise SnapshotError('项目忽略文件过大，无法确定源码范围。')
+            inherited.append((parent, GitIgnoreSpec.from_lines(
+                ignore.read_text('utf-8-sig').splitlines())))
+        rules[parent] = inherited
+
+        def ignored(path, directory=False):
+            decision = None
+            for base, spec in inherited:
+                match = spec.check_file(path.relative_to(base).as_posix()
+                                        + ('/' if directory else ''))
+                if match.include is not None:
+                    decision = match.include
+            return decision is True
         for name in list(directories):
             relative = (parent / name).relative_to(root)
-            if relative in ignored_directories and relative not in retained_directories:
+            if scope.excludes(relative):
+                directories.remove(name)
+                yield relative, "independent_project"
+            elif apply_ignores and relative not in retained_directories and ignored(parent / name, True):
+                directories.remove(name)
+                yield relative, "git_ignored_directory"
+            elif relative in ignored_directories and relative not in retained_directories:
                 directories.remove(name)
                 yield relative, "git_ignored_directory"
             elif relative not in retained_directories and (
@@ -176,14 +200,26 @@ def _walk(root, preserve_files=(), ignored_directories=(), cancel=None, check_pr
             if owner_cancelled() or (cancel is not None and cancel.is_set()):
                 raise InterruptedError('源码扫描已中断。')
             relative = (parent / name).relative_to(root)
+            if scope.excludes(relative):
+                continue
+            if apply_ignores and relative not in preserve_files and ignored(parent / name):
+                if _reason(relative) not in _SECRET_REASONS:
+                    yield relative, "git_ignored_file"
+                    continue
             skip = ('monoplanner_generated_archive'
                     if relative not in preserve_files and not _reason(relative)
                     and generated_archive(_safe_file(root, relative)) else None)
             yield relative, skip
 
 
-def _selected_files(root, runtime_files=(), cancel=None):
+def _selected_files(root, runtime_files=(), cancel=None, project_scope=None):
     """通过 Git 纳入暂存、已修改和新增文件；后备方案按排除规则遍历源码。"""
+    scope = resolve_scope(root, project_scope, cancel=cancel)
+    for name in runtime_files:
+        try:
+            scope.require(name)
+        except ProjectScopeError as exc:
+            raise SnapshotError(str(exc)) from exc
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     # 源码发现属于可信主机操作；不能仅因 Git 读取索引，
     # 就在主机上执行仓库的 fsmonitor 钩子。
@@ -194,11 +230,17 @@ def _selected_files(root, runtime_files=(), cancel=None):
         )
     except FileNotFoundError:
         probe = None
-    if (
-        probe is not None
-        and probe.returncode == 0
-        and Path(os.fsdecode(probe.stdout.strip())).resolve() == root
-    ):
+    git_root = (Path(os.fsdecode(probe.stdout.strip())).resolve()
+                if probe is not None and probe.returncode == 0 else None)
+    use_git = git_root is not None and root.is_relative_to(git_root)
+    if use_git and git_root != root:
+        ignored = subprocess.run([*git, "check-ignore", "-q", "--", "."],
+                                 capture_output=True, timeout=10, **options)
+        if ignored.returncode not in {0, 1}:
+            raise SnapshotError("git check-ignore failed for selected project directory.")
+        # 用户明确选中的独立目录可能被外层仓库整体忽略；仍保留其自身源码。
+        use_git = ignored.returncode == 1
+    if use_git:
         listed = subprocess.run(
             [
                 *git,
@@ -217,12 +259,14 @@ def _selected_files(root, runtime_files=(), cancel=None):
         if listed.returncode != 0:
             raise SnapshotError("git ls-files failed; source selection was not complete.")
         tracked_result = subprocess.run(
-            [*git, "ls-files", "--cached", "-z"], capture_output=True, timeout=30, **options
+            [*git, "ls-files", "--cached", "-z", "--", "."], capture_output=True, timeout=30, **options
         )
         if tracked_result.returncode != 0:
             raise SnapshotError("git ls-files failed to distinguish tracked source files.")
         tracked = {Path(os.fsdecode(item)) for item in tracked_result.stdout.split(b"\0") if item}
         selected = {Path(os.fsdecode(item)) for item in listed.stdout.split(b"\0") if item}
+        selected = {path for path in selected if not scope.excludes(path)}
+        tracked = {path for path in tracked if not scope.excludes(path)}
         ignored_result = subprocess.run(
             [
                 *git,
@@ -232,6 +276,8 @@ def _selected_files(root, runtime_files=(), cancel=None):
                 "--exclude-standard",
                 "--directory",
                 "-z",
+                "--",
+                ".",
             ],
             capture_output=True,
             timeout=30,
@@ -258,7 +304,8 @@ def _selected_files(root, runtime_files=(), cancel=None):
         # 通过哈希，使后续候选能够安全报告未验证的改动。
         selected.update(
             relative
-            for relative, skip in _walk(root, tracked, ignored_directories, cancel=cancel)
+            for relative, skip in _walk(root, tracked, ignored_directories, cancel=cancel,
+                                       project_scope=scope)
             if not skip and _reason(relative) in _SECRET_REASONS
         )
         retained, generated, checked = [], set(), {}
@@ -280,6 +327,8 @@ def _selected_files(root, runtime_files=(), cancel=None):
                 retained.append((relative, skip, relative in tracked))
             else:
                 generated.add(record_root)
+        retained.extend((Path(name), "independent_project", False)
+                        for name in scope.excluded_projects)
         return "git", retained + [
             (relative, 'monoplanner_generated_records', False) for relative in sorted(generated)
         ]
@@ -287,7 +336,7 @@ def _selected_files(root, runtime_files=(), cancel=None):
         raise SnapshotError('所选目录是 MonoPlanner 运行记录，请选择实际工作项目。')
     return "source_walk", [
         (relative, skip, False)
-        for relative, skip in _walk(root, cancel=cancel, check_projects=True)
+        for relative, skip in _walk(root, cancel=cancel, project_scope=scope, apply_ignores=True)
     ]
 
 
@@ -317,7 +366,8 @@ class SourceSnapshot:
 
     @classmethod
     @source_storage_boundary
-    def capture(cls, repo_root, destination, excluded_roots=(), runtime_files=(), cancel=None):
+    def capture(cls, repo_root, destination, excluded_roots=(), runtime_files=(), cancel=None,
+                project_scope=None):
         source = Path(repo_root).expanduser().resolve()
         destination = Path(destination).expanduser().resolve()
         if not source.is_dir():
@@ -341,7 +391,7 @@ class SourceSnapshot:
             "excluded_files": {},
             "excluded": [],
             "notes": [
-                "Git selection applies only to the selected repository root; independent subdirectories use a source walk.",
+                "Git selection stays inside the selected directory; independently ignored roots use their own ignore rules.",
                 "Tracked ordinary source files are retained even under names usually used for generated files.",
                 "Git-ignored untracked files are omitted; named secret files outside generated directories are fingerprinted.",
                 "Environment secrets, private keys, links, VCS data and generated caches are not copied.",
@@ -357,7 +407,10 @@ class SourceSnapshot:
                     raise InterruptedError('源码快照已中断；部分现场已保留。')
 
             check_cancel()
-            selection, candidates = _selected_files(source, runtime_files, cancel=cancel)
+            scope = resolve_scope(source, project_scope, cancel=cancel)
+            manifest["project_scope"] = scope.to_record()
+            selection, candidates = _selected_files(
+                source, runtime_files, cancel=cancel, project_scope=scope)
             manifest["selection"] = selection
             manifest["runtime_files"] = sorted(runtime_files)
             required = 0
@@ -384,7 +437,7 @@ class SourceSnapshot:
                     skip = "deleted_tracked_file"
                 if skip:
                     manifest["excluded"].append({"path": relative.as_posix(), "reason": skip})
-                    if path.is_file() and not skip.startswith('monoplanner_generated_'):
+                    if path.is_file() and not skip.startswith(('monoplanner_generated_', 'git_ignored_')):
                         safe = _safe_file(source, relative)
                         manifest["excluded_files"][relative.as_posix()] = _inspect_file(safe, cancel)[0]
                     continue
@@ -485,7 +538,9 @@ class SourceSnapshot:
         try:
             if not self.root.is_dir() or _link(self.root):
                 raise SnapshotError("Source snapshot root is missing or replaced by a link.")
-            for relative, skip in _walk(self.root, preserve_files=self.files):
+            for relative, skip in _walk(
+                self.root, preserve_files=self.files, project_scope=ProjectScope(self.root)
+            ):
                 reason = _reason(relative)
                 if skip or (
                     relative.as_posix() not in self.files
@@ -498,7 +553,7 @@ class SourceSnapshot:
                 current[relative.as_posix()] = sha
                 if private:
                     errors.append(f"Private key content appeared: {relative}")
-        except (OSError, SnapshotError) as exc:
+        except (OSError, SnapshotError, ProjectScopeError) as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
         change = _changes(self.files, current)
         return {

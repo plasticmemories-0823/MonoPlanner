@@ -21,20 +21,24 @@ from agent.execution.managed_plan import (
 )
 from agent.storage.preferences import private_path
 from agent.source.artifacts import generated_records, generated_archive
+from agent.source.scope import project_scope as resolve_scope
 
 
-def project_files(root, under=Path('.')):
+def project_files(root, under=Path('.'), *, project_scope=None):
     """应用每层 .gitignore；明确声明的依赖由调用方单独加入。"""
     under = Path(under)
+    scope = resolve_scope(root, project_scope)
+    scope.require(under)
     start = safe_path(root, under, file=False)
-    tracked = set()
+    tracked, selected = set(), None
     options = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
     git = ['git', '-c', 'core.fsmonitor=false', '-C', str(root)]
     try:
         probe = subprocess.run(
             [*git, 'rev-parse', '--show-toplevel'], capture_output=True, timeout=10, **options
         )
-        if probe.returncode == 0 and Path(os.fsdecode(probe.stdout.strip())).resolve() == root:
+        git_root = Path(os.fsdecode(probe.stdout.strip())).resolve() if probe.returncode == 0 else None
+        if git_root is not None and root.is_relative_to(git_root):
             listed = subprocess.run(
                 [*git, 'ls-files', '--cached', '-z', '--', under.as_posix()],
                 capture_output=True,
@@ -44,6 +48,18 @@ def project_files(root, under=Path('.')):
             if listed.returncode:
                 raise PreparationError('无法读取项目版本控制清单，未开始准备。')
             tracked = {Path(os.fsdecode(name)) for name in listed.stdout.split(b'\0') if name}
+            ignored_root = subprocess.run([*git, 'check-ignore', '-q', '--', under.as_posix()],
+                                          capture_output=True, timeout=10, **options)
+            if ignored_root.returncode not in {0, 1}:
+                raise PreparationError('无法核对安装资料的 Git 忽略规则。')
+            if ignored_root.returncode == 1:
+                listed = subprocess.run(
+                    [*git, 'ls-files', '--cached', '--others', '--exclude-standard',
+                     '-z', '--', under.as_posix()],
+                    capture_output=True, timeout=30, **options)
+                if listed.returncode:
+                    raise PreparationError('无法读取项目版本控制清单，未开始准备。')
+                selected = {Path(os.fsdecode(name)) for name in listed.stdout.split(b'\0') if name}
     except FileNotFoundError:
         pass
     inherited = []
@@ -67,6 +83,9 @@ def project_files(root, under=Path('.')):
             directory and any(name.is_relative_to(relative) for name in tracked)
         ):
             return False
+        if selected is not None:
+            return (not any(name.is_relative_to(relative) for name in selected)
+                    if directory else relative not in selected)
         decision = None
         for base, spec in rules:
             if path.is_relative_to(base):
@@ -82,6 +101,10 @@ def project_files(root, under=Path('.')):
 
     def visit(folder, rules):
         relative_folder = folder.relative_to(root)
+        if scope.excludes(relative_folder):
+            return
+        if folder != root and ((folder / '.git').exists() or (folder / '.git').is_symlink()):
+            raise PreparationError('安装期间项目范围变化，已停止；请核对后重新准备。')
         if not any(name.is_relative_to(relative_folder) for name in tracked):
             if generated_records(folder):
                 return
@@ -97,7 +120,7 @@ def project_files(root, under=Path('.')):
                 ]
         for path in sorted(folder.iterdir()):
             relative = path.relative_to(root)
-            if excluded(relative) or private_path(path):
+            if scope.excludes(relative) or excluded(relative) or private_path(path):
                 continue
             if path.is_dir():
                 if path.name.lower() in SKIP or path.name.lower().startswith('.venv'):
@@ -118,6 +141,7 @@ def project_files(root, under=Path('.')):
 
 def collect(plan, cancelled=None):
     """先按文件元数据核算边界，再读取内容；不会复制到安装目录。"""
+    scope = resolve_scope(plan.root, getattr(plan, "project_scope", None))
     selected = {name: '依赖声明或明确引用的文件' for name in plan.files} if plan.projects else {}
     discovered_sources = set()
     roots = {name: '项目明确声明的本地包' for name in plan.source_projects}
@@ -125,13 +149,14 @@ def collect(plan, cancelled=None):
         if project.get('has_package') or project.get('needs_source'):
             roots[project['path']] = '项目本身安装或安装脚本需要的源码'
     for name in plan.local_dependencies:
+        scope.require(name)
         target = safe_path(plan.root, name, file=False)
         if target.is_file():
             selected[name] = '明确引用的本地依赖文件'
         else:
             roots[name] = '项目明确声明的本地包'
     for name, reason in roots.items():
-        for relative in project_files(plan.root, Path(name)):
+        for relative in project_files(plan.root, Path(name), project_scope=scope):
             if cancelled and cancelled():
                 from agent.execution.managed import PreparationCancelled
 
@@ -150,6 +175,7 @@ def collect(plan, cancelled=None):
             from agent.execution.managed import PreparationCancelled
 
             raise PreparationCancelled('环境准备已取消，尚未开始复制安装资料。')
+        scope.require(name)
         path = safe_path(plan.root, name)
         if name not in discovered_sources:
             parents = [path.parent, *path.parent.parents]

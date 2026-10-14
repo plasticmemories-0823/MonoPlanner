@@ -30,13 +30,12 @@ KEY_EVENTS = {
 
 class Scheduler:
     def __init__(self, store, *, work_factory=None, pause_callback=None, model_factory=None,
-                 tool_invoker=None, prepare_callback=None, title_factory=None,
+                 tool_invoker=None, title_factory=None,
                  supplement_callback=None):
         self.store = store
         self.work_factory = work_factory or self._run_work
         self.pause_callback = pause_callback or self._pause_work
         self.supplement_callback = supplement_callback or self._supplement_work
-        self.prepare_callback = prepare_callback or self._prepare
         self.title_factory = title_factory
         self.chatbot = Chatbot(store, self.dispatch_work, factory=model_factory,
                               invoke_tool=tool_invoker)
@@ -162,12 +161,6 @@ class Scheduler:
 
         return supplement_work(task, command, root=self.store.root)
 
-    def _prepare(self, repo):
-        if repo:
-            from agent.execution.preparation import jobs
-
-            return jobs(root=self.store.root).start(repo)
-
     def start(self):
         with self.lock:
             if self.worker is not None or self.starting or self.stop.is_set():
@@ -290,19 +283,29 @@ class Scheduler:
             self.wake.set()
 
     def dispatch_work(self, conversation, command, *, kind='coding', arguments=None,
-                      work_options=None):
+                      work_options=None, project_path='.', create=False):
         self.ensure_dispatch_available()
         value = self.store.get(conversation)
         previous = self.store.work(value['work_id'])
+        if previous and previous.get('input_id') == command['id']:
+            return self.store.create_work(conversation, command['id'], kind=kind,
+                                          arguments=arguments, work_options=work_options,
+                                          project_path=project_path, create=create)
         if previous and previous['status'] not in TERMINAL:
             if kind != 'coding':
                 raise Conflict('当前工作尚未结束，不能同时运行另一任务')
+            from agent.application.project_location import resolve_location
+
+            selected = resolve_location(value['repo'], project_path, create)
+            if create or selected['repo'] != previous['repo']:
+                raise Conflict('已有工作仍绑定原项目；补充不能创建或切换项目。')
             control = {'id': str(uuid.uuid5(uuid.UUID(command['id']), 'supplement')),
                        'kind': 'supplement', 'text': command['text']}
             self.submit(conversation, control)
             return previous
         work = self.store.create_work(conversation, command['id'], kind=kind, arguments=arguments,
-                                      work_options=work_options)
+                                      work_options=work_options,
+                                      project_path=project_path, create=create)
         self.wake.set()
         return work
 
@@ -347,16 +350,8 @@ class Scheduler:
                         self.chats.discard(conversation)
                     raise
             elif row['kind'] == 'workspace':
-                self.store.command_state(conversation, command['id'], 'running')
-                try:
-                    self.ensure_dispatch_available()
-                    self.prepare_callback(self.store.get(conversation)['repo'])
-                    self.store.command_state(conversation, command['id'], 'applied')
-                except (OSError, sqlite3.Error):
-                    raise
-                except Exception as exc:
-                    self.store.command_state(conversation, command['id'], 'failed',
-                                             error=type(exc).__name__)
+                # 选择的是授权工作区；实际项目在开工交接中确定，不能提前安装父目录。
+                self.store.command_state(conversation, command['id'], 'applied')
             elif row['kind'] == 'pause':
                 task = self.store.work(row['task_id'])
                 if not task or task['status'] not in ACTIVE:

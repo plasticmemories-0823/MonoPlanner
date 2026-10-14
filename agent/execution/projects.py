@@ -134,11 +134,17 @@ def require_binding(repo, binding=None):
     return {**binding, 'runtime': runtime_profile(binding.get('runtime'))}
 
 
-def prepare_binding(repo, *, progress=None, cancelled=None):
+def prepare_binding(repo, *, progress=None, cancelled=None, project_scope=None):
     """仅在首次执行前读取最新的项目偏好。"""
+    if project_scope is not None:
+        from agent.source.scope import project_scope as resolve_scope
+
+        project_scope = resolve_scope(repo, project_scope)
     selected = workspace_binding(repo)
     if selected.get('image'):
         return require_binding(repo, selected)
     from agent.execution.preparation import ensure_prepared
 
-    return require_binding(repo, ensure_prepared(repo, progress=progress, cancelled=cancelled))
+    options = {"project_scope": project_scope} if project_scope is not None else {}
+    return require_binding(
+        repo, ensure_prepared(repo, progress=progress, cancelled=cancelled, **options))

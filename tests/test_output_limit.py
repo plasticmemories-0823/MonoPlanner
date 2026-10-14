@@ -225,12 +225,16 @@ class ContainerContinuationTests(unittest.TestCase):
             },
         }
         self.container._continuation_container = lambda: deepcopy(self.actual)
+        self.container._prepare_project_masks = Mock()
         self.container.start = Mock()
         self.container._docker = Mock(return_value=type('Result', (), {'returncode': 0})())
         self.receipt = self.container.output_limit_stop_receipt()
 
     def test_only_same_container_is_started_and_start_intent_can_resume(self):
         self.container.restart_after_output_limit(self.receipt)
+        self.container._prepare_project_masks.assert_called_once_with(
+            allow_create=False, full_check=True,
+        )
         self.assertEqual(self.container._docker.call_args.args[0], ['start', 'a' * 64])
         self.actual['State']['Running'] = True
         self.container.restart_after_output_limit(self.receipt, allow_running=True)

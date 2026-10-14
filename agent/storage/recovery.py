@@ -118,6 +118,8 @@ def code_key(root=None):
         'agent/acceptance/runner.py',
         'resources/drivers/unittest.py',
         'agent/source/snapshots.py',
+        'agent/source/scope.py',
+        'agent/application/project_location.py',
         'resources/drivers/repository.py',
         'agent/task/instructions.py',
         'agent/model/context.py',

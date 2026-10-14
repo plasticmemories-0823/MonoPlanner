@@ -151,12 +151,12 @@ def test_handoff_calls_work_once_without_running_it_inside_chat(setup):
     store, conversation, _ = setup
     item = command()
     store.submit(conversation, item)
-    model = FakeModel([answer('开始处理', tool_calls=[{'name': 'start_work', 'args': {}, 'id': 'go'}])])
+    model = FakeModel([answer('开始处理', tool_calls=[{'name': 'start_work', 'args': {'project_path': '.', 'create': False}, 'id': 'go'}])])
     calls = []
 
-    def dispatch(thread, incoming):
+    def dispatch(thread, incoming, **options):
         calls.append(incoming['text'])
-        return store.create_work(thread, incoming['id'])
+        return store.create_work(thread, incoming['id'], **options)
 
     bot = Chatbot(store, dispatch, factory=lambda _: model)
     bot.run(conversation, item)
@@ -928,14 +928,14 @@ def test_default_plan_question_waits_for_user_before_work_handoff(setup):
     model = FakeModel([
         answer(proposal),
         answer('我开始制作这个动画。', tool_calls=[
-            {'name': 'start_work', 'args': {}, 'id': 'confirmed-start'},
+            {'name': 'start_work', 'args': {'project_path': 'pelican-bike', 'create': True}, 'id': 'confirmed-start'},
         ]),
     ])
     calls = []
 
-    def dispatch(thread, incoming):
+    def dispatch(thread, incoming, **options):
         calls.append(incoming['id'])
-        return store.create_work(thread, incoming['id'])
+        return store.create_work(thread, incoming['id'], **options)
 
     bot = Chatbot(store, dispatch, factory=lambda _: model)
     first = command('帮我画鹈鹕骑自行车')
@@ -1017,3 +1017,24 @@ def test_live_work_activity_reads_deltas_without_copying_or_touching_chat(setup,
     assert store.snapshot(conversation)['activities'] == []
     assert store.usage(conversation)['chat']['calls'] == 0
     history.close()
+
+
+
+def test_project_context_reads_can_be_batched_without_losing_tool_results(setup):
+    store, conversation, repo = setup
+    incoming = command('查看当前目录和工作状态')
+    store.submit(conversation, incoming)
+    model = FakeModel([
+        answer(tool_calls=[
+            {'name': 'get_read_sources', 'args': {}, 'id': 'location'},
+            {'name': 'get_work_status', 'args': {}, 'id': 'status'},
+        ]),
+        answer('项目位置仍待确认。'),
+    ])
+    bot = Chatbot(store, lambda *a, **k: pytest.fail('Read dispatched work'), factory=lambda _: model)
+    bot.run(conversation, incoming)
+    results = {message.tool_call_id: json.loads(message.content)
+               for message in model.requests[1] if isinstance(message, ToolMessage)}
+    assert set(results) == {'location', 'status'}
+    assert results['location']['workspace'] == str(repo)
+    assert results['location']['current_project'] is None and results['status'] is None

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from agent.source.scope import ProjectScope, project_scope as resolve_scope
 import re
 import stat
 import tomllib
@@ -199,6 +200,7 @@ class ProjectPlan:
     source_projects: list = field(default_factory=list)
     materials: dict | None = None
     recipe: dict = field(default_factory=_recipe)
+    project_scope: ProjectScope | None = None
 
     @property
     def fingerprint(self):
@@ -212,6 +214,8 @@ class ProjectPlan:
                 'source_projects': self.source_projects,
                 'files': self.files,
                 'recipe': self.recipe,
+                **({'excluded_projects': list(self.project_scope.excluded_projects)}
+                   if self.project_scope and self.project_scope.excluded_projects else {}),
             }
         )
 
@@ -247,6 +251,8 @@ def _read(plan, relative):
         elif part != '.':
             parts.append(part)
     relative = Path(*parts)
+    if plan.project_scope is not None:
+        plan.project_scope.require(relative)
     path = safe_path(plan.root, relative)
     if excluded(relative) or path.stat().st_size > MAX_MANIFEST:
         raise PreparationError(f'依赖文件不可用于自动准备：{Path(relative).as_posix()}')
@@ -320,6 +326,8 @@ def _local(plan, parent, value, *, editable=False):
         elif part != '.':
             parts.append(part)
     relative = Path(*parts)
+    if plan.project_scope is not None:
+        plan.project_scope.require(relative)
     target = safe_path(plan.root, relative, file=False)
     if not target.exists():
         raise PreparationError(f'本地依赖不存在：{relative.as_posix()}')
@@ -470,18 +478,21 @@ def _version(constraints, language):
 # ============================================================
 # 识别项目的依赖配置
 # ============================================================
-def inspect_project(repo):
+def inspect_project(repo, project_scope=None):
     root = project_root(repo)
-    plan = ProjectPlan(root)
+    scope = resolve_scope(root, project_scope)
+    plan = ProjectPlan(root, project_scope=scope)
     folders = [Path('.')]
     for child in sorted(root.iterdir()):
-        if child.name.lower() in CHILDREN and child.is_dir() and not _link(child):
+        if (child.name.lower() in CHILDREN and child.is_dir() and not _link(child)
+                and not scope.excludes(child.relative_to(root))):
             folders.append(Path(child.name))
             if child.name.lower() in {'apps', 'packages', 'services'}:
                 folders.extend(
                     Path(child.name) / p.name
                     for p in sorted(child.iterdir())
                     if p.is_dir() and not _link(p) and p.name.lower() not in SKIP
+                    and not scope.excludes(p.relative_to(root))
                 )
     # 读取用户声明的工作区成员，不把未声明的相邻目录混入安装。
     patterns = []
@@ -517,8 +528,10 @@ def inspect_project(repo):
 
     excluded_patterns = [pattern[1:] for pattern in patterns if pattern.startswith('!')]
     for pattern in (p for p in patterns if not p.startswith('!')):
-        for path in sorted(root.glob(pattern)):
+        for path in sorted(scope.glob_directories(pattern, excluded_patterns)):
             relative = path.relative_to(root)
+            if scope.excludes(relative):
+                raise PreparationError('工作区声明引用已排除的独立项目：' + relative.as_posix())
             safe_path(root, relative, file=False)
             if (
                 not path.is_dir()
@@ -718,12 +731,12 @@ def inspect_project(repo):
                 raise PreparationError(f'明确引用的本地包不可用于安装：{relative}')
             plan.files[relative] = hashlib.sha256(target.read_bytes()).hexdigest()
         else:
-            for rel, data in source_files(root, under=Path(relative)):
+            for rel, data in source_files(root, under=Path(relative), project_scope=scope):
                 plan.files[rel.as_posix()] = hashlib.sha256(data).hexdigest()
     # 安装生命周期可能将这些源码编入依赖树，变化时必须重新准备。
     for project in plan.projects:
         if project.get('needs_source'):
-            for relative, data in source_files(root, under=Path(project['path'])):
+            for relative, data in source_files(root, under=Path(project['path']), project_scope=scope):
                 plan.files[relative.as_posix()] = hashlib.sha256(data).hexdigest()
     plan.python, plan.node = _version(python_versions, 'python'), _version(node_versions, 'node')
     return plan
@@ -732,12 +745,12 @@ def inspect_project(repo):
 # ============================================================
 # 构造经过过滤的安装副本
 # ============================================================
-def source_files(root, *, under=Path('.')):
+def source_files(root, *, under=Path('.'), project_scope=None):
     """创建有边界且过滤私有数据的副本，不运行 Git 钩子或项目代码。"""
     from agent.execution.installation_materials import project_files
 
     count = total = 0
-    for relative in project_files(root, under):
+    for relative in project_files(root, under, project_scope=project_scope):
         path = safe_path(root, relative)
         size = path.stat().st_size
         count += 1

@@ -23,6 +23,7 @@ let failNextCreate = true,
   failNextCommand = false;
 const stats = { model_calls: 0, docker_calls: 0, commands, requests };
 const resourceRequests = [];
+const environmentRequests = [];
 let projectPinned = true;
 const settings = {
   model_name: "deepseek-flash",
@@ -107,7 +108,12 @@ const backend = http.createServer(async (request, response) => {
       directories: [{ name: "项目二", path: "E:/Fixture/two" }],
     });
   }
-  if (url.pathname === "/workspace/environment")
+  if (url.pathname === "/workspace/environment") {
+    environmentRequests.push({
+      method: request.method,
+      repo: body.repo || url.searchParams.get("repo"),
+    });
+    if (request.method === "POST" && body.action === "prepare") preparing++;
     return json(response, {
       mode: "auto",
       status: "ready",
@@ -116,6 +122,7 @@ const backend = http.createServer(async (request, response) => {
       projects: [],
       details: [],
     });
+  }
   if (url.pathname === "/resources")
     return json(response, {
       used_bytes: 2 * 1024 ** 3,
@@ -265,7 +272,13 @@ const backend = http.createServer(async (request, response) => {
             revision: value.title.revision + 1,
           };
           if (body.text === "启动假工作") {
-            value.work = { task_id: "work-1", input_id: body.id, status: "running" };
+            value.work = {
+              task_id: "work-1",
+              input_id: body.id,
+              repo: `${value.repo}/pelican`,
+              status: "running",
+            };
+            preparing++;
             value.status = "running";
           }
         }
@@ -279,7 +292,6 @@ const backend = http.createServer(async (request, response) => {
         }
         if (body.kind === "workspace") {
           value.repo = body.repo;
-          preparing++;
         }
         update(value);
         if (failNextCommand) {
@@ -398,7 +410,33 @@ try {
     await page.getByRole("button", { name: label, exact: true }).click();
     await page.getByText(`收到：${text}`, { exact: true }).waitFor();
   };
+  await page.getByRole("button", { name: "选择工作目录", exact: true }).click();
+  assert.equal(await page.getByRole("region", { name: "项目执行环境" }).count(), 0);
+  await page.getByRole("button", { name: "选择此目录", exact: true }).click();
+  await page.getByRole("button", { name: "关闭目录选择" }).waitFor({ state: "hidden" });
+  await send("先讨论项目位置");
+  assert.equal(preparing, 0, "selection and discussion do not prepare an environment");
+  assert.equal(environmentRequests.length, 0, "browsing does not query the parent environment");
+  assert.equal(conversations.get(first).work, null);
   await send("启动假工作");
+  assert.equal(preparing, 1, "confirmed work prepares its actual project exactly once");
+  const actualProject = conversations.get(first).work.repo;
+  assert.equal(actualProject, "E:/Fixture/one/pelican");
+  assert.equal(
+    conversations.get(first).repo,
+    "E:/Fixture/one",
+    "workspace authorization remains unchanged",
+  );
+  const currentProject = page.locator('details[aria-label="当前项目"]');
+  await currentProject.getByText(actualProject, { exact: true }).waitFor();
+  await currentProject.locator(":scope > summary").click();
+  await page
+    .getByRole("region", { name: "项目执行环境" })
+    .getByText("项目环境已就绪", { exact: true })
+    .waitFor();
+  assert.ok(environmentRequests.every((request) => request.repo === actualProject));
+  assert.equal(preparing, 1, "opening the current project only reads its confirmed environment");
+  await currentProject.locator(":scope > summary").click();
   const workActivity = page.locator('[data-testid="activity-group"][data-source="work"]');
   await workActivity
     .locator(":scope > summary")
@@ -444,11 +482,13 @@ try {
   await page.getByText("收到：保留现有验收", { exact: true }).waitFor();
   assert.equal(commands.length, beforeReload, "refresh does not replay commands");
   await page.getByRole("button", { name: "选择工作目录", exact: true }).click();
-  assert.equal(preparing, 0, "opening directory selection only reads");
+  assert.equal(preparing, 1, "opening directory selection only reads");
+  await page.getByRole("button", { name: "项目二", exact: true }).click();
   await page.getByRole("button", { name: "选择此目录", exact: true }).click();
   await page.waitForURL((url) => url.searchParams.get("threadId") !== first);
   await page.waitForFunction(() => document.querySelector('[aria-label="消息输入框"]'));
-  assert.equal(preparing, 1);
+  assert.equal(preparing, 1, "switching workspace does not prepare its environment");
+  assert.equal(await page.locator('details[aria-label="当前项目"]').count(), 0);
   assert.equal(conversations.get(first).work.status, "paused");
   await page.getByRole("button", { name: "预览", exact: true }).click();
   await page

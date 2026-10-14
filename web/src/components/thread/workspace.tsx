@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ChevronRight, Folder, FolderOpen, LoaderCircle } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { ProjectExecution } from "./project-execution";
 import { requestJson } from "@/lib/conversation-api";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
@@ -40,6 +39,7 @@ export function Workspace({
   onSelect,
   hasWork = false,
   working = false,
+  previousProject = "",
 }: {
   apiUrl: string;
   repo: string;
@@ -49,6 +49,7 @@ export function Workspace({
   onSelect?: (repo: string) => Promise<void>;
   hasWork?: boolean;
   working?: boolean;
+  previousProject?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [page, setPage] = useState<DirectoryPage>();
@@ -96,12 +97,12 @@ export function Workspace({
       }
       if (onSelect) {
         await onSelect(page.path);
-        if (repo && repo !== page.path && !retainPrevious) {
+        if (previousProject && repo !== page.path && !retainPrevious) {
           try {
             await requestJson(`${apiUrl}/resources/project`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ repo, retain: false }),
+              body: JSON.stringify({ repo: previousProject, retain: false }),
             });
           } catch {
             toast.error("目录已切换，旧环境暂未清理；可在空间与环境中检查。");
@@ -170,7 +171,7 @@ export function Workspace({
             <DialogDescription className="text-muted-foreground text-sm">
               {readOnly
                 ? "仅授权查询资料，不授权运行或修改。发送下一条消息时登记至本对话。"
-                : "打开文件夹后确认选择，程序会自动检查并复用或准备项目环境。普通聊天无需选择。"}
+                : "这里选择允许工作的目录范围。助手会先说明具体项目位置，确认开工后才准备环境；新项目默认放在其中的独立子目录。普通聊天无需选择。"}
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-2">
@@ -242,12 +243,6 @@ export function Workspace({
               </p>
             )}
           </div>
-          {!readOnly && page?.path && (
-            <ProjectExecution
-              apiUrl={apiUrl}
-              repo={page.path}
-            />
-          )}
           {!readOnly && hasWork && page?.path && page.path !== repo && (
             <p
               className="rounded-lg border p-3 text-sm"
@@ -259,7 +254,7 @@ export function Workspace({
               旧环境暂时保留，可在“空间与环境”中清理闲置环境。
             </p>
           )}
-          {!readOnly && repo && page?.path && page.path !== repo && (
+          {!readOnly && previousProject && page?.path && page.path !== repo && (
             <label className="flex items-center justify-between gap-3 text-sm">
               之前的项目环境
               <select

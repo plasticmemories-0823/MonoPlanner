@@ -7,8 +7,11 @@ from pathlib import Path
 from agent.source.snapshots import _walk, _reason, _safe_file, _inspect_file
 
 
-def package_roots(repo):
+def package_roots(repo, project_scope=None):
+    from agent.source.scope import project_scope as resolve_scope
+
     root = Path(repo).resolve()
+    scope = resolve_scope(root, project_scope)
     return sorted(
         p.parent.relative_to(root).as_posix()
         for base in (root, root / "src")
@@ -16,18 +19,22 @@ def package_roots(repo):
         for p in base.glob("*/__init__.py")
         if p.parent.name not in {"tests", "test", "docs", "examples", "build", "setup"}
         and not _reason(p.relative_to(root))
+        and not scope.excludes(p.relative_to(root))
     )
 
 
-def runtime_inventory(repo):
+def runtime_inventory(repo, project_scope=None):
     """保留包内的 Python 和原生模块，排除缓存、构建产物及秘密资料。
 
     工作进程启动前冻结准确路径和哈希。该清单是执行环境输入，
     不是仓库文字提供的答案或授权。
     """
+    from agent.source.scope import project_scope as resolve_scope
+
     root, files = Path(repo).resolve(), {}
-    packages = package_roots(root)
-    for relative, skip in _walk(root):
+    scope = resolve_scope(root, project_scope)
+    packages = package_roots(root, scope)
+    for relative, skip in _walk(root, project_scope=scope):
         if (
             skip
             or _reason(relative)

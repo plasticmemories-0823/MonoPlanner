@@ -122,9 +122,11 @@ class OfflineChat:
             return response('已完成查询：' + last.content[:400])
         text = str(last.content)
         if text == '帮我画鹈鹕骑自行车':
-            return response('我会制作一个能直接打开的动画网页。是否按这个计划开始？')
+            return response('我会在所选目录下新建 pelican-bike，制作能直接打开的动画网页。是否按这个计划开始？')
         if text == '按这个计划开始' or '开始工作' in text or '准备失败工作' in text:
-            return response('已保存任务，将在独立工作流程中执行。', 'start_work')
+            return response('已保存任务，将在独立工作流程中执行。', 'start_work',
+                            {'project_path': 'pelican-bike', 'create': True}
+                            if text == '按这个计划开始' else {'project_path': '.', 'create': False})
         if '查询进度' in text:
             return response('', 'get_work_status')
         if '联网' in text:
@@ -173,7 +175,13 @@ def work(job, emit, controls):
     from agent.storage.history import LocalHistory
     from agent.storage.live_reasoning import LiveReasoning
 
+    from agent.application.project_location import ensure_location
+
+    task_root = state_root() / 'tasks' / job['task_id']
+    task_root.mkdir(parents=True, exist_ok=True)
+    ensure_location(job['project_location'], task_root)
     native_action({'kind': 'work_started', 'task': job['task_id']})
+    native_action({'kind': 'prepare', 'repo': job['repo']})
     if '准备失败工作' in job['request']:
         return {'status': 'preparation_failed', 'applied_inputs': [],
                 'stop_reason': '开工准备失败：离线模拟磁盘空间不足'}
@@ -259,8 +267,7 @@ def fail_when_requested(method):
 for _name in ('work_state', 'submit', 'record_event', 'command_state', 'chat_state', 'publish'):
     setattr(store, _name, fail_when_requested(getattr(store, _name)))
 service = Scheduler(store, model_factory=lambda settings: OfflineChat(), title_factory=OfflineTitle,
-                    work_factory=work, pause_callback=pause, supplement_callback=lambda *args: None,
-                    prepare_callback=lambda repo: {'status': 'ready', 'repo': repo})
+                    work_factory=work, pause_callback=pause, supplement_callback=lambda *args: None)
 real_tool = service.chatbot._invoke_tool
 
 

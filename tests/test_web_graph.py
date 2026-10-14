@@ -19,11 +19,17 @@ from agent.execution.process import run_process
 class FixtureDocker(LocalEnvironment):
     """离线图测试环境；真实 Docker 和隔离能力另行验证。"""
 
-    def __init__(self, repo, image, task_root, *, runtime=None, read_sources=()):
+    def __init__(
+        self, repo, image, task_root, *, runtime=None, read_sources=(), project_scope=None,
+    ):
         super().__init__(
             repo, artifact_root=Path(task_root).parent.parent / 'execution' / Path(task_root).name
         )
         self.image, self.runtime, self._container_id = image, runtime, 'f' * 64
+        if project_scope is not None:
+            from agent.source.scope import project_scope as resolve_scope
+
+            self.project_scope = resolve_scope(self.repo_root, project_scope)
 
     def start(self):
         return self

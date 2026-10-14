@@ -221,18 +221,22 @@ def test_environment_recipe_does_not_read_implementation_source(monkeypatch):
     assert _recipe() == {'environment_protocol': 3, 'installer': 1, 'download_isolation': 1}
 
 
-def test_non_git_parent_rejects_multiple_projects_before_copying(tmp_path):
-    from agent.source.snapshots import SourceSnapshot, SnapshotError
+def test_non_git_parent_excludes_multiple_independent_projects_before_copying(tmp_path):
+    from agent.source.snapshots import SourceSnapshot
 
     repo = tmp_path / 'parent'
     for name in ('project-a', 'project-b'):
         folder = repo / name
         (folder / '.git').mkdir(parents=True)
         (folder / 'source.py').write_text('print(1)')
+    (repo / 'drawing.svg').write_text('<svg/>')
     destination = tmp_path / 'snapshot'
-    with pytest.raises(SnapshotError, match='多个独立 Git 项目'):
-        SourceSnapshot.capture(repo, destination)
-    assert not list((destination / 'source').iterdir())
+    snapshot = SourceSnapshot.capture(repo, destination)
+    assert set(snapshot.files) == {'drawing.svg'}
+    assert {row['path'] for row in json.loads(snapshot.manifest_path.read_text())['excluded']
+            if row['reason'] == 'independent_project'} == {'project-a', 'project-b'}
+    assert all((repo / name / 'source.py').read_text() == 'print(1)'
+               for name in ('project-a', 'project-b'))
 
 
 def test_non_git_source_excludes_generated_record_signatures_not_generic_names(tmp_path):

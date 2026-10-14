@@ -40,7 +40,8 @@ def job_fixture(tmp_path, monkeypatch):
                 else {'state': 'needs_preparation', 'stage': 'checking'}
             )
 
-        def prepare(self, repo, *, progress, cancelled):
+        def prepare(self, repo, *, progress, cancelled, project_scope):
+            project_scope.validate()
             calls.append(repo)
             entered.set()
             progress({'stage': 'installing', 'message': '正在安装项目依赖'})
@@ -527,3 +528,38 @@ def test_unknown_environment_verification_is_not_reported_as_ready(job_fixture):
     assert value['status'] == 'failed' and value['verification']['state'] == 'unknown'
     assert value['environment'] == fixture.binding
     assert not fixture.calls
+
+
+def test_shared_preparation_rejects_a_different_frozen_scope(job_fixture):
+    from agent.source.scope import ProjectScope, ProjectScopeError
+
+    fixture = job_fixture
+    repo = fixture.repos[0]
+    scope = ProjectScope.discover(repo)
+    first = fixture.jobs.start(repo, project_scope=scope)
+    assert fixture.entered.wait(2)
+    assert fixture.jobs.catalog.environment_job(job_id=first['id'])['project_scope'] == scope.to_record()
+    assert fixture.jobs.start(repo, project_scope=scope)['id'] == first['id']
+    other = repo / 'other'
+    other.mkdir()
+    (other / '.git').write_text('gitdir: elsewhere')
+    different = ProjectScope.discover(repo)
+    with pytest.raises(ProjectScopeError, match='不同项目范围'):
+        fixture.jobs.start(repo, project_scope=different)
+    assert fixture.calls == [str(repo)]
+    assert fixture.jobs.catalog.environment_job(job_id=first['id'])['project_scope'] == scope.to_record()
+
+
+def test_scope_diagnostic_survives_environment_job_failure(job_fixture):
+    from agent.source.scope import ProjectScopeError
+
+    fixture = job_fixture
+    fixture.behavior.update(block=False, error=ProjectScopeError('引用指向已排除的独立项目：other'))
+    fixture.jobs.start(fixture.repos[0])
+    settled(fixture.jobs)
+    failed = fixture.jobs.status(fixture.repos[0])
+    assert failed['status'] == 'failed'
+    assert failed['error'] == '引用指向已排除的独立项目：other'
+    with pytest.raises(EnvironmentRequired, match='已排除'):
+        fixture.jobs.wait(fixture.repos[0])
+    assert len(fixture.calls) == 1

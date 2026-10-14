@@ -163,6 +163,9 @@ try {
   }
   await chooseProject(project);
   await until(async () => (await api(`/conversations/${first}/snapshot`)).repo === project);
+  assert.equal(await page.getByRole("region", { name: "项目执行环境" }).count(), 0);
+  assert.ok(report.requests.every((request) => !request.path.endsWith("/workspace/environment")));
+  report.checks.push("workspace selection does not inspect or prepare the parent environment");
   await page.getByRole("button", { name: "工具与设置", exact: true }).click();
   await page.getByRole("button", { name: "额外可读资料", exact: true }).click();
   await page.getByRole("button", { name: "选择文件", exact: true }).click();
@@ -262,6 +265,18 @@ try {
     const value = await api(`/conversations/${first}/snapshot`);
     return value.work && ["running", "executing"].includes(value.work.status) && value;
   });
+  assert.equal(started.repo, project, "selected workspace remains the authorized parent");
+  assert.equal(started.work.repo, path.join(project, "pelican-bike"));
+  assert.equal(await fs.stat(started.work.repo).then((value) => value.isDirectory()), true);
+  const startActions = (await fs.readFile(path.join(state, "fixture-native-actions.jsonl"), "utf8"))
+    .trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(proposedActions.filter((action) => action.kind === "prepare").length, 0);
+  assert.deepEqual(startActions.filter((action) => action.kind === "prepare").map((action) => action.repo),
+    [started.work.repo]);
+  await page
+    .locator('details[aria-label="当前项目"]')
+    .getByText(started.work.repo, { exact: true })
+    .waitFor();
   const diagnosticReadsBefore = report.requests.filter((request) =>
     request.path.endsWith("/diagnostics"),
   ).length;

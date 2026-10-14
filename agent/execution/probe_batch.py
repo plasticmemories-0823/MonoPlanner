@@ -39,6 +39,7 @@ class ProbeBatch:
                 self.folder / 'source',
                 excluded_roots=(self.environment.artifact_root,),
                 runtime_files=getattr(self.environment, 'runtime_files', ()),
+                project_scope=getattr(self.environment, 'project_scope', None),
             )
         )
         self.runtime = self.folder / 'runtime'

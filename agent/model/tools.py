@@ -102,7 +102,7 @@ def search_files(**kwargs) -> dict:
 
 @tool(args_schema=ASSISTANT_SCHEMA['run_existing'])
 def run_existing(**kwargs) -> dict:
-    """Run an existing WORKSPACE script, module:local.module or package.json#script using argv.
+    """Run an existing CURRENT PROJECT script, module:local.module or package.json#script using argv.
     The program prepares declared project dependencies before first execution.
     No inline code, generated scripts, apps or arbitrary installer commands. Supply timeout seconds;
     usage_file='' unless the task writes an explicit usage JSON. Failure requires user-requested repair.
@@ -145,14 +145,21 @@ def request_file_operation(**kwargs) -> dict:
     return kwargs
 
 
-@tool(
-    args_schema={'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}
-)
-def start_work() -> dict:
-    """Enter coding after explicit user authorization. The host prepares original requirements
-    and repository materials before requesting any code or plan. Supply no arguments.
+@tool(args_schema={
+    'type': 'object', 'properties': {
+        'project_path': {'type': 'string', 'description':
+            'Confirmed path relative to the selected workspace. New projects normally use a new child folder; use . only when the user explicitly chooses the workspace root.'},
+        'create': {'type': 'boolean', 'description':
+            'True creates a new, not-yet-existing project folder after authorization; false uses an existing confirmed folder. Never overwrite a name collision.'},
+    },
+    'required': ['project_path', 'create'], 'additionalProperties': False,
+})
+def start_work(project_path: str, create: bool) -> dict:
+    """Start authorized coding at the confirmed project location. Discuss the plan and location
+    before calling. For an active task supplement, repeat its project_path with create=false.
+    The host creates a new folder if requested, then prepares and binds that project only.
     """
-    return {}
+    return {'project_path': project_path, 'create': create}
 
 
 # ========================================================================

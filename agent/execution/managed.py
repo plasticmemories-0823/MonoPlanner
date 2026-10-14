@@ -29,10 +29,12 @@ from agent.execution.managed_plan import (
     PreparationError,
     REVISION,
     inspect_project,
+    project_root,
     _digest,
     _link,
 )
 from agent.storage.preferences import atomic_write, state_root
+from agent.source.scope import project_scope as resolve_scope
 
 MAX_LOG = 16 * 1024 * 1024
 SETUP_TIMEOUT = 1800
@@ -946,14 +948,15 @@ LABEL org.monoplanner.managed-base="{key}"
     # ============================================================
     # 环境准备的主流程
     # ============================================================
-    def prepare(self, repo, progress=None, cancelled=None):
-        plan = inspect_project(repo)
-        record = self._record(plan.root)
+    def prepare(self, repo, progress=None, cancelled=None, *, project_scope=None):
+        scope = resolve_scope(project_root(repo), project_scope)
+        record = self._record(scope.root)
         project_key = record.stem
         with _lock(self.root / 'locks' / (project_key + '.lock'), cancelled):
             _check_cancel(cancelled)
-            # 其他等待者可能在获取锁前读到了旧记录。
-            plan = inspect_project(repo)
+            # 等待锁期间目录范围可能变化；安装只使用作业已经冻结的范围。
+            scope.validate(full_check=True)
+            plan = inspect_project(repo, project_scope=scope)
             work = self.root / 'attempts' / (time.strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex)
             work.mkdir(parents=True)
 
@@ -1014,7 +1017,8 @@ LABEL org.monoplanner.managed-base="{key}"
                     if plan.projects
                     else self._empty_environment(plan, base, work, emit, cancelled)
                 )
-                if inspect_project(repo).fingerprint != plan.fingerprint:
+                scope.validate(full_check=True)
+                if inspect_project(repo, project_scope=scope).fingerprint != plan.fingerprint:
                     raise PreparationError(
                         '依赖配置在安装过程中变化。已保留旧环境；请保存配置后重新准备。'
                     )

@@ -145,6 +145,7 @@ def final_acceptance(self):
         self.environment.repo_root,
         folder / "candidate",
         runtime_files=getattr(self.environment, "runtime_files", ()),
+        project_scope=getattr(self.environment, "project_scope", None),
     )
     if self.optimize_source and snapshot.files != dict(self.evidence.view().files):
         raise ModelRequestNotSent('state_conflict', 'Source changed while capturing the candidate.')

@@ -40,11 +40,7 @@ function fixture(t, fetcher, timeout = 10000) {
 
 test("browser fetch is called without a custom receiver", async (t) => {
   const { monitor, states, errors } = fixture(t, async function () {
-    assert.equal(
-      this,
-      undefined,
-      "native browser fetch rejects a monitor receiver",
-    );
+    assert.equal(this, undefined, "native browser fetch rejects a monitor receiver");
     return response(status("idle"));
   });
   await monitor.refresh();
@@ -67,6 +63,27 @@ test("opening an idle project only reads status and never installs or enumerates
     "C:\\user project",
   );
   assert.equal(states[0].status, "idle");
+});
+
+test("failed project retry stays bound to the actual project, not its authorized parent", async (t) => {
+  const calls = [];
+  const actualProject = "E:\\workspace\\pelican";
+  const monitor = new ProjectEnvironmentMonitor(
+    "/api",
+    actualProject,
+    { status() {}, error() {}, busy() {} },
+    async (url, options) => {
+      calls.push({ url, options });
+      return response(status(options.method === "POST" ? "ready" : "failed"));
+    },
+  );
+  t.after(() => monitor.dispose());
+  await monitor.refresh(true);
+  assert.equal(calls.length, 1);
+  assert.equal(new URL(calls[0].url, "http://localhost").searchParams.get("repo"), actualProject);
+  await monitor.change("prepare");
+  assert.deepEqual(JSON.parse(calls[1].options.body), { repo: actualProject, action: "prepare" });
+  assert.equal(calls.filter((call) => call.options.method === "POST").length, 1);
 });
 
 test("preparation polling stays serial and stops when ready", async (t) => {
@@ -136,9 +153,7 @@ test("switching folders or closing dialog aborts requests and cannot apply late 
 test("failed saves preserve the current environment and do not retry the mutation", async (t) => {
   let calls = 0;
   const { monitor, states, errors, busy } = fixture(t, async () => {
-    return ++calls === 1
-      ? response(status("ready"))
-      : response({ error: "保存失败" }, 409);
+    return ++calls === 1 ? response(status("ready")) : response({ error: "保存失败" }, 409);
   });
   await monitor.refresh();
   await monitor.saveManual("sha256:example", {
@@ -213,12 +228,18 @@ test("explicit verification checks resources once while polling remains a plain 
 
 test("timed out preparation releases busy state and never resends the operation", async (t) => {
   const calls = [];
-  const { monitor, errors, busy } = fixture(t, async (_url, options) => {
-    calls.push(options);
-    return new Promise((resolve, reject) => {
-      options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-    });
-  }, 15);
+  const { monitor, errors, busy } = fixture(
+    t,
+    async (_url, options) => {
+      calls.push(options);
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(new Error("aborted")), {
+          once: true,
+        });
+      });
+    },
+    15,
+  );
   await monitor.change("prepare");
   await pause();
   assert.equal(calls.length, 1);

@@ -354,7 +354,8 @@ class ApplicationStore:
                 'SELECT id FROM app_work WHERE conversation=?', (conversation,))]
 
     def create_work(self, conversation, command_id, *, kind='coding', arguments=None,
-                    work_options=None):
+                    work_options=None, project_path='.', create=False):
+        from agent.application.project_location import resolve_location
         from agent.execution.projects import workspace_binding
         from agent.storage.read_sources import ReadSources
 
@@ -366,6 +367,10 @@ class ApplicationStore:
             value = self._get(db, conversation, writable=True)
             current = self._work(db, value['work_id'])
             if current and current.get('input_id') == command_id:
+                if (current['project_path'] != str(project_path).replace('\\', '/')
+                        or current['project_location']['create'] != create
+                        or current['kind'] != kind or current['arguments'] != arguments):
+                    raise Conflict('同一开工消息已经绑定项目，不能改为另一个位置。')
                 return current
             if current and current['status'] not in TERMINAL:
                 raise Conflict('A work task already exists; send an explicit supplement')
@@ -381,12 +386,16 @@ class ApplicationStore:
             public = [{'type': row['type'], 'data': {'content': row['content'], 'id': row['id'],
                        'additional_kwargs': {}, 'response_metadata': {}, 'type': row['type']}}
                       for row in history if row['source'] in {'user', 'chat'} and row['id'] != command_id]
+            location = resolve_location(value['repo'], project_path, create)
             task = uuid.uuid4().hex
             work = {'task_id': task, 'conversation_id': conversation, 'input_id': command_id,
-                    'repo': value['repo'], 'request': request, 'public_conversation': public,
+                    'repo': location['repo'], 'project_path': location['path'],
+                    'project_location': location,
+                    'request': request, 'public_conversation': public,
                     'settings': value['runtime_settings'], 'kind': kind, 'arguments': arguments,
                     'state_root': str(self.root), 'read_sources': sources,
-                    'execution_binding': workspace_binding(value['repo'], root=self.root),
+                    'execution_binding': ({'backend': 'docker'} if create else
+                                          workspace_binding(location['repo'], root=self.root)),
                     'status': 'queued', 'reason': '', 'created_at': timestamp(),
                     'updated_at': timestamp(), 'revision': 1, 'usage': {}}
             options = work_options or {}
@@ -723,7 +732,8 @@ class ApplicationStore:
                 activities[item['id']] = {**old, **item}
         usage = self.usage(conversation)
         public_work = ({key: work.get(key) for key in
-                       ('task_id', 'input_id', 'status', 'reason', 'revision', 'created_at', 'updated_at')}
+                       ('task_id', 'input_id', 'repo', 'project_path', 'status', 'reason', 'revision',
+                        'created_at', 'updated_at')}
                        if work else None)
         return {**value, 'work': public_work, 'messages': messages, 'pending_messages': [],
                 'workspace_bound': bool(work), 'usage': usage, 'event_cursor': cursor,

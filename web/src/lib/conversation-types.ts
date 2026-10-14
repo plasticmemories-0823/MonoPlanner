@@ -63,6 +63,7 @@ export type ConversationSnapshot = {
   work: {
     task_id: string;
     input_id?: string;
+    repo?: string;
     status: string;
     reason?: string;
     revision?: number;

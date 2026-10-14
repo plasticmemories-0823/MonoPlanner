@@ -23,6 +23,7 @@ import { ResizableHistory } from "./history/resizable";
 import { toast } from "sonner";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Workspace, useWorkspace } from "./workspace";
+import { CurrentProject } from "./project-execution";
 import { useRunControls, statusLabel } from "./run-controls";
 import { ActivityRows, useActivity } from "./activity";
 import { ReadSources } from "./read-sources";
@@ -373,6 +374,14 @@ export function Thread() {
                       "border border-solid",
                     )}
                   >
+                    {stream.values.work?.repo && (
+                      <CurrentProject
+                        key={stream.values.work.task_id}
+                        apiUrl={stream.apiUrl}
+                        repo={stream.values.work.repo}
+                        readOnly={stream.values.read_only || Boolean(stream.storageError)}
+                      />
+                    )}
                     <form
                       onSubmit={handleSubmit}
                       className="mx-auto grid max-w-3xl grid-rows-[1fr_auto] gap-2"
@@ -416,6 +425,7 @@ export function Thread() {
                             onSelect={stream.selectWorkspace}
                             hasWork={Boolean(stream.values.work)}
                             working={stream.workRunning}
+                            previousProject={stream.values.work?.repo}
                           />
                           <ModelSettings
                             apiUrl={stream.apiUrl}

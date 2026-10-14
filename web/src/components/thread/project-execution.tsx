@@ -9,13 +9,40 @@ import { ProjectEnvironmentMonitor, type ProjectEnvironment } from "@/lib/projec
 type Image = { id: string; names: string[]; size: string };
 const defaultRuntime = { python: "/usr/local/bin/python", conda_env: "" };
 
-export function ProjectExecution({ apiUrl, repo }: { apiUrl: string; repo: string }) {
+export function CurrentProject({
+  apiUrl,
+  repo,
+  readOnly = false,
+}: {
+  apiUrl: string;
+  repo: string;
+  readOnly?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
   return (
-    <ProjectEnvironmentCard
-      key={`${apiUrl}\0${repo}`}
-      apiUrl={apiUrl}
-      repo={repo}
-    />
+    <details
+      className="border-border/60 border-b px-4 py-2 text-xs"
+      onToggle={(event) => {
+        if (event.target === event.currentTarget) setOpen(event.currentTarget.open);
+      }}
+      aria-label="当前项目"
+    >
+      <summary className="text-muted-foreground cursor-pointer break-all">
+        当前项目：<span title={repo}>{repo}</span>
+      </summary>
+      {open &&
+        (readOnly ? (
+          <p className="text-muted-foreground pt-2">当前仅显示记录，不能调整项目环境。</p>
+        ) : (
+          <div className="mt-2 max-h-80 overflow-y-auto">
+            <ProjectEnvironmentCard
+              key={`${apiUrl}\0${repo}`}
+              apiUrl={apiUrl}
+              repo={repo}
+            />
+          </div>
+        ))}
+    </details>
   );
 }
 
@@ -117,7 +144,7 @@ function ProjectEnvironmentCard({ apiUrl, repo }: { apiUrl: string; repo: string
       </div>
       <p className="text-muted-foreground mt-2 text-xs leading-5">
         {status?.message ||
-          "确认选择目录后自动检查项目，复用已有环境或下载所需工具并安装依赖。浏览目录不会开始安装。"}
+          "这是本次工作确认的项目目录。开工时检查并复用环境；准备失败后可在这里明确重试。"}
       </p>
       {status?.projects && (
         <p className="text-muted-foreground mt-2 text-xs">
@@ -179,7 +206,7 @@ function ProjectEnvironmentCard({ apiUrl, repo }: { apiUrl: string; repo: string
                   ? "重新准备"
                   : ready
                     ? "检查并复用环境"
-                    : "提前准备"}
+                    : "准备本项目环境"}
             </Button>
           ) : (
             <Button

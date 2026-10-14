@@ -275,6 +275,7 @@ class DockerEnvironment:
         runtime=None,
         material_mounts=None,
         managed=None,
+        project_scope=None,
     ):
         self.repo_root = Path(repo_root).expanduser().resolve()
         if not self.repo_root.exists():
@@ -293,7 +294,16 @@ class DockerEnvironment:
         self.runtime = runtime_profile(runtime)
         self.python_executable = self.runtime['python']
         self.material_mounts = dict(material_mounts or {})
+        from agent.source.scope import project_scope as resolve_scope
+
+        self.project_scope = resolve_scope(self.repo_root, project_scope)
+        self.project_masks = {}
+        self.project_mask_identity = None
+        self._project_mask_registered = False
+        self.project_paths = self._project_path_identities()
         self.dependencies = managed_dependencies(image, managed)
+        for item in self.dependencies:
+            self.project_scope.require(item['relative'] + '/node_modules')
         self.dependency_mounts = {item['target']: item['volume'] for item in self.dependencies}
         self.dependency_caches = {
             target + '/' + name: DEPENDENCY_CACHE_OPTIONS
@@ -363,6 +373,7 @@ class DockerEnvironment:
         )
 
     def clone_options(self):
+        # 调查/验收副本已按源码清单排除其他项目，不携带原目录绑定或遮罩。
         options = {'runtime': self.runtime, 'material_mounts': self.material_mounts}
         if self.dependencies:
             options['managed'] = {
@@ -371,6 +382,55 @@ class DockerEnvironment:
                 ]
             }
         return options
+
+    def _project_path_identities(self):
+        result = {}
+        for relative in ('.', *self.project_scope.excluded_projects):
+            info = (self.repo_root / relative).stat()
+            result[relative] = {'device': info.st_dev, 'inode': info.st_ino}
+        return result
+
+    def _prepare_project_masks(self, *, allow_create=True, full_check=False):
+        """排除项目在容器中只留下空只读目录，遮罩原件不通过其他挂载暴露。"""
+        self.project_scope.validate(full_check=full_check)
+        if self.project_paths != self._project_path_identities():
+            raise ValueError('项目目录身份已变化，不能继续沿用执行范围。')
+        if not self.project_scope.excluded_projects:
+            return
+        from agent.source.snapshots import _link
+
+        mask = self.artifact_root.with_name(self.artifact_root.name + '-project-mask')
+        exposed = [self.repo_root, self.artifact_root, *map(Path, self.material_mounts.values())]
+        if any(mask.is_relative_to(path.resolve()) for path in exposed):
+            raise ValueError('项目遮罩不能位于容器可访问的原始目录中。')
+        for path in (mask, *mask.parents):
+            if (path.exists() or path.is_symlink()) and _link(path):
+                raise ValueError('项目遮罩目录不能包含链接。')
+        if not mask.exists():
+            if not allow_create:
+                raise ValueError('已绑定的项目遮罩丢失，不会自动替换。')
+            mask.mkdir()
+        if not mask.is_dir() or next(mask.iterdir(), None) is not None:
+            raise ValueError('项目遮罩必须是空目录。')
+        info = mask.stat()
+        identity = {'path': str(mask), 'device': info.st_dev, 'inode': info.st_ino}
+        if self.project_mask_identity is not None and self.project_mask_identity != identity:
+            raise ValueError('项目遮罩身份已变化，不能继续。')
+        self.project_mask_identity = identity
+        self.project_masks = {
+            '/testbed/' + name: str(mask) for name in self.project_scope.excluded_projects
+        }
+        if any(',' in target for target in self.project_masks):
+            raise ValueError('Docker 项目排除路径暂不支持逗号。')
+        if self.resource_owner and not self._project_mask_registered:
+            from agent.storage.resources import resource_catalog
+
+            resource_catalog(self.resource_root).register(
+                'project-mask:' + self.container_name, 'temporary', mask,
+                owner=self.resource_owner, size_bytes=0,
+                metadata={'container': self.container_name},
+            )
+            self._project_mask_registered = True
 
     @staticmethod
     def _process_options():
@@ -596,6 +656,9 @@ class DockerEnvironment:
     # ============================================================
     def start(self):
         self._check_cancelled()
+        self._prepare_project_masks(
+            allow_create=self._container_id is None, full_check=self._container_id is None,
+        )
         if self._closed:
             raise RuntimeError("此环境已关闭，请为新任务创建新环境。")
         if self._container_id is not None:
@@ -661,6 +724,10 @@ class DockerEnvironment:
             ]
         for target, options in self.dependency_caches.items():
             arguments[1:1] = ['--tmpfs', target + ':' + options]
+        for target, source in self.project_masks.items():
+            arguments[1:1] = [
+                '--mount', f'type=bind,source={source},target={target},readonly',
+            ]
         result = self._docker(
             arguments, capture_output=True, text=True, encoding="utf-8", errors="replace"
         )
@@ -701,6 +768,10 @@ class DockerEnvironment:
 
     def host_to_container(self, path):
         resolved = Path(path).expanduser().resolve()
+        if resolved.is_relative_to(self.repo_root):
+            relative = resolved.relative_to(self.repo_root)
+            if relative != Path('.'):
+                self.project_scope.require(relative.as_posix())
         for index, source in enumerate(self.material_mounts):
             root = Path(source)
             if resolved == root:

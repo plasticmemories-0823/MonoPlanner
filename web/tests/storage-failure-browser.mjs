@@ -120,33 +120,34 @@ try {
   let environmentState = "ready";
   const environmentRoute = async (route) => {
     const request = route.request();
-    environmentRequests.push({ method: request.method(), url: request.url() });
+    environmentRequests.push({
+      method: request.method(),
+      url: request.url(),
+      body: request.method() === "POST" ? request.postDataJSON() : null,
+    });
     if (request.method() === "POST") {
       environmentState = "failed";
-      return route.fulfill({ status: 503, contentType: "application/json",
-        body: JSON.stringify({ error: "离线模拟：暂时无法核验资源状态" }) });
+      return route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "离线模拟：暂时无法核验资源状态" }),
+      });
     }
-    return route.fulfill({ contentType: "application/json", body: JSON.stringify({
-      mode: "auto", status: environmentState, stage: environmentState,
-      message: environmentState === "ready" ? "项目环境已就绪" : "镜像已不存在，请明确重新准备",
-    }) });
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        mode: "auto",
+        status: environmentState,
+        stage: environmentState,
+        message: environmentState === "ready" ? "项目环境已就绪" : "镜像已不存在，请明确重新准备",
+      }),
+    });
   };
   await page.route("**/api/workspace/environment*", environmentRoute);
   await page.getByRole("button", { name: "选择工作目录", exact: true }).click();
   await page.getByRole("textbox", { name: "目录路径" }).fill(project);
   await page.getByRole("button", { name: "打开", exact: true }).click();
-  const environmentCard = page.getByRole("region", { name: "项目执行环境" });
-  await environmentCard.getByRole("button", { name: "检查并复用环境" }).click();
-  await environmentCard.getByText("环境状态待核对", { exact: true }).waitFor();
-  const beforeReconnect = environmentRequests.filter((item) => item.method === "POST").length;
-  await environmentCard.getByRole("button", { name: "重新连接", exact: true }).click();
-  await environmentCard.getByText("镜像已不存在，请明确重新准备", { exact: true }).waitFor();
-  assert.equal(environmentRequests.filter((item) => item.method === "POST").length, beforeReconnect);
-  assert.equal(new URL(environmentRequests.at(-1).url).searchParams.get("verify"), "1");
-  assert.equal(await environmentCard.getByText("项目环境已就绪", { exact: true }).count(), 0);
-  await page.screenshot({ path: path.join(output, "resource-state-reconnected.png"), fullPage: true });
-  report.checks.push("resource failure removes stale ready display; reconnect verifies without reinstall or resend");
-  await page.unroute("**/api/workspace/environment*", environmentRoute);
+  assert.equal(environmentRequests.length, 0, "browsing only selects an authorized workspace");
   await page.getByRole("button", { name: "选择此目录", exact: true }).click();
   await page.getByRole("button", { name: "关闭目录选择" }).waitFor({ state: "hidden" });
   const send = async (text) => {
@@ -159,6 +160,38 @@ try {
   await send("准备失败工作");
   await page.getByText("开工准备失败", { exact: true }).waitFor();
   await page.getByText("开工准备失败：离线模拟磁盘空间不足", { exact: false }).first().waitFor();
+  const failedThread = new URL(page.url()).searchParams.get("threadId");
+  const actualProject = (await api(`/conversations/${failedThread}/snapshot`)).work.repo;
+  const currentProject = page.locator('details[aria-label="当前项目"]');
+  await currentProject.getByText(actualProject, { exact: true }).waitFor();
+  await currentProject.locator(":scope > summary").click();
+  const environmentCard = page.getByRole("region", { name: "项目执行环境" });
+  await environmentCard.getByRole("button", { name: "检查并复用环境" }).click();
+  await environmentCard.getByText("环境状态待核对", { exact: true }).waitFor();
+  const beforeReconnect = environmentRequests.filter((item) => item.method === "POST").length;
+  await environmentCard.getByRole("button", { name: "重新连接", exact: true }).click();
+  await environmentCard.getByText("镜像已不存在，请明确重新准备", { exact: true }).waitFor();
+  assert.equal(
+    environmentRequests.filter((item) => item.method === "POST").length,
+    beforeReconnect,
+  );
+  assert.equal(new URL(environmentRequests.at(-1).url).searchParams.get("verify"), "1");
+  assert.equal(await environmentCard.getByText("项目环境已就绪", { exact: true }).count(), 0);
+  await page.screenshot({
+    path: path.join(output, "resource-state-reconnected.png"),
+    fullPage: true,
+  });
+  report.checks.push(
+    "resource failure removes stale ready display; reconnect verifies without reinstall or resend",
+  );
+  await page.unroute("**/api/workspace/environment*", environmentRoute);
+  assert.ok(
+    environmentRequests.every(
+      (item) => (item.body?.repo || new URL(item.url).searchParams.get("repo")) === actualProject,
+    ),
+  );
+  await currentProject.locator(":scope > summary").click();
+
   assert.equal(await page.getByRole("button", { name: "暂停", exact: true }).count(), 0);
   await send("你好");
   await page.getByText("已收到：你好。这次聊天不改变后台工作。", { exact: true }).waitFor();
@@ -178,7 +211,10 @@ try {
   report.thread_id = thread;
   await fs.writeFile(path.join(state, "fixture-storage-failure"), "inject write failure only\n");
   await page.getByRole("alert").filter({ hasText: "本地记录写入失败" }).first().waitFor();
-  assert.equal(await page.locator('[role="status"]').filter({ hasText: "聊天不会打断任务" }).count(), 0);
+  assert.equal(
+    await page.locator('[role="status"]').filter({ hasText: "聊天不会打断任务" }).count(),
+    0,
+  );
   await page.getByRole("textbox", { name: "消息输入框" }).fill("不能继续派发");
   assert.equal(await page.getByRole("button", { name: "发送", exact: true }).isDisabled(), true);
   assert.equal(await page.getByRole("button", { name: "继续任务", exact: true }).count(), 0);

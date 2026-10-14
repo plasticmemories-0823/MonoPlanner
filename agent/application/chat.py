@@ -164,7 +164,7 @@ class Chatbot:
             'events': [], 'cursor': after, 'truncated': False}
         return {
             'task': None if task is None else {key: task.get(key) for key in
-                ('task_id', 'status', 'reason', 'revision', 'request', 'updated_at')},
+                ('task_id', 'repo', 'project_path', 'status', 'reason', 'revision', 'request', 'updated_at')},
             **page,
         }
 
@@ -351,7 +351,10 @@ class Chatbot:
                 elif name == 'get_read_sources':
                     if args:
                         raise ValueError('get_read_sources accepts no arguments')
-                    result = {'workspace': self.store.get(conversation)['repo'],
+                    conversation_value = self.store.get(conversation)
+                    work = self.store.work(conversation_value['work_id'])
+                    result = {'workspace': conversation_value['repo'],
+                              'current_project': work['repo'] if work else None,
                               'sources': ReadSources(self.store.root).get(conversation)}
                 elif name == 'read_work_record':
                     from agent.application.records import read_work_record as read_record
@@ -364,10 +367,13 @@ class Chatbot:
                         raise ValueError('Expected after>=0 and limit 1..50')
                     result = self.work_facts(conversation, args['after'], args['limit'])
                 elif name == 'start_work':
-                    if args or len(calls) != 1:
-                        raise ValueError('start_work accepts no arguments and must be called alone')
-                    work = self.dispatch_work(conversation, state['command'])
+                    if (set(args) != {'project_path', 'create'} or len(calls) != 1
+                            or not isinstance(args['project_path'], str)
+                            or type(args['create']) is not bool):
+                        raise ValueError('start_work requires project_path and create, alone')
+                    work = self.dispatch_work(conversation, state['command'], **args)
                     result = {'task_id': work['task_id'], 'status': work['status'],
+                              'repo': work['repo'], 'project_path': work.get('project_path', '.'),
                               'outcome': 'coding_handoff_saved'}
                     handed_off = True
                 elif name == 'run_existing':
@@ -376,8 +382,10 @@ class Chatbot:
                     from agent.server.assistant import validate
 
                     validate(name, args)
-                    work = self.dispatch_work(conversation, state['command'],
-                                              kind='existing', arguments=args)
+                    current_work = self.store.work(self.store.get(conversation)['work_id'])
+                    project_path = current_work['project_path'] if current_work else '.'
+                    work = self.dispatch_work(conversation, state['command'], kind='existing',
+                                              arguments=args, project_path=project_path, create=False)
                     result = {'task_id': work['task_id'], 'status': work['status']}
                     handed_off = True
                 else:

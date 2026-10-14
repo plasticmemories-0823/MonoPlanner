@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from threading import RLock
+from agent.source.scope import project_scope as resolve_scope
 import time
 from agent.source.snapshots import (
     _reason,
@@ -26,6 +27,8 @@ def _digest(value):
 class SourceVersions:
     def __init__(self, environment, directory, baseline=None):
         self.environment, self.baseline = environment, baseline
+        self.project_scope = resolve_scope(
+            environment.repo_root, getattr(environment, "project_scope", None))
         self.root = Path(directory).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "blobs").mkdir(exist_ok=True)
@@ -39,7 +42,8 @@ class SourceVersions:
         root, files, excluded = self.environment.repo_root, {}, {}
         hashed_bytes = hashed_files = 0
         for relative, skip, tracked in _selected_files(
-            root, getattr(self.environment, "runtime_files", ())
+            root, getattr(self.environment, "runtime_files", ()),
+            project_scope=self.project_scope,
         )[1]:
             path = root / relative
             if (

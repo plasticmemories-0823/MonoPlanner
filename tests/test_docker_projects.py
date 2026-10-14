@@ -281,6 +281,9 @@ class ProjectDockerTests(unittest.TestCase):
             )
         job = json.loads((folder / 'bridge-job.json').read_text(encoding='utf-8'))
         records = folder / 'tasks' / job['task_id']
+        scope = json.loads((records / 'project-scope.json').read_text(encoding='utf-8'))
+        self.assertEqual(scope['root'], str(self.repo))
+        self.assertEqual(scope['excluded_projects'], [])
         before = [(p, p.read_bytes()) for p in records.glob('plans/*/*/result.json')]
         self.assertEqual(len(before), 1)
         with patch('agent.cli.tasks.run_work', side_effect=execute), patch(
@@ -289,4 +292,7 @@ class ProjectDockerTests(unittest.TestCase):
             self.assertEqual(main(['--state-dir', str(folder)]), 1)
         self.assertEqual(len(list(records.glob('plans/*/*/result.json'))), 2)
         self.assertEqual(before[0][0].read_bytes(), before[0][1])
+        self.assertEqual(
+            json.loads((records / 'project-scope.json').read_text(encoding='utf-8')), scope,
+        )
         self.assertEqual(len(model.calls), 1)
