@@ -22,6 +22,7 @@ class WebUnknown(RuntimeError):
 
 
 def public_url(url):
+    # 每一跳先按系统路线核验；实际传输仍重新绑定核验后的 IP，不信任重定向目标。
     resolve_public(url)
     return url
 

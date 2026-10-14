@@ -12,12 +12,13 @@ import threading
 import httpx
 
 from agent.execution import managed_proxy
+from agent.execution.public_dns import proxy_public_addresses
 from agent.model.network import system_proxy_for
 
 
 def connect_default(host, port, target_url, *, on_socket=None, cancelled=None):
-    """先固定公网地址，再按原始 URL 选择当前系统路线；失败不切线重试。"""
-    addresses = managed_proxy.public_addresses(host, port)
+    """先选择系统路线，再取得并固定公网地址；代理路线不依赖污染的本机 DNS。"""
+    host = managed_proxy.validate_public_host(host)
     if cancelled and cancelled():
         raise OSError('preparation relay closed')
     try:
@@ -27,9 +28,17 @@ def connect_default(host, port, target_url, *, on_socket=None, cancelled=None):
     if cancelled and cancelled():
         raise OSError('preparation relay closed')
     if proxy:
+        addresses = proxy_public_addresses(
+            host, port, proxy, on_socket=on_socket, cancelled=cancelled,
+        )
+        if cancelled and cancelled():
+            raise OSError('preparation relay closed')
         address = addresses[0][4][0]
         return managed_proxy.tunnel(proxy, address, port,
                                     on_socket=on_socket, cancelled=cancelled)
+    addresses = managed_proxy.public_addresses(host, port)
+    if cancelled and cancelled():
+        raise OSError('preparation relay closed')
     family, kind, protocol, _, address = addresses[0]
     connection = socket.socket(family, kind, protocol)
     try:

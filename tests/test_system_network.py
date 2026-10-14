@@ -243,7 +243,9 @@ def test_real_proxy_connect_pins_public_ip_but_tls_and_http_keep_original_host(t
         'agent.execution.public_http.socket.getaddrinfo', side_effect=pinned_dns
     ), patch('agent.execution.public_http.system_proxy_for', return_value=(
         f'http://offline-user:offline-password@127.0.0.1:{server.server_port}'
-    )) as route, patch('agent.execution.public_http.httpcore.HTTPProxy', side_effect=(
+    )) as route, patch('agent.execution.public_http.proxy_public_addresses', side_effect=(
+        lambda host, port, proxy: pinned_dns(host, port)
+    )), patch('agent.execution.public_http.httpcore.HTTPProxy', side_effect=(
         lambda **kwargs: native_proxy(**kwargs, ssl_context=client_tls)
     )):
         with httpx.Client(transport=PublicTransport(), trust_env=False, timeout=2) as client:
@@ -271,7 +273,9 @@ def test_page_redirect_is_revalidated_before_proxy_gets_private_target():
 
     with patch('agent.execution.public_http.socket.getaddrinfo', side_effect=dns), patch(
         'agent.execution.public_http.system_proxy_for', return_value='http://127.0.0.1:8123'
-    ), patch('agent.execution.public_http._PinnedProxyTransport',
+    ), patch('agent.execution.public_http.proxy_public_addresses', side_effect=(
+        lambda host, port, proxy: dns(host, port)
+    )), patch('agent.execution.public_http._PinnedProxyTransport',
              return_value=httpx.MockTransport(respond)):
         with httpx.Client(transport=PublicTransport(), follow_redirects=True) as client:
             with pytest.raises(ValueError, match='Private'):
@@ -292,3 +296,72 @@ def test_https_proxy_identity_is_preserved_even_when_its_ip_matches_target():
     assert [call.args[1] for call in raw.start_tls.call_args_list] == [
         '93.184.216.34', 'example.com'
     ]
+
+
+def test_proxy_page_resolves_with_selected_route_and_never_uses_polluted_system_dns():
+    requests = []
+    proxy = 'http://127.0.0.1:8123'
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '',
+                  ('93.184.216.34', 443))]
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, text='public page')
+
+    with patch('agent.execution.public_http.socket.getaddrinfo',
+               side_effect=AssertionError('polluted system DNS must not select target')), patch(
+        'agent.execution.public_http.system_proxy_for', return_value=proxy
+    ) as route, patch('agent.execution.public_http.proxy_public_addresses',
+                     return_value=addresses, create=True) as resolve, patch(
+        'agent.execution.public_http._PinnedProxyTransport',
+        return_value=httpx.MockTransport(respond),
+    ) as transport:
+        with httpx.Client(transport=PublicTransport(), trust_env=False) as client:
+            assert client.get('https://example.com/page').text == 'public page'
+    route.assert_called_once_with(httpx.URL('https://example.com/page'))
+    resolve.assert_called_once_with('example.com', 443, proxy)
+    transport.assert_called_once_with(proxy, '93.184.216.34', 'example.com')
+    assert requests[0].url.host == '93.184.216.34'
+    assert requests[0].headers['Host'] == 'example.com'
+    assert requests[0].extensions['sni_hostname'] == 'example.com'
+
+
+def test_proxy_dns_private_redirect_answer_is_rejected_before_second_dispatch():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(302, headers={'Location': 'https://changed.example/private'})
+
+    def addresses(host, port, proxy):
+        ip = '93.184.216.34' if host == 'example.com' else '127.0.0.1'
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', (ip, port))]
+
+    with patch('agent.execution.public_http.socket.getaddrinfo',
+               side_effect=AssertionError('no local target resolution')), patch(
+        'agent.execution.public_http.system_proxy_for', return_value='http://127.0.0.1:8123'
+    ), patch('agent.execution.public_http.proxy_public_addresses',
+             side_effect=addresses, create=True), patch(
+        'agent.execution.public_http._PinnedProxyTransport',
+        return_value=httpx.MockTransport(respond),
+    ):
+        with httpx.Client(transport=PublicTransport(), follow_redirects=True) as client:
+            with pytest.raises(ValueError, match='Private'):
+                client.get('https://example.com')
+    assert len(requests) == 1
+
+
+def test_page_proxy_dns_failure_never_falls_back_to_local_dns_or_direct_http():
+    with patch('agent.execution.public_http.system_proxy_for',
+               return_value='http://127.0.0.1:8123'), patch(
+        'agent.execution.public_http.proxy_public_addresses',
+        side_effect=OSError('public resolution unavailable'),
+    ), patch('agent.execution.public_http.socket.getaddrinfo') as local_dns, patch(
+        'agent.execution.public_http._PinnedProxyTransport'
+    ) as proxy_transport, patch('agent.execution.public_http.httpx.HTTPTransport') as direct:
+        with httpx.Client(transport=PublicTransport(), trust_env=False) as client:
+            with pytest.raises(OSError, match='public resolution unavailable'):
+                client.get('https://example.com/page')
+        local_dns.assert_not_called()
+        proxy_transport.assert_not_called()
+        direct.return_value.handle_request.assert_not_called()

@@ -105,6 +105,74 @@ def response(connection):
 
 
 class DownloadRelayTests(unittest.TestCase):
+    def setUp(self):
+        # 套接字集成测试使用既有受控目标，绝不访问真实 DNS 服务。
+        self.enterContext(patch.object(
+            download_relay, 'proxy_public_addresses',
+            side_effect=lambda host, port, *args, **kwargs: managed_proxy.public_addresses(host, port),
+        ))
+
+    def test_preparation_reports_destination_rejection_without_exposing_install_output(self):
+        from types import SimpleNamespace
+        from agent.execution import managed
+
+        def failed(*args, **kwargs):
+            kwargs['stdout'].write(
+                b'Public download destination required https://private.example/?token=secret\n'
+            )
+            return SimpleNamespace(returncode=1, poll=lambda: 1)
+
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(managed.subprocess, 'Popen', side_effect=failed), \
+             patch.object(managed, 'docker_executable', return_value='docker'):
+            manager = managed.ManagedEnvironments(Path(temporary))
+            with self.assertRaises(managed.PreparationError) as raised:
+                manager._run(['buildx', 'build'], log=Path(temporary) / 'base-build.log')
+        self.assertIn('公网安全校验', str(raised.exception))
+        self.assertNotIn('secret', str(raised.exception))
+        self.assertNotIn('private.example', str(raised.exception))
+
+    def test_proxy_path_does_not_resolve_destination_with_polluted_system_dns(self):
+        resolved = public_address('download.example', 443)
+        with patch.object(download_relay, 'system_proxy_for', return_value='http://proxy:8080'):
+            with patch.object(managed_proxy, 'public_addresses',
+                              side_effect=AssertionError('polluted system DNS must not run')):
+                with patch.object(download_relay, 'proxy_public_addresses', return_value=resolved) as dns:
+                    with patch.object(managed_proxy, 'tunnel', return_value='connection') as tunnel:
+                        result = download_relay.connect_default(
+                            'download.example', 443, 'https://download.example/package',
+                        )
+        self.assertEqual(result, 'connection')
+        self.assertEqual(dns.call_args.args, ('download.example', 443, 'http://proxy:8080'))
+        self.assertEqual(tunnel.call_args.args, ('http://proxy:8080', '93.184.216.34', 443))
+
+    def test_proxy_dns_failure_does_not_fall_back_to_system_dns_or_connect(self):
+        with patch.object(download_relay, 'system_proxy_for', return_value='http://proxy:8080'):
+            with patch.object(download_relay, 'proxy_public_addresses', side_effect=OSError('DNS failed')):
+                with patch.object(managed_proxy, 'public_addresses') as local, \
+                     patch.object(managed_proxy, 'tunnel') as tunnel:
+                    with self.assertRaises(OSError):
+                        download_relay.connect_default('download.example', 443, 'https://download.example/')
+        local.assert_not_called()
+        tunnel.assert_not_called()
+
+    def test_cancelled_dns_result_never_opens_download_tunnel(self):
+        stopped = False
+
+        def resolved(*args, **kwargs):
+            nonlocal stopped
+            stopped = True
+            return public_address('download.example', 443)
+
+        with patch.object(download_relay, 'system_proxy_for', return_value='http://proxy:8080'), \
+             patch.object(download_relay, 'proxy_public_addresses', side_effect=resolved), \
+             patch.object(managed_proxy, 'tunnel') as tunnel:
+            with self.assertRaises(OSError, msg='cancelled DNS must not dispatch a connection'):
+                download_relay.connect_default(
+                    'download.example', 443, 'https://download.example/', cancelled=lambda: stopped,
+                )
+        tunnel.assert_not_called()
+
     def test_start_does_not_wait_for_reverse_dns(self):
         with patch.object(socket, 'getfqdn', side_effect=AssertionError('reverse DNS not needed')):
             with download_relay.DownloadRelay() as relay:

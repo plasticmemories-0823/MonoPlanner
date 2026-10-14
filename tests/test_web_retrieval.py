@@ -1,6 +1,7 @@
 """回放真实 HTTP 适配器，仅使用模拟传输，绝不调用付费搜索。"""
 
 import json
+import socket
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -181,3 +182,59 @@ class WebRetrievalTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Private'):
                 WebProvider().fetch('https://example.com', self.loop(), Path(name))
         self.assertEqual(len(requests), 1)
+
+    def test_fetch_preflight_and_transport_follow_proxy_despite_polluted_local_dns(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(
+                200, headers={'content-type': 'text/plain'}, content=b'public page'
+            )
+
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '',
+                      ('93.184.216.34', 443))]
+        proxy = 'http://127.0.0.1:8123'
+        with tempfile.TemporaryDirectory() as name, patch(
+            'agent.execution.public_http.socket.getaddrinfo',
+            side_effect=AssertionError('poisoned local DNS must not block proxy requests'),
+        ), patch('agent.execution.public_http.system_proxy_for', return_value=proxy), patch(
+            'agent.execution.public_http.proxy_public_addresses',
+            return_value=addresses, create=True,
+        ) as resolve, patch(
+            'agent.execution.public_http._PinnedProxyTransport',
+            return_value=httpx.MockTransport(respond),
+        ):
+            result = WebProvider().fetch('https://example.com/page', self.loop(), Path(name))
+            self.assertEqual(result['text'], 'public page')
+            self.assertEqual((Path(name) / 'page.body').read_bytes(), b'public page')
+        self.assertTrue(resolve.called)
+        self.assertTrue(all(call.args == ('example.com', 443, proxy)
+                            for call in resolve.call_args_list))
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].url.host, '93.184.216.34')
+
+    def test_fetch_proxy_redirect_to_private_literal_is_rejected_by_real_preflight(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(302, headers={'location': 'http://127.0.0.1/private'})
+
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '',
+                      ('93.184.216.34', 443))]
+        with tempfile.TemporaryDirectory() as name, patch(
+            'agent.execution.public_http.socket.getaddrinfo',
+            side_effect=AssertionError('no local target resolution'),
+        ), patch('agent.execution.public_http.system_proxy_for',
+                 return_value='http://127.0.0.1:8123'), patch(
+            'agent.execution.public_http.proxy_public_addresses',
+            return_value=addresses, create=True,
+        ) as resolve, patch(
+            'agent.execution.public_http._PinnedProxyTransport',
+            return_value=httpx.MockTransport(respond),
+        ):
+            with self.assertRaisesRegex(ValueError, 'Private'):
+                WebProvider().fetch('https://example.com/page', self.loop(), Path(name))
+        self.assertEqual(len(requests), 1)
+        self.assertTrue(all(call.args[0] == 'example.com' for call in resolve.call_args_list))

@@ -10,24 +10,41 @@ import httpcore
 import httpx
 
 from agent.model.network import system_proxy_for
+from agent.execution.managed_proxy import validate_public_host
+from agent.execution.public_dns import proxy_public_addresses
 
 
-def resolve_public(url):
+_SYSTEM_ROUTE = object()
+
+
+def resolve_public(url, *, proxy=_SYSTEM_ROUTE):
     parsed = urlsplit(url)
     if (
         parsed.scheme not in {'http', 'https'}
         or not parsed.hostname
-        or parsed.username
-        or parsed.password
+        or parsed.username is not None
+        or parsed.password is not None
     ):
         raise ValueError('url must be a public HTTP(S) URL without credentials')
-    addresses = socket.getaddrinfo(
-        parsed.hostname,
-        parsed.port or (443 if parsed.scheme == 'https' else 80),
-        type=socket.SOCK_STREAM,
-    )
+    try:
+        hostname = validate_public_host(parsed.hostname)
+    except ValueError:
+        raise ValueError('Private, loopback and local-network pages are not permitted') from None
+    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    # 前置校验也使用当前系统路线；实际请求传入已选路线，解析和连接不各选一次。
+    if proxy is _SYSTEM_ROUTE:
+        proxy = system_proxy_for(httpx.URL(url))
+    if proxy:
+        addresses = proxy_public_addresses(hostname, port, proxy)
+    else:
+        addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     ips = list(dict.fromkeys(row[4][0] for row in addresses))
-    if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
+    if not ips or any(
+        not ipaddress.ip_address(ip).is_global
+        or ipaddress.ip_address(ip).is_multicast
+        or ipaddress.ip_address(ip).is_reserved
+        for ip in ips
+    ):
         raise ValueError('Private, loopback and local-network pages are not permitted')
     return parsed, ips
 
@@ -153,15 +170,16 @@ class PublicTransport(httpx.BaseTransport):
         self._lock = Lock()
 
     def handle_request(self, request):
-        parsed, ips = resolve_public(str(request.url))
         original = request.url
+        # 先按原始 URL 选择路线，再由该路线解析公网 IP；代理路径不受本机 DNS 污染阻断。
+        proxy = None if self._injected else system_proxy_for(original)
+        parsed, ips = resolve_public(str(original), proxy=proxy)
         pinned = original.copy_with(host=ips[0])
         headers = httpx.Headers(request.headers)
         headers['Host'] = original.netloc.decode('ascii')
         extensions = {**request.extensions, 'sni_hostname': parsed.hostname}
         transport = self.transport
         # 代理规则针对原 URL 选择；连接目标仍是已校验 IP，不能交给代理重新解析。
-        proxy = None if self._injected else system_proxy_for(original)
         if proxy:
             key = (proxy, ips[0], parsed.hostname)
             with self._lock:

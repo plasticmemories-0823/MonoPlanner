@@ -490,6 +490,11 @@ class ManagedEnvironments:
         if check and process.returncode:
             # 本地保留日志以便诊断；不要向模型或界面返回任意安装输出，
             # 因为其中可能包含项目数据。
+            if 'Public download destination required' in text:
+                raise PreparationError(
+                    '下载地址未通过公网安全校验，地址解析结果不安全或无效；'
+                    '未开始执行项目，详细原因已保存在本机安装日志。'
+                )
             raise PreparationError(
                 '自动准备未完成。请检查 Docker、网络或项目依赖声明；详细原因已保存在本机安装日志。'
             )

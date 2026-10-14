@@ -8,6 +8,7 @@ import http.server
 import base64
 import ipaddress
 import os
+import re
 import select
 import socket
 import socketserver
@@ -19,9 +20,40 @@ MAX_TUNNEL_SECONDS = 600
 MAX_TRANSFER = 512 * 1024 * 1024
 
 
+def validate_public_host(host):
+    """不查询 DNS，仅拒绝本机名称、私网 IP 文字及不合法的主机名。"""
+    if not isinstance(host, str) or not host or any(ord(char) <= 32 or ord(char) == 127 for char in host):
+        raise ValueError('invalid host')
+    if '%' in host:
+        raise ValueError('invalid host')
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None:
+        if not address.is_global or address.is_multicast or address.is_reserved:
+            raise ValueError('private address')
+        return str(address)
+
+    try:
+        normalized = host.encode('idna').decode('ascii').lower().removesuffix('.')
+    except UnicodeError:
+        raise ValueError('invalid host') from None
+    labels = normalized.split('.')
+    private_names = ('localhost', 'local', 'internal', 'localdomain', 'lan', 'home', 'home.arpa')
+    if (
+        len(normalized) > 253
+        or len(labels) < 2
+        or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in labels)
+        or labels[-1].isdigit()
+        or any(normalized == name or normalized.endswith('.' + name) for name in private_names)
+    ):
+        raise ValueError('private or invalid host')
+    return normalized
+
+
 def public_addresses(host, port):
-    if not host or host.lower().rstrip('.').endswith(('.localhost', '.local', '.internal')):
-        raise ValueError('private host')
+    host = validate_public_host(host)
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     if not addresses or any(
         not ipaddress.ip_address(info[4][0]).is_global
@@ -94,11 +126,28 @@ def tunnel(proxy, host, port, *, target_url=None, on_socket=None, cancelled=None
 
 
 def connect_public(host, port, target_url=None):
-    addresses = public_addresses(host, port)
     relay = os.getenv('MONOPLANNER_DOWNLOAD_RELAY')
     if relay:
+        host = validate_public_host(host)
+        if port not in (80, 443):
+            raise ValueError('only public HTTP downloads are permitted')
+        if target_url:
+            if any(ord(char) < 32 or ord(char) == 127 for char in target_url):
+                raise ValueError('invalid target')
+            parsed = urlsplit(target_url)
+            scheme = 'https' if port == 443 else 'http'
+            if (
+                parsed.scheme != scheme
+                or validate_public_host(parsed.hostname) != host
+                or (parsed.port or port) != port
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                raise ValueError('target identity mismatch')
         # 安装容器只接触一次性中继口令；系统代理及凭据留在宿主进程。
+        # 目标 DNS 与实际连接由宿主统一核验，避免容器 DNS 先受污染而阻断有效代理。
         return tunnel(relay, host, port, target_url=target_url)
+    addresses = public_addresses(host, port)
     last = None
     for family, kind, proto, _, address in addresses:
         connection = socket.socket(family, kind, proto)
@@ -160,9 +209,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         return
                     transferred += len(chunk)
                     (upstream if source is self.connection else self.connection).sendall(chunk)
-        except (OSError, ValueError):
+        except ValueError:
             if upstream is None:
                 self.send_error(403, 'Public download destination required')
+        except TimeoutError:
+            if upstream is None:
+                self.send_error(504, 'Download connection timed out')
+        except OSError:
+            if upstream is None:
+                self.send_error(502, 'Download connection failed')
         finally:
             self.close_connection = True
             if upstream is not None:
@@ -196,9 +251,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     break
                 transferred += len(chunk)
                 self.connection.sendall(chunk)
-        except (OSError, ValueError):
+        except ValueError:
             if upstream is None:
                 self.send_error(403, 'Public download destination required')
+        except TimeoutError:
+            if upstream is None:
+                self.send_error(504, 'Download connection timed out')
+        except OSError:
+            if upstream is None:
+                self.send_error(502, 'Download connection failed')
         finally:
             self.close_connection = True
             if upstream is not None:
