@@ -178,7 +178,7 @@ try {
   report.thread_id = thread;
   await fs.writeFile(path.join(state, "fixture-storage-failure"), "inject write failure only\n");
   await page.getByRole("alert").filter({ hasText: "本地记录写入失败" }).first().waitFor();
-  assert.equal(await page.getByText("工作进行中，聊天不会打断任务", { exact: true }).count(), 0);
+  assert.equal(await page.locator('[role="status"]').filter({ hasText: "聊天不会打断任务" }).count(), 0);
   await page.getByRole("textbox", { name: "消息输入框" }).fill("不能继续派发");
   assert.equal(await page.getByRole("button", { name: "发送", exact: true }).isDisabled(), true);
   assert.equal(await page.getByRole("button", { name: "继续任务", exact: true }).count(), 0);

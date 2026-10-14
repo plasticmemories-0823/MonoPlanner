@@ -1,30 +1,77 @@
 "use client";
 
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { conversationUsage } from "@/lib/activity-usage";
 import { useStreamContext } from "@/providers/Stream";
 import type { Activity } from "@/lib/conversation-types";
+import { requestJson } from "@/lib/conversation-api";
+import {
+  WorkActivityMonitor,
+  visibleWorkActivity,
+  type DiagnosticPage,
+} from "@/lib/work-diagnostics";
 import { Brain, Check, CircleDot, CircleHelp, LoaderCircle, ChevronDown } from "lucide-react";
 
 export type { Activity } from "@/lib/conversation-types";
 
-// 所有活动和用量来自与聊天相同的快照，不另开轮询或合并来源。
+// 聊天取公开快照，工作只读本地原件的增量游标；两者只在显示层组合。
 export function useActivity() {
   const stream = useStreamContext();
+  const { apiUrl } = stream;
+  const threadId = stream.values.thread_id;
+  const work = stream.values.work;
+  const enabled = Boolean(threadId && work && !stream.values.read_only && !stream.storageError);
+  const monitor = useRef<WorkActivityMonitor | null>(null);
+  const [workView, setWorkView] = useState({ threadId: "", items: [] as Activity[], error: "" });
+  useEffect(() => {
+    if (!enabled) return;
+    const reader = new WorkActivityMonitor(
+      (after, signal) => {
+        const query = new URLSearchParams({ after: JSON.stringify(after) });
+        return requestJson<DiagnosticPage>(
+          `${apiUrl}/conversations/${threadId}/diagnostics?${query}`,
+          { signal },
+        );
+      },
+      (items, error) => setWorkView({ threadId, items, error }),
+    );
+    monitor.current = reader;
+    return () => {
+      reader.dispose();
+      if (monitor.current === reader) monitor.current = null;
+    };
+  }, [apiUrl, threadId, enabled]);
+  useEffect(() => {
+    if (enabled && work)
+      monitor.current?.update(
+        `${work.task_id}:${work.status}:${work.revision || 0}`,
+        stream.workRunning,
+      );
+  }, [enabled, work, stream.workRunning]);
   const usage = useMemo(
     () => conversationUsage(stream.values.usage || {}, stream.workRunning),
     [stream.values.usage, stream.workRunning],
   );
+  const workRows = workView.threadId === threadId ? workView.items : [];
+  const items: Activity[] = [
+    ...(stream.values.activities || []).map((row) => ({ ...row, source: "chat" as const })),
+    ...visibleWorkActivity(workRows, work).map((row) => ({ ...row, source: "work" as const })),
+  ];
   return {
-    items: (stream.values.activities || []).map((item) =>
+    items: items.map((item) =>
       stream.storageError && item.status === "running"
         ? { ...item, status: "unknown", label: "记录写入失败，状态待核对" }
         : item,
     ),
-    error: stream.error?.message || "",
+    error: [stream.error?.message, workView.threadId === threadId && workView.error]
+      .filter(Boolean)
+      .join("；"),
     usage,
     groups: stream.values.usage || {},
-    reconnect: stream.reconnect,
+    reconnect: () => {
+      stream.reconnect();
+      monitor.current?.reconnect();
+    },
   };
 }
 
@@ -102,30 +149,48 @@ const ActivityRow = memo(function ActivityRow({ row }: { row: Activity }) {
   })();
 });
 
-export function ActivityRows({ items }: { items: Activity[] }) {
+export function ActivityRows({
+  items,
+  title = "思考与操作",
+}: {
+  items: Activity[];
+  title?: string;
+}) {
   const [open, setOpen] = useState(false);
   if (!items.length) return null;
   const running = items.findLast((row) => row.status === "running");
   const needsAttention = items.some((row) => ["failed", "error", "unknown"].includes(row.status));
   const interrupted = items.some((row) => row.status === "interrupted");
+  const currentState = items.findLast((row) => row.id.endsWith("-state") && row.source === "work");
   const label = running
     ? running.label
-    : needsAttention
-      ? "步骤已结束，有结果需要核对"
-      : interrupted
-        ? "当前回复已中断"
-        : "思考与工作步骤已完成";
+    : currentState
+      ? currentState.label
+      : needsAttention
+        ? "步骤已结束，有结果需要核对"
+        : interrupted
+          ? "当前回复已中断"
+          : "思考与工作步骤已完成";
   return (
     <details
       data-testid="activity-group"
+      data-source={items[0]?.source}
       className="text-muted-foreground border-border/50 w-full rounded-lg border text-sm"
       onToggle={(event) => {
         if (event.target === event.currentTarget) setOpen(event.currentTarget.open);
       }}
     >
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2">
-        {running ? <LoaderCircle className="size-4 animate-spin" /> : <Check className="size-4" />}
-        <span>工作诊断 · {label}</span>
+        {running ? (
+          <LoaderCircle className="size-4 animate-spin" />
+        ) : needsAttention ? (
+          <CircleHelp className="size-4" />
+        ) : (
+          <Check className="size-4" />
+        )}
+        <span>
+          {title} · {label}
+        </span>
         <span className="ml-auto text-xs">{items.length} 项</span>
         <ChevronDown className={`size-4 transition-transform ${open ? "rotate-180" : ""}`} />
       </summary>

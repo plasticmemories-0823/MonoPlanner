@@ -23,7 +23,7 @@ Chatbot 使用 LangGraph 开源库，但服务不再依赖 Agent Server 的 thre
 
 自动汇报由关键事件触发，调用间隔至少 30 秒；每次汇报最多进行 3 次模型请求，包含只读工具续接。它仅能查询当前任务状态、阶段事件和已提交的有限操作记录，不能启动、暂停、补充或批准任务，也不读取私有冻结验收正文。超限、失败或结果不明时保存记录，不自动重发该次请求；工作继续按原执行状态推进。自动汇报使用所选模型和思考配置，普通聊天与工作原有的思考设置、输出上限和调用边界保持不变。
 
-前端通过 `/conversations`、`/conversations/{id}/snapshot`、`/conversations/{id}/commands` 和 `/conversations/{id}/events?after=N` 访问产品接口。命令带唯一编号；重复的相同命令返回原结果，不同正文复用同一编号被拒绝。SSE 断线只补读，浏览器不创建或补启动执行器。
+前端通过 `/conversations`、`/conversations/{id}/snapshot`、`/conversations/{id}/commands` 和 `/conversations/{id}/events?after=N` 访问产品接口。命令带唯一编号；重复的相同命令返回原结果，不同正文复用同一编号被拒绝。SSE 断线只补读，浏览器不创建或补启动执行器。工作活动复用 `/conversations/{id}/diagnostics?after=...` 的只读原件投影：当前可见会话运行时按游标持续读取，终态补齐分页后停止，读取错误保留已显示内容并等待重新连接。读取不重建整份聊天，不复制工作原件，也不进入 Chatbot 上下文。内核内部回复编号在展示时映射到任务开工消息，避免并发聊天把工作活动挤到错误位置。
 
 暂停走独立控制线程，取消模型等待并终止所属 Docker 容器进程；未知结果不自动恢复。运行资源由本地台账登记所有者、引用和租约；暂停保留原容器，已提交完整证据的临时副本可以删除。环境配方使用显式协议版本，而非 Python 实现文件的原文字节。
 
@@ -63,7 +63,7 @@ pnpm --dir web build
 .\.venv-web\Scripts\python.exe -B -X utf8 -m eval.analysis.summary --help
 ```
 
-新接口浏览器测试使用 `tests/fixtures/application_server.py`，配套独立状态目录和端口，禁止把假模型服务当作正式应用。`tests/legacy/` 仅保留旧调度的离线对照，不进入分发包。构建包含 TypeScript 检查。测试中的固定 Token 数不能作为产品性能数据。
+新接口浏览器测试使用 `tests/fixtures/application_server.py`，配套独立状态目录和端口，禁止把假模型服务当作正式应用。`tests/legacy/` 仅保留旧调度及其原提示的离线对照，不进入分发包；生产只加载 `frontdesk.txt` 作为聊天提示，不再加载旧 `conversation.txt`。默认先提出方案并询问开工，明确授权后才调用 `start_work`；这一语义判断由 Chatbot 完成，不增加关键词分类器。构建包含 TypeScript 检查。测试中的固定 Token 数不能作为产品性能数据。
 
 ## 执行与验收边界
 

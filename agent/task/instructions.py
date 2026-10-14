@@ -7,7 +7,3 @@ TASK_RULES = (PROJECT_ROOT / "resources/prompts/task.txt").read_text(encoding="u
 ARTIFACT_RULES = (PROJECT_ROOT / "resources/prompts/artifact_acceptance.txt").read_text(
     encoding="utf-8"
 )
-
-CONVERSATION_RULES = (PROJECT_ROOT / "resources/prompts/conversation.txt").read_text(
-    encoding="utf-8"
-)

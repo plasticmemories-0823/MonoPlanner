@@ -76,15 +76,24 @@ def build_routes(store, scheduler):
             from agent.storage.activity import read_activity
 
             conversation = identity(request.path_params['conversation'])
-            snapshot_value = await asyncio.to_thread(store.snapshot, conversation)
-            if snapshot_value['read_only']:
-                raise Conflict('旧版本详细诊断请使用对应冻结版本查看')
+            # 持续活动只核对会话身份，不在每页重新组装整份聊天、思考及用量。
+            try:
+                await asyncio.to_thread(store.get, conversation)
+            except KeyError:
+                if await asyncio.to_thread(store.legacy, conversation):
+                    raise Conflict('旧版本详细诊断请使用对应冻结版本查看')
+                raise
             jobs = await asyncio.to_thread(store.work_for_conversation, conversation)
             tasks = [{'id': job['task_id'], 'input_id': job['input_id']} for job in jobs]
             cursors = json.loads(request.query_params.get('after', '{}'))
             if not isinstance(cursors, dict):
                 raise ValueError('诊断游标必须为对象')
-            return response(await asyncio.to_thread(read_activity, store.root, tasks, cursors))
+            page = await asyncio.to_thread(read_activity, store.root, tasks, cursors)
+            # 内核回复ID不属于主聊天；只读显示始终挂在该任务的开工消息下。
+            anchors = {task['id']: task['input_id'] for task in tasks}
+            for item in [*page['items'], *page.get('live', [])]:
+                item['after_id'] = anchors[item['task_id']]
+            return response(page)
         return await guarded(run)
 
     async def events(request):

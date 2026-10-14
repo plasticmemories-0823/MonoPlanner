@@ -78,18 +78,7 @@ function snapshot(value) {
   return {
     ...value,
     pending_messages: [],
-    activities: value.work
-      ? [
-          {
-            id: "diagnostic-1",
-            after_id: "",
-            kind: "thinking",
-            label: "工作思考",
-            detail: "内核原文仅诊断",
-            status: value.work.status === "running" ? "running" : "completed",
-          },
-        ]
-      : [],
+    activities: [],
     usage: {
       chat: usage,
       work: value.work ? usage : {},
@@ -100,6 +89,7 @@ function snapshot(value) {
     workspace_bound: Boolean(value.work),
   };
 }
+let diagnosticPhase = 1;
 const backend = http.createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
   const chunks = [];
@@ -190,12 +180,44 @@ const backend = http.createServer(async (request, response) => {
     }
     return json(response, value, 201);
   }
-  const match = /^\/conversations\/([^/]+)\/(snapshot|events|commands|visibility|purge)$/.exec(
-    url.pathname,
-  );
+  const match =
+    /^\/conversations\/([^/]+)\/(snapshot|events|commands|visibility|purge|diagnostics)$/.exec(
+      url.pathname,
+    );
   if (match) {
     const value = conversations.get(match[1]);
     if (!value) return json(response, { error: "not found" }, 404);
+    if (match[2] === "diagnostics") {
+      const after = JSON.parse(url.searchParams.get("after") || "{}");
+      const phase = diagnosticPhase;
+      const base = { task_id: "work-1", after_id: value.work?.input_id || "", version: phase };
+      const items =
+        after.work >= phase
+          ? []
+          : [
+              {
+                ...base,
+                id: "work-1-thinking-1",
+                kind: "thinking",
+                label: phase === 1 ? "正在思考" : "思考",
+                status: phase === 1 ? "running" : "completed",
+                detail: phase === 1 ? "工作思考第一段" : "工作思考第一段，已确认要运行检查",
+              },
+              ...(phase > 1
+                ? [
+                    {
+                      ...base,
+                      id: "work-1-operation-1",
+                      kind: "operation",
+                      label: "正在运行命令",
+                      status: value.work?.status === "running" ? "running" : "interrupted",
+                      detail: "printf 'offline-operation-marker'",
+                    },
+                  ]
+                : []),
+            ];
+      return json(response, { items, cursors: { work: phase }, more: false });
+    }
     if (match[2] === "snapshot") {
       if (failedNextRead) {
         failedNextRead = false;
@@ -243,7 +265,7 @@ const backend = http.createServer(async (request, response) => {
             revision: value.title.revision + 1,
           };
           if (body.text === "启动假工作") {
-            value.work = { task_id: "work-1", status: "running" };
+            value.work = { task_id: "work-1", input_id: body.id, status: "running" };
             value.status = "running";
           }
         }
@@ -377,6 +399,22 @@ try {
     await page.getByText(`收到：${text}`, { exact: true }).waitFor();
   };
   await send("启动假工作");
+  const workActivity = page.locator('[data-testid="activity-group"][data-source="work"]');
+  await workActivity
+    .locator(":scope > summary")
+    .getByText("工作 · 正在思考", { exact: true })
+    .waitFor();
+  await workActivity.locator(":scope > summary").click();
+  await workActivity.locator('[data-activity="thinking"] > summary').click();
+  await workActivity.getByText("工作思考第一段", { exact: true }).waitFor();
+  const commandsBeforeDisplay = commands.length;
+  const preparationsBeforeDisplay = preparing;
+  diagnosticPhase = 2;
+  await workActivity.getByText("工作思考第一段，已确认要运行检查", { exact: true }).waitFor();
+  await workActivity.getByText("printf 'offline-operation-marker'", { exact: true }).waitFor();
+  assert.equal(commands.length, commandsBeforeDisplay, "live display never submits a command");
+  assert.equal(preparing, preparationsBeforeDisplay, "live display never prepares an environment");
+  assert.equal(await workActivity.count(), 1, "incremental fragments retain one activity group");
   assert.equal(await page.getByText("内核原文仅诊断", { exact: true }).count(), 0);
   const before = commands.length;
   await send("现在进度如何");

@@ -275,6 +275,7 @@ def test_snapshot_hides_private_handoff_and_keeps_usage_separate(setup):
     store.work_state(task['task_id'], 'executing', usage={'calls': 7, 'total_tokens': 2000})
     snapshot = store.snapshot(conversation)
     assert 'public_conversation' not in snapshot['work']
+    assert snapshot['work']['input_id'] == item['id']
     assert snapshot['usage']['work']['calls'] == 7
     assert snapshot['usage']['chat']['calls'] == 0
 
@@ -915,3 +916,104 @@ def test_external_result_requires_original_tool_target_and_conversation(setup):
     bot._append_external_results(conversation)
     assert not any(identity.startswith('external-result:')
                    for identity, _ in store.model_history(conversation))
+
+
+
+def test_default_plan_question_waits_for_user_before_work_handoff(setup):
+    """假轨迹验证交接时机与原文保留；不把它当成真实模型服从率测试。"""
+    from pathlib import Path
+
+    store, conversation, _ = setup
+    proposal = '我会做一个能直接打开的动画网页。是否按照这个计划开始制作？'
+    model = FakeModel([
+        answer(proposal),
+        answer('我开始制作这个动画。', tool_calls=[
+            {'name': 'start_work', 'args': {}, 'id': 'confirmed-start'},
+        ]),
+    ])
+    calls = []
+
+    def dispatch(thread, incoming):
+        calls.append(incoming['id'])
+        return store.create_work(thread, incoming['id'])
+
+    bot = Chatbot(store, dispatch, factory=lambda _: model)
+    first = command('帮我画鹈鹕骑自行车')
+    store.submit(conversation, first)
+    bot.run(conversation, first)
+    assert not calls and store.snapshot(conversation)['work'] is None
+    assert not (store.root / 'tasks').exists()
+    assert store.snapshot(conversation)['messages'][-1]['content'] == proposal
+
+    # 复用旧提示的询问、等待和明确授权规则，而非只在README里描述。
+    previous = Path(__file__).with_name('legacy').joinpath('conversation.txt').read_text('utf-8')
+    rules = model.requests[0][0].content
+    for paragraph in [line for line in previous.splitlines() if line.strip()][:4]:
+        assert paragraph in rules
+    assert 'do not demand a second ritual confirmation' not in rules
+
+    confirmation = command('按这个计划开始')
+    store.submit(conversation, confirmation)
+    bot.run(conversation, confirmation)
+    task = store.snapshot(conversation)['work']
+    assert calls == [confirmation['id']]
+    assert task['input_id'] == confirmation['id'] and task['status'] == 'queued'
+    original = store.work(task['task_id'])['public_conversation']
+    assert first['text'] in str(original) and proposal in str(original)
+    assert len(model.requests) == 2
+
+
+def test_live_work_activity_reads_deltas_without_copying_or_touching_chat(setup, monkeypatch):
+    """实时展示读取已有原件，不复制请求历史、不申请执行租约。"""
+    from agent.storage.history import LocalHistory
+    from agent.storage.live_reasoning import LiveReasoning
+
+    store, conversation, _ = setup
+    incoming = command('按方案开始')
+    store.submit(conversation, incoming)
+    task = store.create_work(conversation, incoming['id'])['task_id']
+    history = LocalHistory(store.root / 'tasks' / task)
+    with history.lease():
+        history.record({'history': [], 'budget': {'used_steps': 1}},
+                       'model_request_started', {'call': 1})
+    live = LiveReasoning(history.root, 1, task + '-reply-private')
+    live.append('已读取第一段')
+
+    class NoDispatch:
+        def submit(self, *_):
+            pytest.fail('Activity read dispatched work')
+
+    client = TestClient(Starlette(routes=build_routes(store, NoDispatch())))
+    endpoint = f'/conversations/{conversation}/diagnostics'
+
+    def read(after=None):
+        response = client.get(endpoint, params={'after': json.dumps(after or {})})
+        assert response.status_code == 200
+        return response.json()
+
+    first = read()
+    assert first['live'][0]['detail'] == '已读取第一段'
+    assert first['live'][0]['after_id'] == incoming['id']
+    live.append('，正在继续核对')
+    live.flush()
+    second = read(first['cursors'])
+    assert second['live'][0]['detail'] == '，正在继续核对'
+    assert second['live'][0]['append'] is True
+    assert second['live'][0]['id'] == first['live'][0]['id']
+    assert not read(second['cursors'])['live']
+    live.finish('interrupted')
+    store.work_state(task, 'paused')
+    final = read(second['cursors'])
+    assert final['live'][0]['status'] == 'interrupted'
+    assert final['live'][0]['detail'] == '已读取第一段，正在继续核对'
+
+    before = {str(p): p.read_bytes() for p in history.root.rglob('*') if p.is_file()}
+    with monkeypatch.context() as isolated:
+        isolated.setattr(store, 'snapshot', lambda *_: pytest.fail('Activity rebuilt full chat'))
+        assert not read(final['cursors'])['items']
+    assert read()['live'][0]['detail'] == final['live'][0]['detail']
+    assert before == {str(p): p.read_bytes() for p in history.root.rglob('*') if p.is_file()}
+    assert not store.model_history(conversation)
+    assert store.snapshot(conversation)['activities'] == []
+    assert store.usage(conversation)['chat']['calls'] == 0
+    history.close()

@@ -39,7 +39,7 @@ const env = {
 for (const key of Object.keys(env))
   if (/proxy/i.test(key) || key === "DEEPSEEK_API_KEY") delete env[key];
 const python =
-  process.env.MONOPLANER_TEST_PYTHON || "E:/AI/LangGraph/PP_lite/.venv-web/Scripts/python.exe";
+  process.env.MONOPLANER_TEST_PYTHON || path.join(root, ".venv-web/Scripts/python.exe");
 const processes = [],
   logs = {};
 function start(name, executable, args, cwd) {
@@ -103,7 +103,12 @@ async function until(check, timeout = 15_000) {
 }
 let browser, page;
 const report = {
-  paid_model_calls: 0, docker_calls: 0, requests: [], errors: [], checks: [], snapshots: [],
+  paid_model_calls: 0,
+  docker_calls: 0,
+  requests: [],
+  errors: [],
+  checks: [],
+  snapshots: [],
 };
 try {
   await until(async () => {
@@ -126,8 +131,13 @@ try {
   page.on("response", async (response) => {
     if (new URL(response.url()).pathname.endsWith("/snapshot") && response.ok()) {
       const value = await response.json().catch(() => null);
-      if (value) report.snapshots.push({ thread_id: value.thread_id, event_cursor: value.event_cursor,
-        messages: value.messages?.length, activities: value.activities?.length });
+      if (value)
+        report.snapshots.push({
+          thread_id: value.thread_id,
+          event_cursor: value.event_cursor,
+          messages: value.messages?.length,
+          activities: value.activities?.length,
+        });
     }
   });
   await page.goto(base);
@@ -162,7 +172,9 @@ try {
   ]);
   await page.keyboard.press("Escape");
   await page.keyboard.press("Escape");
-  report.checks.push("file picker grants only the selected file through the real read-sources route");
+  report.checks.push(
+    "file picker grants only the selected file through the real read-sources route",
+  );
   const send = async (text, label = "发送") => {
     await page.getByRole("textbox", { name: "消息输入框" }).fill(text);
     await page.getByRole("button", { name: label, exact: true }).click();
@@ -211,16 +223,67 @@ try {
   );
   assert.equal(repeat.status, 200);
   assert.equal(repeat.data.status, "opened");
-  const nativeActions = (await fs.readFile(path.join(state, "fixture-native-actions.jsonl"), "utf8"))
-    .trim().split("\n").map((line) => JSON.parse(line));
+  const nativeActions = (
+    await fs.readFile(path.join(state, "fixture-native-actions.jsonl"), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
   assert.equal(nativeActions.filter((action) => action.kind === "launch").length, 1);
   assert.equal((await api(`/threads/${first}/permission`)).effective, "ask");
-  report.checks.push("single-use approval persists once in the real backend without elevating work permissions");
-  await send("开始工作");
+  report.checks.push(
+    "single-use approval persists once in the real backend without elevating work permissions",
+  );
+  const workStartsBefore = nativeActions.filter((action) => action.kind === "work_started").length;
+  await send("帮我画鹈鹕骑自行车");
+  await until(
+    async () => (await api(`/conversations/${first}/snapshot`)).chat_status === "chat_complete",
+  );
+  const proposal = await api(`/conversations/${first}/snapshot`);
+  assert.equal(proposal.work, null, "an unconfirmed initial request does not dispatch work");
+  assert.ok(
+    proposal.messages.some((message) => String(message.content).includes("按这个计划开始")),
+  );
+  const proposedActions = (
+    await fs.readFile(path.join(state, "fixture-native-actions.jsonl"), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(
+    proposedActions.filter((action) => action.kind === "work_started").length,
+    workStartsBefore,
+  );
+  report.checks.push(
+    "a new implementation request presents a plan and awaits confirmation without dispatching work",
+  );
+  await send("按这个计划开始");
   const started = await until(async () => {
     const value = await api(`/conversations/${first}/snapshot`);
     return value.work && ["running", "executing"].includes(value.work.status) && value;
   });
+  const diagnosticReadsBefore = report.requests.filter((request) =>
+    request.path.endsWith("/diagnostics"),
+  ).length;
+  await until(
+    async () =>
+      report.requests.filter((request) => request.path.endsWith("/diagnostics")).length >=
+      diagnosticReadsBefore + 2,
+  );
+  const workActivity = page.locator('[data-testid="activity-group"][data-source="work"]').first();
+  await workActivity.locator(":scope > summary").click();
+  await workActivity.locator('[data-activity="thinking"] > summary').first().click();
+  await workActivity.getByText("工作思考第一段", { exact: false }).waitFor();
+  await workActivity.getByText("工作思考第一段，已确认要运行检查", { exact: true }).waitFor();
+  await workActivity.getByText("printf 'offline-operation-marker'", { exact: true }).waitFor();
+  assert.ok(
+    !(await api(`/conversations/${first}/snapshot`)).messages.some((message) =>
+      String(message.content).includes("工作思考第一段"),
+    ),
+  );
+  report.checks.push(
+    "current work reads saved activity continuously without opening a diagnostics panel",
+  );
   await send("查询进度");
   await until(
     async () => (await api(`/conversations/${first}/snapshot`)).chat_status === "chat_complete",
@@ -252,9 +315,8 @@ try {
     submitted,
   );
   report.checks.push("pause and refresh retain state without browser run or command replay");
-  assert.ok(report.requests.every((request) => !request.path.endsWith("/diagnostics")));
-  await page.getByRole("button", { name: "查看工作记录", exact: true }).click();
-  await page.getByText("暂无可展示的工作记录。", { exact: true }).waitFor();
+  await until(async () => report.requests.some((request) => request.path.endsWith("/diagnostics")));
+  await new Promise((resolve) => setTimeout(resolve, 500));
   const diagnosticReads = report.requests.filter((request) =>
     request.path.endsWith("/diagnostics"),
   ).length;
@@ -263,15 +325,14 @@ try {
     report.requests.filter((request) => request.path.endsWith("/diagnostics")).length,
     diagnosticReads,
   );
-  await page.getByRole("button", { name: "刷新工作记录", exact: true }).click();
-  await until(
-    async () =>
-      report.requests.filter((request) => request.path.endsWith("/diagnostics")).length ===
-      diagnosticReads + 1,
+  assert.ok(
+    report.requests
+      .filter((request) => request.path.endsWith("/diagnostics"))
+      .every((request) => request.method === "GET"),
   );
-  await page.getByRole("button", { name: "收起工作记录", exact: true }).click();
+  assert.equal(await page.getByRole("button", { name: "刷新工作记录", exact: true }).count(), 0);
   report.checks.push(
-    "work diagnostics are fetched on explicit open or refresh, never background polling",
+    "paused work stops polling after its final read; display requests never execute commands",
   );
   await page.getByRole("button", { name: "继续任务", exact: true }).click();
   await page.getByRole("button", { name: "暂停", exact: true }).waitFor();
@@ -324,7 +385,9 @@ try {
   assert.ok(stateFiles.includes("application.sqlite3"));
   assert.ok(!stateFiles.some((name) => name.startsWith("conversations.sqlite")));
   report.state_files = stateFiles;
-  report.checks.push("fresh product state uses application.sqlite3 without a mirrored conversations database");
+  report.checks.push(
+    "fresh product state uses application.sqlite3 without a mirrored conversations database",
+  );
   process.stdout.write(
     "Real application browser integration passed; all models and work are offline fixtures.\n",
   );

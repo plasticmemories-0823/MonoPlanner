@@ -31,11 +31,15 @@ from agent.storage.history import LocalHistory
 from agent.storage import recovery
 from agent.storage.records import digest
 from agent.task import dialogue, output_limit
-from agent.task.instructions import TASK_RULES, CONVERSATION_RULES, ARTIFACT_RULES
+from agent.task.instructions import TASK_RULES, ARTIFACT_RULES
 from agent.acceptance.artifact_checks import required_consumer
 from agent.task.runner import TaskRunner
 from agent.server import assistant
 from agent.model.tools import CHAT_TOOLS, CODING_TOOLS
+
+
+# 旧会话提示仅供离线回归对照，不随产品运行时加载。
+CONVERSATION_RULES = Path(__file__).with_name("conversation.txt").read_text(encoding="utf-8")
 
 
 class ConversationRunner(TaskRunner):

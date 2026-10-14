@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useRef } from "react";
+import { Fragment, ReactNode, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext } from "@/providers/Stream";
@@ -30,7 +30,7 @@ import { ModelSettings } from "./model-settings";
 import { DesktopCards } from "./desktop-controls";
 import { ExecutionPermissions } from "./execution-permissions";
 import { Resources } from "./resources";
-import { WorkDiagnostics } from "./work-diagnostics";
+import { groupActivity } from "@/lib/work-diagnostics";
 import { canSupplementWork } from "@/lib/conversation-types";
 
 function StickyToBottomContent(props: {
@@ -104,6 +104,31 @@ export function Thread() {
   } | null>(null);
   const isLoading = stream.isLoading;
   const activity = useActivity();
+  const activityGroups = groupActivity(messages, activity.items);
+  const messageIds = new Set(messages.map((message) => message.id));
+  const renderActivity = (items: typeof activity.items) => {
+    const tasks = new Map<string, typeof activity.items>();
+    for (const row of items.filter((item) => item.source === "work")) {
+      const task = row.task_id || "saved-work";
+      if (!tasks.has(task)) tasks.set(task, []);
+      tasks.get(task)!.push(row);
+    }
+    return (
+      <>
+        <ActivityRows
+          items={items.filter((row) => row.source === "chat")}
+          title="聊天"
+        />
+        {[...tasks].map(([task, rows]) => (
+          <ActivityRows
+            key={task}
+            items={rows}
+            title="工作"
+          />
+        ))}
+      </>
+    );
+  };
 
   const lastError = useRef<string | undefined>(undefined);
 
@@ -259,31 +284,28 @@ export function Thread() {
                 <>
                   {messages
                     .filter((message) => message.type === "human" || message.type === "ai")
-                    .map((message) =>
-                      message.type === "human" ? (
-                        <HumanMessage
-                          key={message.id}
-                          message={message}
-                          isLoading={isLoading}
-                        />
-                      ) : (
-                        <AssistantMessage
-                          key={message.id}
-                          message={message}
-                          isLoading={isLoading}
-                        />
-                      ),
-                    )}
-                  <ActivityRows
-                    key={`activity-${threadId || "new"}`}
-                    items={activity.items}
-                  />
-                  {threadId && stream.values.work && !stream.values.read_only && (
-                    <WorkDiagnostics
-                      key={`diagnostics-${threadId}`}
-                      apiUrl={stream.apiUrl}
-                      threadId={threadId}
-                    />
+                    .map((message) => (
+                      <Fragment key={message.id}>
+                        {message.type === "human" ? (
+                          <HumanMessage
+                            key={message.id}
+                            message={message}
+                            isLoading={isLoading}
+                          />
+                        ) : (
+                          <AssistantMessage
+                            key={message.id}
+                            message={message}
+                            isLoading={isLoading}
+                          />
+                        )}
+                        {renderActivity(activityGroups.get(message.id || "") || [])}
+                      </Fragment>
+                    ))}
+                  {renderActivity(
+                    [...activityGroups]
+                      .filter(([anchor]) => !messageIds.has(anchor))
+                      .flatMap(([, items]) => items),
                   )}
                   {stream.values.read_only && (
                     <p className="text-muted-foreground text-sm">
@@ -555,7 +577,7 @@ export function Thread() {
                             ? "记录写入失败 · 已停止派发，执行状态待核对"
                             : isLoading
                               ? stream.workRunning
-                                ? "工作进行中，聊天不会打断任务"
+                                ? `${statusLabel(stream.values.work?.status)} · 聊天不会打断任务`
                                 : "正在回复"
                               : statusLabel(stream.values.status)}
                         </span>

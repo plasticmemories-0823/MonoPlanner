@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import time
 import uuid
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage, message_to_dict
 
 from agent.application import api
 from agent.application.scheduler import Scheduler
@@ -114,14 +114,16 @@ class OfflineChat:
 
     def invoke(self, messages):
         last = messages[-1]
-        if messages[0].content.startswith('Write a concise professional progress'):
+        if messages[0].content.startswith('Give a brief first-person progress'):
             facts = json.loads(last.content) if not isinstance(last, ToolMessage) else {}
             task = facts.get('task') or {}
-            return response('任务记录已更新，当前状态：' + task.get('status', '已保存'))
+            return response('我刚完成一轮本地检查，结果已记录。' if task else '我正在核对刚收到的记录。')
         if isinstance(last, ToolMessage):
             return response('已完成查询：' + last.content[:400])
         text = str(last.content)
-        if '开始工作' in text or '准备失败工作' in text:
+        if text == '帮我画鹈鹕骑自行车':
+            return response('我会制作一个能直接打开的动画网页。是否按这个计划开始？')
+        if text == '按这个计划开始' or '开始工作' in text or '准备失败工作' in text:
             return response('已保存任务，将在独立工作流程中执行。', 'start_work')
         if '查询进度' in text:
             return response('', 'get_work_status')
@@ -168,6 +170,9 @@ def pause(task, command):
 
 
 def work(job, emit, controls):
+    from agent.storage.history import LocalHistory
+    from agent.storage.live_reasoning import LiveReasoning
+
     native_action({'kind': 'work_started', 'task': job['task_id']})
     if '准备失败工作' in job['request']:
         return {'status': 'preparation_failed', 'applied_inputs': [],
@@ -175,33 +180,67 @@ def work(job, emit, controls):
     with _guard:
         signal = Event()
         _signals[job['task_id']] = signal
+
+    # 使用真实只读活动接口的本地原件；命令只作为样本保存，绝不执行。
+    history = LocalHistory(state_root() / 'tasks' / job['task_id'])
+    with history.lease():
+        previous = history.load() or {}
+        call = previous.get('budget', {}).get('used_steps', 0) + 1
+        state = {'history': [], 'budget': {'used_steps': call}}
+        history.record(state, 'model_request_started', {'call': call})
+    live = LiveReasoning(history.root, call, job['input_id'])
+    live.append('工作思考第一段')
     applied = []
-    for index in range(160):
-        if (state_root() / 'fixture-storage-failure').is_file():
-            _failed_writes.set()
-            emit('work_state', {'status': 'executing', 'reason': '触发离线记录失败'})
-        pending = controls()
-        for item in pending:
-            if item['id'] in applied:
-                continue
-            applied.append(item['id'])
-            if item['kind'] == 'pause':
-                signal.set()
-            elif item['kind'] == 'message':
-                emit('work_state', {'event': 'user_input_applied', 'status': 'executing',
-                                    'reason': '已收到补充原文：' + item['text'],
-                                    'applied_inputs': applied})
-        if signal.wait(0.25):
-            return {'status': 'paused', 'applied_inputs': applied, 'stop_reason': '离线任务已暂停'}
-        if index % 8 == 0:
-            emit('work_state', {'event': 'plan_finished', 'status': 'executing',
-                                'reason': '离线检查阶段 ' + str(index // 8),
-                                'applied_inputs': applied,
-                                'usage': {'calls': 1, 'total_tokens': 120, 'input_tokens': 100,
-                                          'output_tokens': 20, 'cached_input_tokens': 50,
-                                          'cache_known_input_tokens': 100,
-                                          'uncached_input_tokens': 50, 'unknown_calls': 0}})
-    return {'status': 'verified_success', 'applied_inputs': applied, 'stop_reason': '离线验收通过'}
+    try:
+        for index in range(160):
+            if (state_root() / 'fixture-storage-failure').is_file():
+                _failed_writes.set()
+                emit('work_state', {'status': 'executing', 'reason': '触发离线记录失败'})
+            pending = controls()
+            for item in pending:
+                if item['id'] in applied:
+                    continue
+                applied.append(item['id'])
+                if item['kind'] == 'pause':
+                    signal.set()
+                elif item['kind'] == 'message':
+                    emit('work_state', {'event': 'user_input_applied', 'status': 'executing',
+                                        'reason': '已收到补充原文：' + item['text'],
+                                        'applied_inputs': applied})
+            if signal.wait(0.25):
+                if live.row['status'] == 'running':
+                    live.finish('interrupted')
+                return {'status': 'paused', 'applied_inputs': applied,
+                        'stop_reason': '离线任务已暂停'}
+            if index == 4:
+                live.append('，已确认要运行检查')
+                live.flush()
+            if index == 8:
+                live.finish('completed')
+                plan_id = 'fixture-' + str(call)
+                step = {'id': 'probe', 'op': 'shell',
+                        'command': "printf 'offline-operation-marker'"}
+                folder = history.root / 'plans' / plan_id / (plan_id + '-probe')
+                folder.mkdir(parents=True)
+                (folder / 'request.json').write_text(json.dumps(step), encoding='utf-8')
+                state['pending'] = {'id': plan_id, 'plan': {'steps': [step]},
+                                    'response': message_to_dict(response('')), 'rows': []}
+                with history.lease():
+                    history.record(state, 'step_started', {'id': 'probe'})
+            if index == 12:
+                with history.lease():
+                    history.record(state, 'step_finished', {'id': 'probe', 'status': 'succeeded'})
+            if index % 8 == 0:
+                emit('work_state', {'event': 'plan_finished', 'status': 'executing',
+                                    'reason': '离线检查阶段 ' + str(index // 8),
+                                    'applied_inputs': applied,
+                                    'usage': {'calls': 1, 'total_tokens': 120, 'input_tokens': 100,
+                                              'output_tokens': 20, 'cached_input_tokens': 50,
+                                              'cache_known_input_tokens': 100,
+                                              'uncached_input_tokens': 50, 'unknown_calls': 0}})
+        return {'status': 'verified_success', 'applied_inputs': applied, 'stop_reason': '离线验收通过'}
+    finally:
+        history.close()
 
 
 store = ApplicationStore(state_root())

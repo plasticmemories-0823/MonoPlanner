@@ -31,6 +31,8 @@ export type Conversation = {
 
 export type Activity = {
   id: string;
+  task_id?: string;
+  source?: "chat" | "work";
   after_id: string;
   kind: "thinking" | "operation";
   label: string;
@@ -58,7 +60,13 @@ export type ConversationSnapshot = {
   thread_id: string;
   status: string;
   chat_status: string;
-  work: { task_id: string; status: string; reason?: string } | null;
+  work: {
+    task_id: string;
+    input_id?: string;
+    status: string;
+    reason?: string;
+    revision?: number;
+  } | null;
   repo: string;
   runtime_settings?: RuntimeSettings;
   workspace_bound: boolean;

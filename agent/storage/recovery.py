@@ -83,7 +83,6 @@ def code_key(root=None):
         'agent/task/runner.py',
         'agent/task/dialogue.py',
         'agent/task/output_limit.py',
-        'resources/prompts/conversation.txt',
         'agent/task/operations.py',
         'agent/storage/preferences.py',
         'agent/settings.py',

@@ -723,7 +723,7 @@ class ApplicationStore:
                 activities[item['id']] = {**old, **item}
         usage = self.usage(conversation)
         public_work = ({key: work.get(key) for key in
-                       ('task_id', 'status', 'reason', 'revision', 'created_at', 'updated_at')}
+                       ('task_id', 'input_id', 'status', 'reason', 'revision', 'created_at', 'updated_at')}
                        if work else None)
         return {**value, 'work': public_work, 'messages': messages, 'pending_messages': [],
                 'workspace_bound': bool(work), 'usage': usage, 'event_cursor': cursor,
