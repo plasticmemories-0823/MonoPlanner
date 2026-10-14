@@ -1,16 +1,17 @@
-import { validate } from "uuid";
-import { localApiUrl } from "@/lib/local-service";
-import { Thread } from "@langchain/langgraph-sdk";
+"use client";
+
 import {
   createContext,
   useContext,
-  ReactNode,
   useCallback,
   useEffect,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
-import { createClient } from "./client";
+import { localApiUrl } from "@/lib/local-service";
+import { requestJson } from "@/lib/conversation-api";
+import type { Conversation } from "@/lib/conversation-types";
 import {
   ThreadHistoryStore,
   type ConversationTitle,
@@ -20,175 +21,77 @@ import {
 
 export type { ManagedThread, Visibility } from "@/lib/thread-history";
 
-interface ThreadContextType {
+type ThreadContextType = {
   getThreads: () => Promise<ManagedThread[]>;
   threads: ManagedThread[];
   threadsLoading: boolean;
   threadsError: string;
-  upsertThread: (thread: Thread, firstMessage?: string) => void;
+  upsertThread: (thread: Conversation, firstMessage?: string) => void;
   updateTitle: (thread: string, title: ConversationTitle) => void;
-  waitForTitle: (thread: string, firstMessage: string) => void;
   setVisibility: (thread: string, visibility: Visibility) => Promise<void>;
-  deletePermanently: (thread: string) => Promise<void>;
-}
-
+  deletePermanently: (thread: string, retainEnvironment?: boolean) => Promise<void>;
+};
 const ThreadContext = createContext<ThreadContextType | undefined>(undefined);
-
-export function getThreadSearchMetadata(
-  assistantId: string,
-): { graph_id: string } | { assistant_id: string } {
-  if (validate(assistantId)) {
-    return { assistant_id: assistantId };
-  } else {
-    return { graph_id: assistantId };
-  }
-}
 
 export function ThreadProvider({ children }: { children: ReactNode }) {
   const apiUrl = localApiUrl();
-  const assistantId = "monoplaner";
   const [threads, setThreads] = useState<ManagedThread[]>([]);
-  const [threadsLoading, setThreadsLoading] = useState(false);
-  const [threadsError, setThreadsError] = useState("");
-  const [titleError, setTitleError] = useState("");
-  const [titlePoll, setTitlePoll] = useState(0);
-  const scope = `${apiUrl}\0${assistantId}`;
-  const activeScope = useRef(scope);
-  activeScope.current = scope;
+  const [threadsLoading, setLoading] = useState(false);
+  const [threadsError, setError] = useState("");
   const store = useRef(new ThreadHistoryStore());
-  const request = useRef(0);
-  useEffect(() => {
-    store.current = new ThreadHistoryStore();
-    setThreads([]);
-    setThreadsError("");
-    setTitleError("");
-  }, [scope]);
+  const active = useRef(true);
+  const controller = useRef<AbortController | null>(null);
+  const pending = useRef<Promise<ManagedThread[]> | null>(null);
+  const generation = useRef(0);
 
-  const upsertThread = useCallback((thread: Thread, firstMessage?: string) => {
-    setThreads(store.current.upsert(thread, firstMessage));
+  const upsertThread = useCallback((thread: Conversation, text?: string) => {
+    setThreads(store.current.upsert(thread, text));
   }, []);
-  const updateTitle = useCallback(
-    (thread: string, title: ConversationTitle) => {
-      setThreads(store.current.applyTitle(thread, title));
-    },
-    [],
-  );
-  const waitForTitle = useCallback((thread: string, firstMessage: string) => {
-    setThreads(store.current.waitForTitle(thread, firstMessage));
-    if (store.current.titleRefreshState().pending)
-      setTitlePoll((value) => value + 1);
+  const updateTitle = useCallback((id: string, title: ConversationTitle) => {
+    setThreads(store.current.applyTitle(id, title));
   }, []);
 
-  const getThreads = useCallback(async (): Promise<ManagedThread[]> => {
-    const finalApiUrl = apiUrl;
-    const resolvedAssistantId = assistantId;
-    if (!finalApiUrl || !resolvedAssistantId) return [];
-    const expectedStore = store.current;
-    expectedStore.retryTitles();
-    const ticket = expectedStore.startRefresh();
-    const version = ++request.current;
-    setThreadsLoading(true);
-    const client = createClient(finalApiUrl);
-
-    try {
-      const threads = await client.threads.search({
-        metadata: {
-          ...getThreadSearchMetadata(resolvedAssistantId),
-        },
-        limit: 100,
-      });
-
-      const response = await fetch(`${finalApiUrl}/conversations`, {
-        cache: "no-store",
-      });
-      if (!response.ok) throw new Error("无法读取对话管理信息");
-      const {
-        visibility = {},
-        titles = {},
-        pending_deletions = [],
-      } = await response.json();
-      const savedIds = new Set(threads.map((thread) => thread.thread_id));
-      // 部分清理操作可能已删除 SDK 会话；保留一个最小回收站条目，
-      // 以便用户明确重试清理。
-      const pending: Thread[] = pending_deletions
-        .filter((item: { thread_id: string }) => !savedIds.has(item.thread_id))
-        .map((item: { thread_id: string; title: string }) => ({
-          thread_id: item.thread_id,
-          created_at: "",
-          updated_at: "",
-          metadata: {},
-          status: "idle",
-          values: { messages: [{ content: item.title }] },
-        }));
-      const incoming: ManagedThread[] = [...threads, ...pending]
-        .filter((thread) => visibility[thread.thread_id] !== "purged")
-        .map((thread) => ({
-          ...thread,
-          title: titles[thread.thread_id],
-          visibility:
-            visibility[thread.thread_id] === "purging"
-              ? "deleted"
-              : visibility[thread.thread_id] || "active",
-        }));
-      if (activeScope.current !== scope || store.current !== expectedStore)
-        return [];
-      const merged = expectedStore.applyRefresh(ticket, incoming, visibility);
-      setThreads(merged);
-      if (expectedStore.titleRefreshState().pending)
-        setTitlePoll((value) => value + 1);
-      if (request.current === version) setThreadsError("");
-      return merged;
-    } catch (error) {
-      if (activeScope.current === scope && request.current === version)
-        setThreadsError(
-          error instanceof Error ? error.message : "无法读取对话记录",
-        );
-      // 刷新失败时保留上一次可用列表。
-      return expectedStore.rows;
-    } finally {
-      if (activeScope.current === scope && request.current === version)
-        setThreadsLoading(false);
-    }
-  }, [apiUrl, assistantId, scope]);
-
-  useEffect(() => {
-    const expectedStore = store.current;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      const state = expectedStore.titleRefreshState();
-      if (state.expired) setTitleError("标题尚未同步，可重试查询");
-      if (!state.pending) return;
+  const getThreads = useCallback((): Promise<ManagedThread[]> => {
+    if (pending.current && !controller.current?.signal.aborted) return pending.current;
+    const current = ++generation.current;
+    const abort = new AbortController();
+    controller.current = abort;
+    const ticket = store.current.startRefresh();
+    setLoading(true);
+    const request = (async () => {
       try {
-        // 会话选择变化时，继续复用同一个轻量监视器。
-        // 仅读取展示元数据，不读取 SDK 消息历史。
-        const response = await fetch(`${apiUrl}/conversations`, {
-          cache: "no-store",
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error("无法同步对话标题");
-        const result = await response.json();
-        if (controller.signal.aborted || store.current !== expectedStore)
-          return;
-        setThreads(expectedStore.applyTitles(result.titles || {}));
-        const next = expectedStore.titleRefreshState();
-        setTitleError(next.expired ? "标题尚未同步，可重试查询" : "");
-        if (next.pending) timer = setTimeout(poll, 1000);
+        const result = await requestJson<{ conversations: Conversation[] }>(
+          `${apiUrl}/conversations`,
+          { signal: abort.signal },
+        );
+        if (!Array.isArray(result.conversations)) throw new Error("无法读取对话记录。");
+        if (!active.current || abort.signal.aborted || current !== generation.current)
+          return store.current.rows;
+        const rows = result.conversations.map((row) => ({
+          ...row,
+          visibility: row.visibility || "active",
+        }));
+        const merged = store.current.applyRefresh(ticket, rows);
+        setThreads(merged);
+        setError("");
+        return merged;
       } catch (error) {
-        if (!controller.signal.aborted)
-          setTitleError(
-            error instanceof Error ? error.message : "无法同步对话标题",
-          );
+        if (active.current && !abort.signal.aborted && current === generation.current)
+          setError(error instanceof Error ? error.message : "无法读取对话记录。");
+        return store.current.rows;
+      } finally {
+        if (current === generation.current) {
+          if (active.current && !abort.signal.aborted) setLoading(false);
+          pending.current = null;
+        }
       }
-    };
-    void poll();
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-    };
-  }, [scope, apiUrl, titlePoll]);
+    })();
+    pending.current = request;
+    return request;
+  }, [apiUrl]);
 
   useEffect(() => {
+    active.current = true;
     void getThreads();
     const refresh = () => {
       void getThreads();
@@ -196,54 +99,50 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     window.addEventListener("focus", refresh);
     window.addEventListener("online", refresh);
     return () => {
+      active.current = false;
+      controller.current?.abort();
       window.removeEventListener("focus", refresh);
       window.removeEventListener("online", refresh);
     };
   }, [getThreads]);
 
-  const setVisibility = async (thread: string, visibility: Visibility) => {
-    const response = await fetch(`${apiUrl}/threads/${thread}/visibility`, {
+  async function setVisibility(thread: string, visibility: Visibility) {
+    await requestJson(`${apiUrl}/conversations/${thread}/visibility`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ visibility }),
     });
-    const value = await response.json();
-    if (!response.ok) throw new Error(value.error || "对话管理操作未完成");
     setThreads(store.current.setVisibility(thread, visibility));
-  };
-
-  const deletePermanently = async (thread: string) => {
-    const response = await fetch(`${apiUrl}/threads/${thread}/purge`, {
+  }
+  async function deletePermanently(thread: string, retainEnvironment = false) {
+    await requestJson(`${apiUrl}/conversations/${thread}/purge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm_thread_id: thread }),
+      body: JSON.stringify({ confirm_thread_id: thread, retain_environment: retainEnvironment }),
     });
-    const value = await response.json();
-    if (!response.ok) throw new Error(value.error || "彻底删除未完成");
     setThreads(store.current.purge(thread));
-  };
-
-  const value = {
-    getThreads,
-    threads,
-    threadsLoading,
-    threadsError: threadsError || titleError,
-    upsertThread,
-    updateTitle,
-    waitForTitle,
-    setVisibility,
-    deletePermanently,
-  };
+  }
 
   return (
-    <ThreadContext.Provider value={value}>{children}</ThreadContext.Provider>
+    <ThreadContext.Provider
+      value={{
+        getThreads,
+        threads,
+        threadsLoading,
+        threadsError,
+        upsertThread,
+        updateTitle,
+        setVisibility,
+        deletePermanently,
+      }}
+    >
+      {children}
+    </ThreadContext.Provider>
   );
 }
 
 export function useThreads() {
   const context = useContext(ThreadContext);
-  if (context === undefined) {
-    throw new Error("useThreads must be used within a ThreadProvider");
-  }
+  if (!context) throw new Error("useThreads must be used within a ThreadProvider");
   return context;
 }

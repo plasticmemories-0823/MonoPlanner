@@ -31,11 +31,11 @@ class OutputLimitTests(unittest.TestCase):
 
     def resume(self, model, identity='resume-one'):
         self.store.enqueue(self.thread, identity, 'resume')
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             return self.compiled.invoke({'messages': []}, self.config)
 
     def test_defaults_and_auxiliary_caps(self):
-        from agent.server.titles import POLICY
+        from agent.application.titles import POLICY
         from agent.model.compaction import CONFIG
 
         self.assertEqual(ModelPolicy().max_output_tokens, 256000)
@@ -85,7 +85,7 @@ class OutputLimitTests(unittest.TestCase):
         original = hashlib.sha256(raw_path.read_bytes()).hexdigest()
         self.assertEqual(len(list(root.glob('plans/*/*/result.json'))), 1)
         with patch(
-            'agent.server.runtime.ConversationRunner.activate',
+            'tests.legacy.runtime.ConversationRunner.activate',
             side_effect=AssertionError('chat must not activate'),
         ):
             chatted = self.invoke(model, '为什么未完成', 'why')
@@ -110,7 +110,7 @@ class OutputLimitTests(unittest.TestCase):
         result = self.invoke(model)
         self.assertEqual(result['status'], STATUS)
         with patch(
-            'agent.server.runtime.ConversationRunner.activate',
+            'tests.legacy.runtime.ConversationRunner.activate',
             side_effect=AssertionError('no execution'),
         ):
             resumed = self.resume(model)
@@ -155,7 +155,7 @@ class OutputLimitTests(unittest.TestCase):
         )
         self.invoke(model, '开始编码')
         with patch(
-            'agent.server.runtime.ConversationRunner.activate',
+            'tests.legacy.runtime.ConversationRunner.activate',
             side_effect=AssertionError('no activation'),
         ):
             result = self.invoke(model, '为什么停了', 'why')

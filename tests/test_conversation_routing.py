@@ -24,8 +24,8 @@ class ConversationRoutingTests(unittest.TestCase):
 
     def test_chat_without_repository_never_initializes_source_or_executor(self):
         model = fixtures.ScriptedModel([fixtures.text_reply('你好')])
-        with patch('agent.server.graph.model_factory', return_value=model), patch(
-            'agent.server.runtime.ConversationRunner.activate',
+        with patch('tests.legacy.graph.model_factory', return_value=model), patch(
+            'tests.legacy.runtime.ConversationRunner.activate',
             side_effect=AssertionError('chat must not initialize source'),
         ):
             result = self.compiled.invoke(
@@ -85,7 +85,7 @@ class ConversationRoutingTests(unittest.TestCase):
             )
         )
         self.store.enqueue(self.thread, 'resume', 'resume')
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             result = self.compiled.invoke({'messages': []}, self.config)
         self.assertNotEqual(result['status'], 'runtime_error')
         self.assertEqual(len(model.calls), 4)
@@ -114,18 +114,18 @@ class ConversationRoutingTests(unittest.TestCase):
             factory_settings.append(settings)
             return model
 
-        with patch('agent.server.graph.model_factory', side_effect=factory):
+        with patch('tests.legacy.graph.model_factory', side_effect=factory):
             self.compiled.invoke({'messages': []}, self.config)
         self.assertTrue(
             all(v['reasoning_effort'] == 'high' and not v['online'] for v in factory_settings)
         )
         model = fixtures.ScriptedModel([fixtures.text_reply()])
         with patch(
-            'agent.server.graph.model_factory',
+            'tests.legacy.graph.model_factory',
             side_effect=lambda s: factory_settings.append(s) or model,
         ):
             # 已结束的聊天会使用变更后的默认设置开始新任务。
-            from agent.server.graph import builder
+            from tests.legacy.graph import builder
             import uuid
 
             result = builder.compile().invoke(
@@ -154,7 +154,7 @@ class ConversationRoutingTests(unittest.TestCase):
         model = fixtures.ScriptedModel(
             [self.web_reply(url='https://example.com'), fixtures.text_reply('网页摘要')]
         )
-        with patch('agent.server.graph.model_factory', return_value=model), patch(
+        with patch('tests.legacy.graph.model_factory', return_value=model), patch(
             'agent.execution.web.WebProvider.fetch',
             return_value={'url': 'https://example.com', 'text': '原文'},
         ) as fetch:
@@ -167,7 +167,7 @@ class ConversationRoutingTests(unittest.TestCase):
         self.assertIn('原文', repr(model.calls[-1]))
         self.assertIn('PRIVATE_WEB_THINKING', repr(model.calls[-1]))
         self.assertNotIn('PRIVATE_WEB_THINKING', repr(result))
-        from agent.server.app import activity_value
+        from tests.legacy.app_adapter import activity_value
 
         self.assertIn('正在读取网页', repr(activity_value(self.thread, {}).body.decode()))
 
@@ -195,8 +195,8 @@ class ConversationRoutingTests(unittest.TestCase):
 
     def test_missing_repository_pairs_handoff_without_initializing_source(self):
         model = fixtures.ScriptedModel([fixtures.start_reply()])
-        with patch('agent.server.graph.model_factory', return_value=model), patch(
-            'agent.server.runtime.ConversationRunner.activate',
+        with patch('tests.legacy.graph.model_factory', return_value=model), patch(
+            'tests.legacy.runtime.ConversationRunner.activate',
             side_effect=AssertionError('no repository'),
         ):
             result = self.compiled.invoke(
@@ -208,7 +208,7 @@ class ConversationRoutingTests(unittest.TestCase):
 
     def test_missing_key_can_be_configured_before_a_new_turn(self):
         with patch(
-            'agent.server.graph.model_factory', side_effect=ValueError('请配置 DEEPSEEK_API_KEY')
+            'tests.legacy.graph.model_factory', side_effect=ValueError('请配置 DEEPSEEK_API_KEY')
         ):
             result = self.compiled.invoke(
                 {'messages': [HumanMessage(content='你好', id='one')]}, self.config

@@ -92,7 +92,7 @@ class ConversationRunner(TaskRunner):
             }
             self.persist('environment_preparation', self.state['environment_preparation'])
             dialogue.apply_controls(self)
-            from agent.server.interrupts import current
+            from agent.task.control import current
 
             signal = current()
             if signal:
@@ -111,7 +111,7 @@ class ConversationRunner(TaskRunner):
         if not self.repo or not Path(self.repo).is_dir():
             raise ValueError('工作需要选择一个已有仓库；普通聊天无需仓库')
         if not self.execution_binding.get('image'):
-            from agent.server.interrupts import current
+            from agent.task.control import current
 
             signal = current()
 
@@ -530,7 +530,7 @@ class ConversationRunner(TaskRunner):
             'work_response': self.state.get('response_pending'),
         }
         self.persist('conversation_input_saved', {'id': incoming['id']})
-        from agent.server.interrupts import current
+        from agent.task.control import current
 
         signal = current()
         if signal:
@@ -713,7 +713,7 @@ class ConversationRunner(TaskRunner):
         # 明确的暂停和恢复无需模型调用；修改待执行工作前，
         # 先由常规首条回复对消息分类。
         if dialogue.apply_controls(self):
-            from agent.server.interrupts import current
+            from agent.task.control import current
 
             signal = current()
             if signal:

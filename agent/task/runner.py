@@ -53,6 +53,7 @@ class TaskRunner:
         event_sink=None,
         control_source=None,
         runtime_settings=None,
+        work_rules_factory=None,
     ):
         self.interactive, self.yield_boundary = interactive, yield_boundary
         self.event_sink, self.control_source = event_sink, control_source
@@ -72,6 +73,7 @@ class TaskRunner:
         self.optimize_source, self.overlap_preparation = optimize_source, overlap_preparation
         self.preparation, self.preparation_errors = None, []
         self.runtime_settings = dict(runtime_settings or {})
+        self.work_rules_factory = work_rules_factory
         from agent.model.tools import CODING_TOOLS
 
         self.tools = CODING_TOOLS
@@ -183,7 +185,9 @@ class TaskRunner:
             request_reservation(messages, self.tools, cap), purpose=purpose
         )
         folder = self.root / "requests" / ("call-%04d" % ticket.call_id)
-        save(folder / "request.json", {"messages": messages_to_dict(messages), "purpose": purpose})
+        from agent.storage.requests import save_request
+
+        save_request(self.root, folder, messages_to_dict(messages), purpose, self.history_store)
         self.state["request_pending"] = {
             "call": ticket.call_id,
             "reservation": ticket.reserved_tokens,
@@ -585,6 +589,9 @@ class TaskRunner:
             self.rules += '\nGive brief professional public progress in ordinary replies.'
         if required_consumer(text + "\n" + (acceptance or "")) and not verify_command:
             self.rules += ARTIFACT_RULES
+
+        if self.work_rules_factory is not None:
+            self.rules = self.work_rules_factory(self, text, acceptance, verify_command)
 
         # ========================================================================
         # 保存原始需求和初始材料，再进入驱动循环

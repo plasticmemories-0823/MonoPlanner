@@ -23,6 +23,7 @@ PROXY_VARIABLES = tuple(
     for name in (protocol + '_PROXY', protocol.lower() + '_proxy')
 )
 DEPENDENCY_CACHE_OPTIONS = 'rw,exec,nosuid,nodev,size=67108864,mode=1777'
+LOG_OPTIONS = ['--log-driver', 'local', '--log-opt', 'max-size=10m', '--log-opt', 'max-file=3']
 
 
 # ============================================================
@@ -68,9 +69,9 @@ def managed_dependencies(image, managed, *, root=None):
         if not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
             raise ValueError('Managed dependencies require an immutable image ID')
         seen.add(relative)
-        from agent.storage.preferences import state_root
+        from agent.storage.resources import current_root
 
-        owner = str(Path(root).resolve() if root is not None else state_root())
+        owner = str(current_root(root))
         identity = hashlib.sha256(
             (owner + '\n' + image + '\n' + expected).encode('utf-8')
         ).hexdigest()
@@ -320,6 +321,46 @@ class DockerEnvironment:
             raise ValueError("Docker 挂载路径暂不支持逗号。")
         self._container_id = None
         self._closed = False
+        from agent.storage.resources import current_owner, current_root
+
+        self.resource_owner = current_owner()
+        self.resource_root = current_root()
+        self._control_key = None
+        self._execution_unknown = False
+        self.disposable = False
+
+    def _check_cancelled(self):
+        from agent.storage.resources import owner_cancelled
+
+        if self.resource_owner and owner_cancelled(self.resource_owner, self.resource_root):
+            raise InterruptedError('任务已立即暂停；容器及操作现场已保留。')
+
+    def _kill_now(self):
+        self._execution_unknown = True
+        result = self._docker(
+            ['kill', self._container_id or self.container_name], timeout=8,
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+        )
+        # 创建尚未返回时可能暂时不存在；创建返回后的取消检查会再次终止它。
+        if result.returncode and not any(text in result.stderr.lower()
+                                        for text in ('no such container', 'is not running')):
+            raise RuntimeError('Docker 未确认任务容器已停止。')
+
+    def _register_control(self):
+        if not self.resource_owner:
+            return
+        from agent.storage.resources import register_active_container, resource_catalog, ownership_labels
+
+        if self._control_key is None:
+            self._control_key = register_active_container(
+                self.resource_owner, self.container_name, self._kill_now, root=self.resource_root
+            )
+        resource_catalog(self.resource_root).register(
+            'container:' + self.container_name, 'container', self.container_name,
+            metadata={'container_id': self._container_id, 'image': self.image,
+                      'labels': ownership_labels(self.resource_owner, self.resource_root)},
+            owner=self.resource_owner,
+        )
 
     def clone_options(self):
         options = {'runtime': self.runtime, 'material_mounts': self.material_mounts}
@@ -343,7 +384,8 @@ class DockerEnvironment:
             **kwargs,
         )
 
-    def _dependency_query(self, arguments, *, timeout=30):
+    def _dependency_query(self, arguments, *, timeout=30, check_after=True):
+        self._check_cancelled()
         result = self._docker(
             arguments,
             timeout=timeout,
@@ -356,7 +398,96 @@ class DockerEnvironment:
             raise RuntimeError(
                 '项目依赖准备失败；保留记录，不自动重试：' + result.stderr.strip()[:500]
             )
+        if check_after:
+            self._check_cancelled()
         return result.stdout
+
+    def _finish_resources(self, owner, identities, *, completed):
+        from agent.storage.resources import resource_catalog, delete_owned_docker_resource
+
+        def query(arguments):
+            return self._docker(arguments, timeout=15, capture_output=True,
+                                text=True, encoding='utf-8', errors='replace')
+        result = resource_catalog(self.resource_root).finish_resources(
+            owner, identities, completed=completed, docker=lambda kind, identity, metadata:
+            delete_owned_docker_resource(kind, identity, metadata, query=query, stop_running=True))
+        if result.get('errors'):
+            raise RuntimeError('容器资源收尾未完成，现场已保留。')
+        return result
+
+    def _seed_dependency(self, item):
+        from agent.storage.resources import (
+            ownership_labels, resource_catalog, register_active_container,
+            unregister_active_container, owner_cancelled,
+        )
+
+        name = 'monoplanner-seed-' + uuid.uuid4().hex
+        owner = self.resource_owner or 'environment:' + self.image
+        labels = ownership_labels(owner, self.resource_root)
+        catalog = resource_catalog(self.resource_root)
+        identity = 'container:' + name
+        container_id = None
+
+        def record():
+            catalog.register(identity, 'container', name, owner=owner, metadata={
+                'container_id': container_id, 'image': self.image, 'labels': labels,
+            })
+
+        def stop():
+            result = self._docker(['kill', container_id or name], timeout=8,
+                                 capture_output=True, text=True, encoding='utf-8', errors='replace')
+            if result.returncode and not any(message in result.stderr.lower()
+                                             for message in ('no such container', 'is not running')):
+                raise RuntimeError('依赖复制容器停止未确认。')
+
+        record()
+        control = register_active_container(owner, name, stop, root=self.resource_root)
+        complete = False
+        try:
+            arguments = [
+                'create', '--pull', 'never', '--name', name, '--network', 'none', '--read-only',
+                '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '64',
+                '--cpus', '2', '--memory', '512m', '--user', '0:0', *LOG_OPTIONS,
+                *[arg for key, value in labels.items() for arg in ('--label', key + '=' + value)],
+                *proxy_environment(), '--mount',
+                'type=volume,source=' + item['volume'] + ',target=/prepared,volume-nocopy',
+                '--entrypoint', '/bin/cp', self.image, '-R', '--no-preserve=ownership',
+                item['image_path'] + '/.', '/prepared/',
+            ]
+            container_id = self._dependency_query(arguments, check_after=False).strip()
+            if not re.fullmatch(r'[0-9a-f]{64}', container_id):
+                raise RuntimeError('依赖复制容器身份未确认。')
+            record()
+            self._check_cancelled()
+            self._dependency_query(['start', '--attach', container_id], timeout=120)
+            exit_code = self._dependency_query(
+                ['inspect', '--format', '{{.State.ExitCode}}', container_id]
+            ).strip()
+            if exit_code != '0':
+                raise RuntimeError('项目依赖准备失败；复制结果未确认。')
+            complete = True
+        finally:
+            try:
+                if complete and not owner_cancelled(owner, self.resource_root):
+                    self._finish_resources(owner, [identity], completed=True)
+                else:
+                    stop()
+            finally:
+                unregister_active_container(control)
+
+    def _dependency_space_budget(self):
+        from agent.storage.resources import resource_catalog, preflight_space
+        from agent.storage.disk_space import require_docker_space
+
+        reserve = resource_catalog(self.resource_root).usage()['reserve_bytes']
+        storage = require_docker_space(reserve)
+        image = json.loads(self._dependency_query(['image', 'inspect', self.image]))[0]
+        size = image.get('Size')
+        if image.get('Id') != self.image or type(size) is not int or size < 0:
+            raise RuntimeError('依赖复制大小未确认，尚未创建数据卷。')
+        # 镜像整体大小是准备量估计；额外记录估算口径，不把它当卷的实占。
+        return {**preflight_space(storage['location'], size, reserve_bytes=reserve),
+                'estimated': True, 'basis': 'source_image_size'}
 
     def _verify_dependency_volume(self, item, labels):
         actual = json.loads(self._dependency_query(['volume', 'inspect', item['volume']]))
@@ -382,7 +513,7 @@ class DockerEnvironment:
         from agent.storage.preferences import state_root
 
         for item in self.dependencies:
-            with _lock(state_root() / 'managed-volume-locks' / (item['identity'] + '.lock')):
+            with _lock(self.resource_root / 'managed-volume-locks' / (item['identity'] + '.lock')):
                 self._prepare_dependency(item, allow_create=allow_create)
         self._dependencies_checked = True
 
@@ -392,7 +523,7 @@ class DockerEnvironment:
         # 只读调查副本也需要校验并创建挂载点。
         # 这些是程序生成的空目录，依赖内容仍保存在 Docker 中。
         dependency_mountpoint(self.repo_root, item['relative'])
-        folder = state_root() / 'managed-volumes' / item['identity']
+        folder = self.resource_root / 'managed-volumes' / item['identity']
         record = folder / 'completion.json'
         expected = {'image': self.image, **item}
         labels = {
@@ -406,6 +537,7 @@ class DockerEnvironment:
         else:
             if not allow_create:
                 raise RuntimeError('已绑定任务缺少项目依赖副本记录；不会自动重建。')
+            space = self._dependency_space_budget()
             # 独占预留同时防止两个任务并发初始化同一个数据卷。
             # 已经放弃的预留不能自动重放。
             try:
@@ -413,6 +545,7 @@ class DockerEnvironment:
             except FileExistsError as exc:
                 raise RuntimeError('项目依赖正在准备或记录不完整；请稍后重试读取状态。') from exc
             atomic_write(record, json.dumps({'status': 'pending', **expected}).encode('utf-8'))
+            atomic_write(folder / 'space-budget.json', json.dumps(space).encode('utf-8'))
             existing = self._docker(
                 ['volume', 'inspect', item['volume']],
                 capture_output=True,
@@ -434,71 +567,40 @@ class DockerEnvironment:
                 ]
             )
             self._verify_dependency_volume(item, labels)
+            from agent.storage.resources import resource_catalog
+
+            resource_catalog(self.resource_root).register(
+                'volume:' + item['volume'], 'volume', item['volume'],
+                metadata={'identity': item['identity'], 'image': self.image},
+                owner=self.resource_owner or 'environment:' + self.image,
+            )
             # 这里不挂载项目、运行记录、凭据或 Docker Socket。
             # cp 会保留依赖中的符号链接，包括工作区引用；
             # 任务只读挂载最终的依赖目录。
-            name = 'monoplanner-seed-' + uuid.uuid4().hex
-            arguments = [
-                'run',
-                '--rm',
-                '--pull',
-                'never',
-                '--name',
-                name,
-                '--network',
-                'none',
-                '--read-only',
-                '--cap-drop',
-                'ALL',
-                '--security-opt',
-                'no-new-privileges',
-                '--pids-limit',
-                '64',
-                '--cpus',
-                '2',
-                '--memory',
-                '512m',
-                '--user',
-                '0:0',
-                *proxy_environment(),
-                '--mount',
-                'type=volume,source=' + item['volume'] + ',target=/prepared,volume-nocopy',
-                '--entrypoint',
-                '/bin/cp',
-                self.image,
-                '-R',
-                '--no-preserve=ownership',
-                item['image_path'] + '/.',
-                '/prepared/',
-            ]
-            try:
-                self._dependency_query(arguments, timeout=120)
-            except BaseException:
-                # 这个随机名称只属于本次准备操作。
-                # 删除初始化容器不会删除保留的数据卷。
-                try:
-                    self._docker(
-                        ['rm', '--force', name],
-                        timeout=15,
-                        capture_output=True,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace',
-                    )
-                except (OSError, subprocess.SubprocessError):
-                    pass
-                raise
+            self._seed_dependency(item)
             atomic_write(record, json.dumps({'status': 'completed', **expected}).encode('utf-8'))
         self._verify_dependency_volume(item, labels)
+        if self.resource_owner:
+            from agent.storage.resources import resource_catalog
+
+            catalog = resource_catalog(self.resource_root)
+            identity = catalog.register(
+                'volume:' + item['volume'], 'volume', item['volume'],
+                metadata={'identity': item['identity'], 'image': self.image},
+                owner=self.resource_owner,
+            )
+            catalog.link('environment:' + self.image, identity)
 
     # ============================================================
     # 启动容器并绑定工作目录
     # ============================================================
     def start(self):
+        self._check_cancelled()
         if self._closed:
             raise RuntimeError("此环境已关闭，请为新任务创建新环境。")
         if self._container_id is not None:
             return self
+        self._register_control()
         self._prepare_dependencies()
         arguments = [
             "run",
@@ -520,6 +622,7 @@ class DockerEnvironment:
             "2",
             "--memory",
             "3g",
+            *LOG_OPTIONS,
             *proxy_environment(),
             "--mount",
             f"type=bind,source={self.repo_root},target=/testbed"
@@ -534,6 +637,12 @@ class DockerEnvironment:
             "-c",
             "exec sleep infinity",
         ]
+        if self.resource_owner:
+            from agent.storage.resources import ownership_labels
+
+            arguments[1:1] = [arg for key, value in ownership_labels(
+                self.resource_owner, self.resource_root
+            ).items() for arg in ('--label', key + '=' + value)]
         if getattr(self, "root_read_only", False):
             # Docker 默认以 noexec 挂载 tmpfs；编译调查需要能够
             # 在隔离的临时文件系统中运行生成的程序。
@@ -567,6 +676,12 @@ class DockerEnvironment:
         if not re.fullmatch(r"[0-9a-f]{12,64}", container_id):
             raise RuntimeError("Docker 未返回有效容器 ID。")
         self._container_id = container_id
+        self._register_control()
+        from agent.storage.resources import owner_cancelled
+
+        if self.resource_owner and owner_cancelled(self.resource_owner, self.resource_root):
+            self._kill_now()
+            self._check_cancelled()
         (self.artifact_root / "container.json").write_text(
             json.dumps(
                 {
@@ -736,6 +851,7 @@ class DockerEnvironment:
         (self.artifact_root / f"{status_path.stem}.host.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        self._execution_unknown |= bool(result.get('error') or result.get('exit_code') is None)
         return result
 
     @staticmethod
@@ -782,6 +898,17 @@ class DockerEnvironment:
             if result.returncode != 0:
                 raise RuntimeError(f"无法停止任务容器：{result.stderr.strip()}")
         self._closed = True
+        from agent.storage.resources import owner_cancelled, unregister_active_container
+
+        if self.disposable and not self._execution_unknown and not (
+            self.resource_owner and owner_cancelled(self.resource_owner, self.resource_root)
+        ) and self._container_id is not None:
+            if self.resource_owner:
+                self._finish_resources(self.resource_owner,
+                                       ['container:' + self.container_name], completed=True)
+        if self._control_key:
+            unregister_active_container(self._control_key)
+            self._control_key = None
 
     def __enter__(self):
         return self.start()

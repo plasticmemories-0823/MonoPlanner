@@ -7,7 +7,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from tests.fixtures.web_server import graph
 from agent.server.app import app as application
-from agent.storage.conversations import ConversationStore
+from tests.legacy.conversations import ConversationStore
 from agent.storage.preferences import state_root
 from agent.storage.read_sources import ReadSources
 from agent.server.desktop import permission as real_permission

@@ -8,10 +8,10 @@ import uuid
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage
-from agent.server.graph import graph
-from agent.storage.conversations import ConversationStore
+from tests.legacy.graph import graph
+from tests.legacy.conversations import ConversationStore
 from langgraph.checkpoint.memory import InMemorySaver
-from agent.server.graph import builder
+from tests.legacy.graph import builder
 from agent.execution.local import LocalEnvironment
 from agent.execution.process import run_process
 
@@ -199,7 +199,7 @@ class ConversationTests(unittest.TestCase):
         self.addCleanup(execution.stop)
 
     def invoke(self, model, text='你好', identity='user-one'):
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             return self.compiled.invoke(
                 {'repo': str(self.repo), 'messages': [HumanMessage(content=text, id=identity)]},
                 self.config,
@@ -216,7 +216,7 @@ class ConversationTests(unittest.TestCase):
     def test_startup_failure_is_public_and_persistent_without_a_model_call(self):
         model = ScriptedModel([text_reply('新的普通聊天正常回答。')])
         with patch(
-            'agent.server.runtime.recovery.code_key',
+            'tests.legacy.runtime.recovery.code_key',
             side_effect=FileNotFoundError('PRIVATE_FILE_PATH'),
         ):
             failed = self.invoke(model)
@@ -229,8 +229,8 @@ class ConversationTests(unittest.TestCase):
         self.assertTrue(session['initialization_failed'])
         self.assertEqual(session['result']['usage']['calls'], 0)
         self.assertTrue((self.root / 'runs' / 'errors' / f"{failed['task_id']}.json").is_file())
-        with patch('agent.server.app.state_root', return_value=self.root / 'runs'):
-            from agent.server.app import control_value
+        with patch('tests.legacy.app_adapter.state_root', return_value=self.root / 'runs'):
+            from tests.legacy.app_adapter import control_value
             import json
 
             restored = json.loads(control_value(self.thread).body)
@@ -244,7 +244,7 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(len(model.calls), 1)
 
     def test_escaped_failure_does_not_settle_an_existing_task(self):
-        from agent.server.runtime import ConversationRunner
+        from tests.legacy.runtime import ConversationRunner
 
         def interrupted(runner, *args, **kwargs):
             runner.root = runner.explicit_state
@@ -258,7 +258,7 @@ class ConversationTests(unittest.TestCase):
         session = self.store.session(self.thread)
         self.assertEqual(failed['status'], 'runtime_error')
         self.assertFalse(session['initialization_failed'])
-        from agent.server.graph import finished
+        from tests.legacy.graph import finished
 
         self.assertFalse(finished(session, self.store))
         self.assertNotIn('PRIVATE_EXECUTION_ERROR', repr(failed))
@@ -266,7 +266,7 @@ class ConversationTests(unittest.TestCase):
     def test_graph_interrupt_is_not_converted_to_a_runtime_error(self):
         from langgraph.errors import GraphInterrupt
 
-        with patch('agent.server.runtime.ConversationRunner.run', side_effect=GraphInterrupt()):
+        with patch('tests.legacy.runtime.ConversationRunner.run', side_effect=GraphInterrupt()):
             result = self.invoke(ScriptedModel([]))
         self.assertNotEqual(result.get('status'), 'runtime_error')
         self.assertFalse(self.store.session(self.thread).get('initialization_failed'))
@@ -360,7 +360,7 @@ class ConversationTests(unittest.TestCase):
 
         model = ScriptedModel([start_reply(), text_reply('你好，上一项工作仍保留失败现场。')])
         with patch(
-            'agent.server.runtime.ConversationRunner.bootstrap_work',
+            'tests.legacy.runtime.ConversationRunner.bootstrap_work',
             side_effect=SnapshotError('ignored cache link'),
         ):
             failed = self.invoke(model, '直接读取源码', 'work-request')
@@ -397,7 +397,7 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(len(model.calls), 2)
         # 未提出新需求时恢复执行，并保留已付费的回复。
         self.store.enqueue(self.thread, 'resume', 'resume')
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             continued = self.compiled.invoke({'repo': str(self.repo), 'messages': []}, self.config)
         self.assertEqual(len(model.calls), 3)
         self.assertNotEqual(continued['status'], 'runtime_error')
@@ -660,7 +660,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_unsupported_attachment_is_explicitly_rejected(self):
         model = ScriptedModel([])
-        with patch('agent.server.graph.model_factory', return_value=model), self.assertRaises(
+        with patch('tests.legacy.graph.model_factory', return_value=model), self.assertRaises(
             ValueError
         ):
             self.compiled.invoke(
@@ -719,7 +719,7 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(first['status'], 'paused')
         self.compiled = builder.compile(checkpointer=InMemorySaver())
         self.store.enqueue(self.thread, 'resume', 'resume')
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             recovered = self.compiled.invoke({'messages': []}, self.config)
         self.assertEqual(recovered['task_id'], first['task_id'])
         self.assertEqual(recovered['status'], 'awaiting_user')
@@ -731,12 +731,12 @@ class ConversationTests(unittest.TestCase):
     ):
         from agent.model.client import ConfiguredModel
         from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-        from agent.server.graph import model_factory
+        from tests.legacy.graph import model_factory
 
         model = ConfiguredModel(FakeMessagesListChatModel(responses=[text_reply()]))
         before = model.request_options
-        with patch('agent.server.graph.create_model', return_value=model), patch(
-            'agent.server.graph.load_settings', return_value={}
+        with patch('tests.legacy.graph.create_model', return_value=model), patch(
+            'tests.legacy.graph.load_settings', return_value={}
         ):
             selected = model_factory()
         self.assertEqual(selected.client.tags, ['nostream', 'langsmith:do-not-render'])

@@ -12,9 +12,9 @@ import uuid
 
 import pytest
 
-from agent.server import interrupts
-from agent.server.lifecycle import reconcile
-from agent.storage.conversations import ConversationStore
+from agent.task import control as interrupts
+from tests.legacy.lifecycle import reconcile
+from tests.legacy.conversations import ConversationStore
 from agent.storage.history import LocalHistory
 
 

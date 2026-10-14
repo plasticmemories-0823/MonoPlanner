@@ -28,10 +28,8 @@ respective authors; this application does not relicense those dependencies.
 
 ## Backend runtime licenses
 
-MonoPlanner-owned code is MIT. LangGraph Agent Server (`langgraph-api`) and its
-in-memory runtime (`langgraph-runtime-inmem`) are distributed under Elastic
-License 2.0, independently of MonoPlanner's MIT license. Their original license
-texts remain in the bundled Python distribution metadata. This local desktop
-distribution is not an offer to operate them as a hosted service. Review those
-terms before redistributing or offering a service. The dependency manifest lists
-the exact versions actually included in each release.
+MonoPlanner-owned code is MIT. The product uses the open-source LangGraph
+library; LangGraph Agent Server, its CLI and in-memory service runtime are not
+included in the production dependency closure. Each shipped Python package
+retains its original metadata and license files. The generated dependency
+manifest is authoritative for the particular portable build.

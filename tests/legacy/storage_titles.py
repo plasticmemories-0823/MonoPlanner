@@ -3,7 +3,7 @@
 import json
 from datetime import datetime, timezone
 
-from agent.storage.conversations import ConversationStore
+from tests.legacy.conversations import ConversationStore
 from agent.storage.usage import summarize
 
 

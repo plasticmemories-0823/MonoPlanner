@@ -9,8 +9,6 @@ from agent.execution.desktop import DesktopStore
 from agent.execution.assistant_files import AssistantFiles
 from agent.storage.permissions import Permissions
 from agent.storage.read_sources import ReadSources
-from langchain_core.messages import HumanMessage
-import test_web_graph as graph_fixtures
 from test_web_graph import ScriptedModel, text_reply
 from test_general_assistant import reply
 
@@ -174,8 +172,28 @@ class FileActionsTests(unittest.TestCase):
 
 
 class ApprovalGraphTests(unittest.TestCase):
-    setUp = graph_fixtures.ConversationTests.setUp
-    invoke = graph_fixtures.ConversationTests.invoke
+    def setUp(self):
+        from agent.application.store import ApplicationStore
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.repo = self.root / 'repo'
+        self.repo.mkdir()
+        self.application = ApplicationStore(self.root / 'runs')
+        self.thread = self.application.create(repo=str(self.repo))['thread_id']
+
+    def invoke(self, model, text, identity='first-message'):
+        from agent.application.chat import Chatbot
+
+        command = {'id': str(uuid.uuid5(uuid.UUID(self.thread), identity)),
+                   'kind': 'message', 'text': text}
+        self.application.submit(self.thread, command)
+        bot = Chatbot(self.application, lambda *args: self.fail('No coding handoff expected'),
+                      factory=lambda settings: model)
+        result = bot.run(self.thread, command)
+        self.application.command_state(self.thread, command['id'], 'applied')
+        return result
 
     def test_approval_waits_without_model_polling_and_resumes_with_actual_result(self):
         permissions = Permissions(self.root / 'runs')
@@ -193,7 +211,7 @@ class ApprovalGraphTests(unittest.TestCase):
             ]
         )
         result = self.invoke(model, '创建外部文件')
-        self.assertEqual(result['status'], 'awaiting_user')
+        self.assertTrue(result['waiting_approval'])
         self.assertEqual(len(model.calls), 1)
         self.assertFalse(target.exists())
         desktop = DesktopStore(self.root / 'runs')
@@ -204,10 +222,10 @@ class ApprovalGraphTests(unittest.TestCase):
         self.assertEqual(target.read_text(), 'approved text')
         resumed = ScriptedModel([text_reply('文件已经创建。')])
         result = self.invoke(resumed, '继续', 'user-two')
-        self.assertEqual(result['status'], 'chat_complete')
+        self.assertTrue(result['done'])
         self.assertEqual(len(resumed.calls), 1)
         self.assertTrue(
-            any('external_results' in m.text and 'completed' in m.text for m in resumed.calls[0])
+            any(record['id'] in m.text and 'completed' in m.text for m in resumed.calls[0])
         )
 
     def test_full_mode_automatically_executes_and_default_new_chat_cannot(self):
@@ -226,7 +244,7 @@ class ApprovalGraphTests(unittest.TestCase):
             ]
         )
         result = self.invoke(model, '直接创建外部文件')
-        self.assertEqual(result['status'], 'chat_complete')
+        self.assertTrue(result['done'])
         self.assertEqual(target.read_text(), 'full text')
         self.assertEqual(
             DesktopStore(self.root / 'runs').list(self.thread)[0]['status'], 'completed'

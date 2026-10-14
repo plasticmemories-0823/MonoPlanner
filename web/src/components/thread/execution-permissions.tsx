@@ -4,30 +4,27 @@ import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "../ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 
 type Mode = "sandbox" | "ask" | "full";
 type Permission = { requested: Mode; effective: Mode };
 const sandbox: Permission = { requested: "sandbox", effective: "sandbox" };
-const name = (mode: Mode) =>
-  ({ sandbox: "沙盒权限", ask: "风险询问", full: "完全权限" })[mode];
+const name = (mode: Mode) => ({ sandbox: "沙盒权限", ask: "风险询问", full: "完全权限" })[mode];
 
 export function ExecutionPermissions({
   apiUrl,
   threadId,
   running,
   ensureThread,
+  eventCursor = 0,
+  readOnly = false,
 }: {
   apiUrl: string;
   threadId: string | null;
   running: boolean;
   ensureThread: () => Promise<string>;
+  eventCursor?: number;
+  readOnly?: boolean;
 }) {
   const scope = `${apiUrl}\0${threadId || ""}`;
   const currentScope = useRef(scope);
@@ -48,17 +45,13 @@ export function ExecutionPermissions({
   useEffect(() => {
     if (!threadId) return;
     const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       const version = revision.current;
       try {
-        const response = await fetch(
-          `${apiUrl}/threads/${threadId}/permission`,
-          {
-            cache: "no-store",
-            signal: controller.signal,
-          },
-        );
+        const response = await fetch(`${apiUrl}/threads/${threadId}/permission`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
         const value = await response.json();
         if (!response.ok) throw new Error(value.error || "无法读取执行权限");
         if (
@@ -67,8 +60,6 @@ export function ExecutionPermissions({
           revision.current === version
         )
           setSaved({ scope, value });
-        if (!controller.signal.aborted && running)
-          timer = setTimeout(poll, 1500);
       } catch (error) {
         if (!controller.signal.aborted && revision.current === version)
           setError(error instanceof Error ? error.message : "无法读取执行权限");
@@ -77,9 +68,8 @@ export function ExecutionPermissions({
     void poll();
     return () => {
       controller.abort();
-      clearTimeout(timer);
     };
-  }, [apiUrl, threadId, scope, running, pending]);
+  }, [apiUrl, threadId, scope, eventCursor, pending]);
 
   async function change(mode: Mode) {
     if (busy) return;
@@ -89,8 +79,7 @@ export function ExecutionPermissions({
     try {
       const id = await ensureThread();
       const targetScope = `${apiUrl}\0${id}`;
-      if (currentScope.current !== targetScope)
-        throw new Error("对话已切换，请在当前对话重新操作");
+      if (currentScope.current !== targetScope) throw new Error("对话已切换，请在当前对话重新操作");
       revision.current += 1;
       const response = await fetch(`${apiUrl}/threads/${id}/permission`, {
         method: "POST",
@@ -129,6 +118,7 @@ export function ExecutionPermissions({
         aria-label="执行权限"
         aria-haspopup="dialog"
         aria-expanded={open}
+        disabled={readOnly}
         onClick={() => setOpen(true)}
         title={`当前：${name(permission.effective)}${pending ? `；待切换为${name(permission.requested)}` : ""}`}
         className="text-muted-foreground h-8 shrink-0 gap-1.5 rounded-full px-2 text-xs"
@@ -136,9 +126,7 @@ export function ExecutionPermissions({
         <ShieldCheck className="size-4" />
         {name(permission.effective)}
         {pending && (
-          <span className="rounded bg-amber-100 px-1 text-[10px] text-amber-800">
-            待切换
-          </span>
+          <span className="rounded bg-amber-100 px-1 text-[10px] text-amber-800">待切换</span>
         )}
         <ChevronDown className="size-3" />
       </Button>
@@ -155,9 +143,7 @@ export function ExecutionPermissions({
         >
           <DialogHeader>
             <DialogTitle>执行权限</DialogTitle>
-            <DialogDescription>
-              仅作用于当前对话，由你选择；新对话默认沙盒。
-            </DialogDescription>
+            <DialogDescription>仅作用于当前对话，由你选择；新对话默认沙盒。</DialogDescription>
           </DialogHeader>
           <div
             role="status"
@@ -186,8 +172,7 @@ export function ExecutionPermissions({
                 onClick={() =>
                   mode === "full" && permission.requested !== "full"
                     ? setConfirmFull(true)
-                    : (setConfirmFull(false),
-                      permission.requested !== mode && void change(mode))
+                    : (setConfirmFull(false), permission.requested !== mode && void change(mode))
                 }
               >
                 <span className="flex-1">
@@ -200,17 +185,15 @@ export function ExecutionPermissions({
                         : "本机文件操作与外部打开不逐次确认；编码仍在 Docker，不申请管理员权限。"}
                   </span>
                 </span>
-                {permission.requested === mode && (
-                  <Check className="size-4 shrink-0" />
-                )}
+                {permission.requested === mode && <Check className="size-4 shrink-0" />}
               </Button>
             ))}
           </div>
           {confirmFull && (
             <div className="space-y-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
               <p>
-                完全权限允许本机文件操作与外部打开，无需逐次确认；编码仍在
-                Docker 中执行。不会申请管理员权限，此选择持续到你手动关闭。
+                完全权限允许本机文件操作与外部打开，无需逐次确认；编码仍在 Docker
+                中执行。不会申请管理员权限，此选择持续到你手动关闭。
               </p>
               <div className="flex justify-end gap-2">
                 <Button

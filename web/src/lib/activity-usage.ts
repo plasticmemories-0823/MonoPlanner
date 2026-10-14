@@ -54,3 +54,16 @@ export function combineUsage(rows: ActivityUsage[]) {
       : null,
   };
 }
+
+/** 所有分支计入总用量，只有当前主分支决定上下文占用。 */
+export function conversationUsage(
+  groups: Partial<Record<"chat" | "work" | "progress" | "title", ActivityUsage>>,
+  workActive: boolean,
+) {
+  const context_source = workActive ? "work" : "chat";
+  return {
+    ...combineUsage(Object.entries(groups).map(([purpose, value]) => ({ ...value, purpose }))),
+    context: groups[context_source]?.context || null,
+    context_source,
+  };
+}

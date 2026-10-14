@@ -16,8 +16,8 @@ from agent.model.client import ConfiguredModel
 from agent.model.deepseek import DeepSeekClient
 from agent.model.errors import ModelInterrupted
 from agent.model.payload import RAW_TOOL_CALLS, wire_input
-from agent.server import interrupts
-from agent.server.app import control_value
+from agent.task import control as interrupts
+from tests.legacy.app_adapter import control_value
 from agent.storage.history import LocalHistory
 from support import read_record
 import test_web_graph as fixtures
@@ -313,7 +313,7 @@ class GraphInterruptionTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(self.store.session(self.thread)['status'], 'paused')
         control_value(self.thread, {'id': 'resume', 'kind': 'resume'})
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             resumed = self.compiled.invoke({'messages': []}, self.config)
         self.assertEqual(resumed['status'], 'chat_complete')
         self.assertEqual(len(client.calls), 2)

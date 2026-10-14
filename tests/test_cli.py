@@ -15,7 +15,6 @@ from agent.cli.tasks import main as persistent_main
 
 class CliTests(unittest.TestCase):
     def test_persistent_output_limit_requires_explicit_run_not_status_lookup(self):
-        from contextlib import nullcontext
         from unittest.mock import Mock
 
         with tempfile.TemporaryDirectory() as name:
@@ -27,17 +26,53 @@ class CliTests(unittest.TestCase):
                 'execution_binding': {'backend': 'docker'},
             }
             history = Mock()
-            history.lease.side_effect = lambda: nullcontext()
             history.load.return_value = stored
             with patch('agent.cli.tasks.LocalHistory', return_value=history), patch(
-                'agent.cli.tasks.ConversationRunner'
-            ) as runner, redirect_stdout(io.StringIO()):
+                'agent.cli.tasks.run_work'
+            ) as run, redirect_stdout(io.StringIO()):
                 self.assertEqual(persistent_main(['--state-dir', name, '--status']), 0)
-                runner.assert_not_called()
-                runner.return_value.run.return_value = {'status': 'chat_complete'}
-                self.assertEqual(persistent_main(['--state-dir', name]), 0)
-                controls = runner.call_args.kwargs['control_source']()
-                self.assertEqual([row['kind'] for row in controls], ['resume'])
+                run.assert_not_called()
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    persistent_main(['--state-dir', name])
+                run.assert_not_called()
+                self.assertFalse((Path(name) / 'bridge-job.json').exists())
+
+    def test_persistent_new_task_uses_work_bridge_and_saves_stable_original(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as name:
+            repo = Path(name) / 'repo'
+            repo.mkdir()
+            root = Path(name) / 'records'
+            with patch('agent.cli.tasks.run_work', return_value={'status': 'paused'}) as run, patch(
+                'agent.cli.tasks._history', return_value=None
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(persistent_main([
+                    '--state-dir', str(root), '--repo', str(repo), '--task', 'original request',
+                    '--max-steps', '5', '--pause-after-steps', '1',
+                ]), 0)
+                raw = (root / 'bridge-job.json').read_bytes()
+                saved = json.loads(raw)
+                self.assertEqual(run.call_args.args[0]['request'], 'original request')
+                self.assertEqual(run.call_args.args[0]['budget']['max_steps'], 5)
+                self.assertEqual(run.call_args.args[0]['pause_after_steps'], 1)
+                self.assertEqual(saved['state_root'], str(root.resolve()))
+                self.assertNotIn('api_key', saved['settings'])
+            with patch('agent.cli.tasks.run_work', return_value={'status': 'paused'}) as run, patch(
+                'agent.cli.tasks._history', return_value={'status': 'output_limit_reached'}
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(persistent_main(['--state-dir', str(root)]), 0)
+                self.assertEqual(run.call_args.args[0]['task_id'], saved['task_id'])
+                self.assertEqual([row['kind'] for row in run.call_args.args[2]()], ['resume'])
+                self.assertEqual((root / 'bridge-job.json').read_bytes(), raw)
+
+    def test_persistent_records_cannot_be_written_inside_work_source(self):
+        with tempfile.TemporaryDirectory() as name, patch('agent.cli.tasks.run_work') as run:
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                persistent_main(['--state-dir', str(Path(name) / 'records'),
+                                 '--repo', name, '--task', 'request'])
+            run.assert_not_called()
+            self.assertFalse((Path(name) / 'records').exists())
 
     def test_workspace_check_is_offline(self):
         with tempfile.TemporaryDirectory() as name, patch.object(
@@ -75,17 +110,18 @@ class CliTests(unittest.TestCase):
             ):
                 cli.parse_args(args)
 
-    def test_factory_uses_only_p0338_and_display_handles_its_result(self):
+    def test_factory_uses_application_adapter_and_display_handles_its_result(self):
+        from agent.application.cli import ConsoleConversation
+
         with tempfile.TemporaryDirectory() as name:
             env = cli.open_workspace(name)
-            self.assertIsInstance(cli.create_workspace_agent(object(), env), TaskRunner)
             result = {"status": "verified_success", "messages": [], "final_report": "DONE"}
-            from agent.server.runtime import ConversationRunner
-
-            with patch.object(ConversationRunner, "run", return_value=result), redirect_stdout(
-                io.StringIO()
-            ) as output:
-                cli.run_one_turn(cli.create_workspace_agent(object(), env), [], "request", 5)
+            with patch.object(ConsoleConversation, '__init__', return_value=None), patch.object(
+                ConsoleConversation, "run", return_value=result
+            ), redirect_stdout(io.StringIO()) as output:
+                adapter = cli.create_workspace_agent(object(), env)
+                self.assertIsInstance(adapter, ConsoleConversation)
+                cli.run_one_turn(adapter, [], "request", 5)
             self.assertIn("固定程序验收通过", output.getvalue())
 
     def test_persistent_entry_still_requires_explicit_new_task_and_supports_offline_lookup(self):

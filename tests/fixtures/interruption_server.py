@@ -3,7 +3,7 @@
 import asyncio
 from langchain_core.messages import AIMessageChunk
 from agent.model.client import ConfiguredModel
-from agent.server import graph as application
+from tests.legacy import graph as application
 
 
 class OfflineClient:
@@ -31,7 +31,7 @@ class OfflineClient:
 
 application.model_factory = lambda settings: ConfiguredModel(OfflineClient())
 from tests.fixtures.title_model import OfflineTitle
-from agent.server import titles
+from tests.legacy import server_titles as titles
 
 titles.model_factory = OfflineTitle
 graph = application.graph

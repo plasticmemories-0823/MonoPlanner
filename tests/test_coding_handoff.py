@@ -9,7 +9,7 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage
 from agent.model.tools import CHAT_TOOLS, CODING_TOOLS, WORK_TOOLS
 from agent.model.payload import wire_input
-from agent.server.interrupts import Signal
+from agent.task.control import Signal
 from agent.storage.history import LocalHistory
 from agent.settings import PROJECT_ROOT
 import test_web_graph as fixtures
@@ -103,7 +103,7 @@ class CodingHandoffTests(unittest.TestCase):
             [invalid, fixtures.investigation(['first.py']), fixtures.text_reply('Discuss only')]
         )
         with patch(
-            'agent.server.runtime.ConversationRunner.activate',
+            'tests.legacy.runtime.ConversationRunner.activate',
             side_effect=AssertionError('must not execute'),
         ):
             result = self.invoke(model)

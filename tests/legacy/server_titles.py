@@ -20,7 +20,7 @@ from langchain_core.messages import (
 from agent.model.client import ConfiguredModel, ModelPolicy, create_model
 from agent.settings import PROJECT_ROOT, load_settings
 from agent.storage.preferences import state_root
-from agent.storage.titles import Titles
+from tests.legacy.storage_titles import Titles
 
 POLICY = ModelPolicy(max_output_tokens=128, api_timeout=15, reasoning_effort='none')
 _dispatcher = None

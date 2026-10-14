@@ -4,6 +4,7 @@ import os
 import json
 from pathlib import Path
 import tempfile
+import time
 from threading import Event
 import unittest
 import uuid
@@ -14,13 +15,13 @@ from langchain_core.messages import AIMessage, HumanMessage
 from tests.http_client import TestClient
 
 from agent.model.client import ConfiguredModel
-from agent.server import titles
-from agent.server.titles import model_factory as real_title_model_factory
+from tests.legacy import server_titles as titles
+from tests.legacy.server_titles import model_factory as real_title_model_factory
 from agent.server.app import app
-from agent.server.graph import intake
-from agent.storage.conversations import ConversationStore
-from agent.storage.purge import begin_purge, finish_purge
-from agent.storage.titles import Titles
+from tests.legacy.graph import intake
+from tests.legacy.conversations import ConversationStore
+from tests.legacy.purge import begin_purge, finish_purge
+from tests.legacy.storage_titles import Titles
 
 
 def response(content='修复会话记录与标题更新', **metadata):
@@ -96,8 +97,8 @@ class ConversationTitleTests(unittest.TestCase):
 
     def test_exact_flash_disabled_request_and_no_tools_or_retry(self):
         with patch(
-            'agent.server.titles.load_settings', return_value={'api_key': 'SECRET'}
-        ) as load, patch('agent.server.titles.create_model') as create:
+            'tests.legacy.server_titles.load_settings', return_value={'api_key': 'SECRET'}
+        ) as load, patch('tests.legacy.server_titles.create_model') as create:
             real_title_model_factory()
         self.assertEqual(
             load.call_args.args[0],
@@ -147,7 +148,7 @@ class ConversationTitleTests(unittest.TestCase):
         with httpx.Client(transport=httpx.MockTransport(respond)) as client, patch(
             'agent.model.network.model_http_clients', return_value={'http_client': client}
         ), patch(
-            'agent.server.titles.load_settings',
+            'tests.legacy.server_titles.load_settings',
             return_value={'model_name': 'deepseek-flash', 'api_key': 'offline-secret'},
         ):
             dispatcher = titles.TitleDispatcher(self.root, real_title_model_factory)
@@ -277,37 +278,53 @@ class ConversationTitleTests(unittest.TestCase):
         self.assertEqual(self.store.visibility()[self.thread], 'purged')
 
     def test_service_lifespan_intake_schedules_and_read_endpoints_are_passive(self):
+        from agent.application.api import get_service
+
+        class ChatModel:
+            def bind_tools(self, tools):
+                return self
+
+            def invoke(self, messages):
+                return AIMessage(content='离线普通回复', response_metadata={'finish_reason': 'stop'})
+
         model = Mock()
         model.invoke.return_value = response()
         with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), patch(
-            'agent.server.titles.model_factory', return_value=model
+            'agent.application.titles.model_factory', return_value=model
+        ), patch('agent.application.chat.model_factory', return_value=ChatModel()
         ), TestClient(app) as client:
-            output = intake(
-                {'messages': [HumanMessage(content='请修复会话列表', id='u1')]},
-                {'configurable': {'thread_id': self.thread}},
-            )
-            self.assertEqual(output['status'], 'needs_plan')
-            titles._dispatcher.pool.submit(lambda: None).result(timeout=2)
+            created = client.post('/conversations', json={'id': self.thread})
+            self.assertEqual(created.status_code, 201, created.text)
+            output = client.post(f'/conversations/{self.thread}/commands', json={
+                'id': str(uuid.uuid4()), 'kind': 'message', 'text': '请修复会话列表'})
+            self.assertEqual(output.status_code, 202, output.text)
+            get_service().title_pool.submit(lambda: None).result(timeout=2)
+            deadline = time.monotonic() + 2
+            while get_service().store.get(self.thread)['chat_status'] in {'queued', 'running'}:
+                if time.monotonic() >= deadline:
+                    self.fail('Fake conversation did not finish')
+                time.sleep(0.01)
         with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), TestClient(
             app
         ) as client:
             listing = client.get('/conversations').json()
-            activity = client.get(f'/threads/{self.thread}/activity').json()
-            self.assertEqual(listing['titles'][self.thread]['title'], response().content)
-            self.assertEqual(activity['title'], listing['titles'][self.thread])
-            self.assertFalse(activity['title_pending'])
-            usage = activity['usage']['title:' + self.thread]
+            activity = client.get(f'/conversations/{self.thread}/snapshot').json()
+            title = next(row['title'] for row in listing['conversations'] if row['thread_id'] == self.thread)
+            self.assertEqual(title['title'], response().content)
+            self.assertEqual(activity['title'], title)
+            self.assertEqual(title['status'], 'complete')
+            usage = activity['usage']['title']
             self.assertEqual((usage['total_tokens'], usage['cached_input_tokens']), (49, 30))
             self.assertEqual(usage['purpose'], 'title')
             self.assertIsNone(usage['context'])
             self.assertIsInstance(activity['title']['revision'], int)
             client.get('/conversations')
-            client.get(f'/threads/{self.thread}/activity')
+            client.get(f'/conversations/{self.thread}/snapshot')
         model.invoke.assert_called_once()
 
     def test_graph_without_service_lifespan_does_not_create_model(self):
         with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), patch(
-            'agent.server.titles.model_factory'
+            'tests.legacy.server_titles.model_factory'
         ) as factory:
             intake(
                 {'messages': [HumanMessage(content='你好', id='u1')]},
@@ -318,7 +335,7 @@ class ConversationTitleTests(unittest.TestCase):
 
     def test_title_prompt_failure_still_saves_and_starts_main_session(self):
         with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), patch(
-            'agent.server.titles.PROJECT_ROOT', self.root / 'missing-prompt'
+            'tests.legacy.server_titles.PROJECT_ROOT', self.root / 'missing-prompt'
         ):
             output = intake(
                 {'messages': [HumanMessage(content='你好', id='u1')]},
@@ -332,7 +349,7 @@ class ConversationTitleTests(unittest.TestCase):
         self.reserve()
         dispatcher = Mock(root=self.root)
         dispatcher.submit.side_effect = RuntimeError('executor is closed')
-        with patch('agent.server.titles._dispatcher', dispatcher):
+        with patch('tests.legacy.server_titles._dispatcher', dispatcher):
             titles.schedule(self.root, self.thread)
         self.assertEqual(self.records.get(self.thread)['status'], 'failed')
         self.assertFalse(self.records.activity(self.thread)['title_pending'])

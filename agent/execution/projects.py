@@ -68,7 +68,9 @@ def workspace_path(repo):
 
 class ProjectEnvironments:
     def __init__(self, root=None):
-        self.path = (Path(root) if root else state_root()) / 'project-environments.json'
+        from agent.storage.resources import current_root
+
+        self.path = current_root(root) / 'project-environments.json'
 
     def get(self, repo):
         if not repo:
@@ -111,7 +113,7 @@ class ProjectEnvironments:
         return {'backend': 'docker'}
 
 
-def workspace_binding(repo):
+def workspace_binding(repo, *, root=None):
     bindings = json.loads(os.environ.get('MONOPLANER_EVALUATION_WORKSPACES', '{}'))
     if not isinstance(bindings, dict):
         raise ValueError('Evaluation workspace bindings must be a path/image mapping')
@@ -120,7 +122,7 @@ def workspace_binding(repo):
             raise ValueError('Evaluation images must be pinned sha256 IDs')
         if repo and Path(path).resolve() == Path(repo).resolve():
             return {'backend': 'docker', 'image': image, 'runtime': runtime_profile()}
-    return ProjectEnvironments().get(repo)
+    return ProjectEnvironments(root).get(repo)
 
 
 def require_binding(repo, binding=None):

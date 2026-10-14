@@ -78,7 +78,7 @@ class ConfiguredModel:
         from agent.model.payload import retain_provider_calls
 
         bound = self.client.bind_tools(list(self.tools), strict=True) if self.tools else self.client
-        from agent.server.interrupts import current
+        from agent.task.control import current
 
         signal = current()
         if signal:

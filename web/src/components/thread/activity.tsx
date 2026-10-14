@@ -1,130 +1,26 @@
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
-import { combineUsage, type ActivityUsage } from "@/lib/activity-usage";
-import { mergeActivity } from "@/lib/activity-fragments";
-import { useThreads } from "@/providers/Thread";
-import {
-  Brain,
-  Check,
-  CircleDot,
-  CircleHelp,
-  LoaderCircle,
-  ChevronDown,
-} from "lucide-react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { conversationUsage } from "@/lib/activity-usage";
+import { useStreamContext } from "@/providers/Stream";
+import type { Activity } from "@/lib/conversation-types";
+import { Brain, Check, CircleDot, CircleHelp, LoaderCircle, ChevronDown } from "lucide-react";
 
-export type Activity = {
-  id: string;
-  after_id: string;
-  kind: "thinking" | "operation";
-  label: string;
-  detail: string;
-  status: string;
-  stage?: "trial" | "acceptance";
-  summary?: string;
-  started_at?: number;
-  seconds?: number;
-  exit_code?: number;
-  child_usage?: { status: string; total_tokens?: number; source?: string };
-  append?: boolean;
-  version?: number;
-};
+export type { Activity } from "@/lib/conversation-types";
 
-type Usage = ReturnType<typeof combineUsage>;
-
-// 展示记录不会成为聊天消息或模型输入。
-export function useActivity(
-  apiUrl: string,
-  threadId: string | null,
-  running: boolean,
-) {
-  const { updateTitle } = useThreads();
-  const [items, setItems] = useState<Activity[]>([]);
-  const [error, setError] = useState("");
-  const [usage, setUsage] = useState<Usage | null>(null);
-  const [retry, setRetry] = useState(0);
-  const archive = useRef({
-    thread: threadId,
-    api: apiUrl,
-    cursors: {},
-    rows: new Map<string, Activity>(),
-    usage: {} as Record<string, ActivityUsage>,
-  });
-  useEffect(() => {
-    if (archive.current.thread !== threadId || archive.current.api !== apiUrl) {
-      archive.current = {
-        thread: threadId,
-        api: apiUrl,
-        cursors: {},
-        rows: new Map(),
-        usage: {},
-      };
-      setItems([]);
-      setError("");
-      setUsage(null);
-    }
-    if (!threadId) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const controller = new AbortController();
-    const poll = async () => {
-      try {
-        const query = new URLSearchParams({
-          after: JSON.stringify(archive.current.cursors),
-        });
-        const response = await fetch(
-          `${apiUrl}/threads/${threadId}/activity?${query}`,
-          { signal: controller.signal },
-        );
-        const result = await response.json();
-        if (!response.ok)
-          throw new Error(result.error || "无法读取本地活动记录");
-        if (cancelled) return;
-        if (result.title) updateTitle(threadId, result.title);
-        archive.current.cursors = result.cursors;
-        let changed = false;
-        for (const row of [
-          ...result.items,
-          ...(result.live || []),
-        ] as Activity[]) {
-          const previous = archive.current.rows.get(row.id);
-          const merged = mergeActivity(previous, row);
-          if (merged !== previous) {
-            archive.current.rows.set(row.id, merged);
-            changed = true;
-          }
-        }
-        Object.assign(archive.current.usage, result.usage || {});
-        const totals = combineUsage(Object.values(archive.current.usage));
-        setUsage((previous) =>
-          JSON.stringify(previous) === JSON.stringify(totals)
-            ? previous
-            : totals,
-        );
-        if (changed) setItems([...archive.current.rows.values()]);
-        setError(result.display_warning || "");
-        if (result.more || running || result.title_pending)
-          timer = setTimeout(poll, result.more ? 20 : 400);
-      } catch (e) {
-        if (!cancelled)
-          setError(e instanceof Error ? e.message : "无法读取本地活动记录");
-      }
-    };
-    poll();
-    return () => {
-      cancelled = true;
-      controller.abort();
-      clearTimeout(timer);
-    };
-  }, [apiUrl, threadId, running, retry, updateTitle]);
+// 所有活动和用量来自与聊天相同的快照，不另开轮询或合并来源。
+export function useActivity() {
+  const stream = useStreamContext();
+  const usage = useMemo(
+    () => conversationUsage(stream.values.usage || {}, stream.workRunning),
+    [stream.values.usage, stream.workRunning],
+  );
   return {
-    items,
-    error,
+    items: stream.values.activities || [],
+    error: stream.error?.message || "",
     usage,
-    reconnect: () => {
-      archive.current.cursors = {};
-      setRetry((v) => v + 1);
-    },
+    groups: stream.values.usage || {},
+    reconnect: stream.reconnect,
   };
 }
 
@@ -162,35 +58,23 @@ const ActivityRow = memo(function ActivityRow({ row }: { row: Activity }) {
         data-activity={row.kind}
       >
         <summary className="hover:bg-muted/60 flex cursor-pointer list-none items-start gap-2 rounded-lg px-1 py-1">
-          <Icon
-            className={`mt-0.5 size-4 shrink-0 ${busy ? "animate-spin" : ""}`}
-          />
+          <Icon className={`mt-0.5 size-4 shrink-0 ${busy ? "animate-spin" : ""}`} />
           <span className="min-w-0">
             <span>
               {title}
-              {row.kind === "thinking" && !busy && !row.detail
-                ? "（未返回思考内容）"
-                : ""}
+              {row.kind === "thinking" && !busy && !row.detail ? "（未返回思考内容）" : ""}
             </span>
             {(row.seconds !== undefined || row.started_at) && (
               <span className="ml-2 text-xs">
-                {Math.max(
-                  0,
-                  row.seconds ?? now - (row.started_at || now),
-                ).toFixed(1)}{" "}
-                秒
+                {Math.max(0, row.seconds ?? now - (row.started_at || now)).toFixed(1)} 秒
               </span>
             )}
             {row.kind === "operation" && row.detail && !row.stage && (
-              <code className="ml-2 text-xs break-all">
-                {row.detail.split("\n")[0]}
-              </code>
+              <code className="ml-2 text-xs break-all">{row.detail.split("\n")[0]}</code>
             )}
           </span>
           {row.detail && (
-            <span className="ml-auto shrink-0 text-xs">
-              {row.stage ? "查看诊断" : "展开"}
-            </span>
+            <span className="ml-auto shrink-0 text-xs">{row.stage ? "查看诊断" : "展开"}</span>
           )}
         </summary>
         {open && row.detail && (
@@ -218,9 +102,7 @@ export function ActivityRows({ items }: { items: Activity[] }) {
   const [open, setOpen] = useState(false);
   if (!items.length) return null;
   const running = items.findLast((row) => row.status === "running");
-  const needsAttention = items.some((row) =>
-    ["failed", "error", "unknown"].includes(row.status),
-  );
+  const needsAttention = items.some((row) => ["failed", "error", "unknown"].includes(row.status));
   const interrupted = items.some((row) => row.status === "interrupted");
   const label = running
     ? running.label
@@ -234,21 +116,14 @@ export function ActivityRows({ items }: { items: Activity[] }) {
       data-testid="activity-group"
       className="text-muted-foreground border-border/50 w-full rounded-lg border text-sm"
       onToggle={(event) => {
-        if (event.target === event.currentTarget)
-          setOpen(event.currentTarget.open);
+        if (event.target === event.currentTarget) setOpen(event.currentTarget.open);
       }}
     >
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2">
-        {running ? (
-          <LoaderCircle className="size-4 animate-spin" />
-        ) : (
-          <Check className="size-4" />
-        )}
-        <span>{label}</span>
+        {running ? <LoaderCircle className="size-4 animate-spin" /> : <Check className="size-4" />}
+        <span>工作诊断 · {label}</span>
         <span className="ml-auto text-xs">{items.length} 项</span>
-        <ChevronDown
-          className={`size-4 transition-transform ${open ? "rotate-180" : ""}`}
-        />
+        <ChevronDown className={`size-4 transition-transform ${open ? "rotate-180" : ""}`} />
       </summary>
       {open && (
         <div className="space-y-2 border-t px-3 py-3">

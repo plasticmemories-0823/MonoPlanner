@@ -1,17 +1,11 @@
-import { v4 as uuidv4 } from "uuid";
-import { Fragment, ReactNode, useEffect, useRef } from "react";
+import { ReactNode, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext } from "@/providers/Stream";
 import { useState, FormEvent } from "react";
 import { Button } from "../ui/button";
-import { Message } from "@langchain/langgraph-sdk";
 import { AssistantMessage, AssistantMessageLoading } from "./messages/ai";
 import { HumanMessage } from "./messages/human";
-import {
-  DO_NOT_RENDER_ID_PREFIX,
-  ensureToolCallsHaveResponses,
-} from "@/lib/ensure-tool-responses";
 import { BrandMark } from "../brand";
 import { TooltipIconButton } from "./tooltip-icon-button";
 import {
@@ -26,8 +20,6 @@ import { useQueryState, parseAsBoolean } from "nuqs";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import ThreadHistory from "./history";
 import { ResizableHistory } from "./history/resizable";
-import { mergePublicMessages } from "@/lib/public-messages";
-import { activityAnchors } from "@/lib/activity-groups";
 import { toast } from "sonner";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Workspace, useWorkspace } from "./workspace";
@@ -37,6 +29,9 @@ import { ReadSources } from "./read-sources";
 import { ModelSettings } from "./model-settings";
 import { DesktopCards } from "./desktop-controls";
 import { ExecutionPermissions } from "./execution-permissions";
+import { Resources } from "./resources";
+import { WorkDiagnostics } from "./work-diagnostics";
+import { canSupplementWork } from "@/lib/conversation-types";
 
 function StickyToBottomContent(props: {
   content: ReactNode;
@@ -90,21 +85,23 @@ export function Thread() {
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
 
   const stream = useStreamContext();
-  const { repo, setRepo } = useWorkspace(stream.apiUrl, stream.values.repo);
-  const { pendingMessages, queueMessage, pause, resume, pauseRequested } =
-    useRunControls(stream, threadId);
-  const messages = mergePublicMessages(stream.messages, pendingMessages);
+  const { repo, setRepo } = useWorkspace(stream.apiUrl, threadId ? stream.values.repo : undefined);
+  const { pause, resume, pauseRequested } = useRunControls(stream, threadId);
+  const messages = stream.messages;
+  const [sending, setSending] = useState(false);
+  const [sendKind, setSendKind] = useState<"message" | "supplement">("message");
+  const acceptsSupplement =
+    !stream.values.read_only && canSupplementWork(stream.values.work?.status);
+  const currentSendKind = acceptsSupplement ? sendKind : "message";
+  const pendingCommand = useRef<{
+    id: string;
+    kind: "message" | "supplement";
+    text: string;
+    repo: string;
+    owner: string | null;
+  } | null>(null);
   const isLoading = stream.isLoading;
-  const activity = useActivity(stream.apiUrl, threadId, isLoading);
-  const messageIds = new Set(messages.map((message) => message.id));
-  const anchors = activityAnchors(messages);
-  const groupedActivity = new Map<string, typeof activity.items>();
-  for (const row of activity.items) {
-    const anchor = anchors.get(row.after_id) || row.after_id;
-    const group = groupedActivity.get(anchor) || [];
-    group.push(row);
-    groupedActivity.set(anchor, group);
-  }
+  const activity = useActivity();
 
   const lastError = useRef<string | undefined>(undefined);
 
@@ -152,60 +149,40 @@ export function Thread() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (input.trim().length === 0 || stream.preparingThread) return;
+    if (!input.trim() || stream.preparingThread || sending || stream.values.read_only) return;
     setFirstTokenReceived(false);
-    // 聊天无需工作目录；请求执行任务时由后端校验目录。
-    if (repo.trim()) localStorage.setItem("monoplaner.repo", repo.trim());
-
-    const newHumanMessage: Message = {
-      id: uuidv4(),
-      type: "human",
-      content: input,
-    };
-
-    if (isLoading && threadId) {
-      if (await queueMessage(newHumanMessage)) setInput("");
-      return;
+    setSending(true);
+    const text = input;
+    const kind = currentSendKind;
+    if (
+      pendingCommand.current?.text !== text ||
+      pendingCommand.current.kind !== kind ||
+      pendingCommand.current.repo !== repo.trim() ||
+      pendingCommand.current.owner !== threadId
+    ) {
+      pendingCommand.current = {
+        id: crypto.randomUUID(),
+        kind,
+        text,
+        repo: repo.trim(),
+        owner: threadId,
+      };
     }
-    const toolMessages = ensureToolCallsHaveResponses(stream.messages);
-
-    let targetThread: string;
     try {
-      targetThread = await stream.ensureThread(input);
+      const target = await stream.ensureThread(text, repo.trim());
+      pendingCommand.current.owner = target;
+      const { owner: _owner, ...command } = pendingCommand.current;
+      await stream.command(command, target);
+      pendingCommand.current = null;
+      setInput((current) => (current === text ? "" : current));
+      if (kind === "supplement") toast.success("补充要求已保存，正在中断当前工作并调整剩余步骤");
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "无法创建对话，消息尚未发送",
+        error instanceof Error ? error.message : "发送结果未确认，输入已保留。请重新连接后核对。",
       );
-      return;
+    } finally {
+      setSending(false);
     }
-    stream.retainMessage(newHumanMessage, targetThread);
-    void stream
-      .submit(
-        {
-          messages: [...toolMessages, newHumanMessage],
-          repo: repo.trim(),
-        },
-        {
-          threadId: targetThread,
-          streamMode: ["values", "custom"],
-          streamSubgraphs: true,
-          streamResumable: true,
-          config: { recursion_limit: 10000 },
-          optimisticValues: (prev) => ({
-            ...prev,
-            messages: [
-              ...(prev.messages ?? []),
-              ...toolMessages,
-              newHumanMessage,
-            ],
-          }),
-        },
-      )
-      .catch((error) => {
-        toast.error(error instanceof Error ? error.message : "消息未能发送");
-      });
-
-    setInput("");
   };
 
   const chatStarted = !!threadId || !!messages.length;
@@ -223,9 +200,7 @@ export function Thread() {
           )}
           layout={isLargeScreen}
           transition={
-            isLargeScreen
-              ? { type: "spring", stiffness: 300, damping: 30 }
-              : { duration: 0 }
+            isLargeScreen ? { type: "spring", stiffness: 300, damping: 30 } : { duration: 0 }
           }
         >
           <header className="relative z-10 flex h-16 shrink-0 items-center justify-between px-3 sm:px-6">
@@ -248,9 +223,7 @@ export function Thread() {
                 aria-label="MonoPlanner 首页"
               >
                 <BrandMark className="size-8" />
-                <span className="text-base font-semibold tracking-tight">
-                  MonoPlanner
-                </span>
+                <span className="text-base font-semibold tracking-tight">MonoPlanner</span>
               </button>
             </div>
             <TooltipIconButton
@@ -276,36 +249,44 @@ export function Thread() {
               content={
                 <>
                   {messages
-                    .filter((m) => !m.id?.startsWith(DO_NOT_RENDER_ID_PREFIX))
-                    .map((message, index) => (
-                      <Fragment key={message.id || `${message.type}-${index}`}>
-                        {message.type === "human" ? (
-                          <HumanMessage
-                            key={message.id || `${message.type}-${index}`}
-                            message={message}
-                            isLoading={isLoading}
-                          />
-                        ) : (
-                          <AssistantMessage
-                            key={message.id || `${message.type}-${index}`}
-                            message={message}
-                            isLoading={isLoading}
-                          />
-                        )}
-                        <ActivityRows
-                          items={groupedActivity.get(message.id || "") || []}
+                    .filter((message) => message.type === "human" || message.type === "ai")
+                    .map((message) =>
+                      message.type === "human" ? (
+                        <HumanMessage
+                          key={message.id}
+                          message={message}
+                          isLoading={isLoading}
                         />
-                      </Fragment>
-                    ))}
+                      ) : (
+                        <AssistantMessage
+                          key={message.id}
+                          message={message}
+                          isLoading={isLoading}
+                        />
+                      ),
+                    )}
                   <ActivityRows
-                    items={[...groupedActivity]
-                      .filter(([anchor]) => !messageIds.has(anchor))
-                      .flatMap(([, items]) => items)}
+                    key={`activity-${threadId || "new"}`}
+                    items={activity.items}
                   />
+                  {threadId && stream.values.work && !stream.values.read_only && (
+                    <WorkDiagnostics
+                      key={`diagnostics-${threadId}`}
+                      apiUrl={stream.apiUrl}
+                      threadId={threadId}
+                    />
+                  )}
+                  {stream.values.read_only && (
+                    <p className="text-muted-foreground text-sm">
+                      旧版记录仅供查看，请新建对话继续工作。
+                    </p>
+                  )}
                   <DesktopCards
                     apiUrl={stream.apiUrl}
                     threadId={threadId}
                     running={isLoading}
+                    eventCursor={stream.values.event_cursor}
+                    readOnly={stream.values.read_only}
                   />
                   {activity.error && (
                     <p className="text-muted-foreground text-sm">
@@ -388,17 +369,10 @@ export function Thread() {
                             apiUrl={stream.apiUrl}
                             repo={repo}
                             onChange={setRepo}
-                            disabled={
-                              isLoading ||
-                              Boolean(
-                                stream.values.workspace_bound &&
-                                ![
-                                  "chat_complete",
-                                  "verified_success",
-                                  "task_blocked",
-                                ].includes(stream.values.status || ""),
-                              )
-                            }
+                            disabled={stream.preparingThread || stream.values.read_only}
+                            onSelect={stream.selectWorkspace}
+                            hasWork={Boolean(stream.values.work)}
+                            working={stream.workRunning}
                           />
                           <ModelSettings
                             apiUrl={stream.apiUrl}
@@ -409,6 +383,8 @@ export function Thread() {
                                 threadId={threadId}
                                 running={isLoading}
                                 ensureThread={stream.ensureThread}
+                                eventCursor={stream.values.event_cursor}
+                                readOnly={stream.values.read_only}
                               />
                             }
                             menuItems={
@@ -417,13 +393,27 @@ export function Thread() {
                                   apiUrl={stream.apiUrl}
                                   threadId={threadId}
                                   ensureThread={stream.ensureThread}
-                                  disabled={isLoading}
+                                  disabled={isLoading || stream.values.read_only}
                                 />
+                                <Resources apiUrl={stream.apiUrl} />
                               </>
                             }
                           />
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
+                          {acceptsSupplement && (
+                            <select
+                              aria-label="消息用途"
+                              className="bg-background h-8 max-w-28 rounded-full border px-2 text-xs"
+                              value={sendKind}
+                              onChange={(e) =>
+                                setSendKind(e.target.value as "message" | "supplement")
+                              }
+                            >
+                              <option value="message">聊天</option>
+                              <option value="supplement">补充工作要求</option>
+                            </select>
+                          )}
                           {isLoading && (
                             <Button
                               type="button"
@@ -444,9 +434,22 @@ export function Thread() {
                             type="submit"
                             size="icon"
                             className="size-9 rounded-full shadow-none"
-                            disabled={!input.trim() || stream.preparingThread}
-                            aria-label={isLoading ? "发送补充" : "发送"}
-                            title={isLoading ? "发送补充" : "发送"}
+                            disabled={
+                              !input.trim() ||
+                              stream.preparingThread ||
+                              sending ||
+                              stream.values.read_only
+                            }
+                            aria-label={
+                              currentSendKind === "supplement"
+                                ? "发送补充要求"
+                                : "发送"
+                            }
+                            title={
+                              currentSendKind === "supplement"
+                                ? "发送补充要求"
+                                : "发送聊天消息，不打断当前工作"
+                            }
                           >
                             <ArrowUp className="size-5" />
                           </Button>
@@ -466,9 +469,8 @@ export function Thread() {
                         </span>
                         {" · "}
                         <span title="最近一次主模型请求的输入与已完成输出，包含提示词、工具和必要思考续接；等待回复时为估算。不是累计 Token。">
-                          上下文：
-                          {activity.usage?.context &&
-                          activity.usage.context.window_tokens > 0
+                          上下文（{activity.usage.context_source === "work" ? "编码" : "聊天"}）：
+                          {activity.usage?.context && activity.usage.context.window_tokens > 0
                             ? `${activity.usage.context.estimated ? "≈" : ""}${((activity.usage.context.used_tokens / activity.usage.context.window_tokens) * 100).toFixed(1)}%`
                             : "暂无数据"}
                         </span>
@@ -483,6 +485,26 @@ export function Thread() {
                         )}
                       </p>
                     }
+                    <details
+                      className="text-muted-foreground px-4 pb-2 text-xs"
+                      data-testid="usage-breakdown"
+                    >
+                      <summary className="cursor-pointer">用量分类</summary>
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        {(["chat", "work", "progress", "title"] as const).map((kind) => (
+                          <span key={kind}>
+                            {
+                              { chat: "聊天", work: "编码", progress: "进度摘要", title: "标题" }[
+                                kind
+                              ]
+                            }
+                            ：{activity.groups[kind]?.total_tokens?.toLocaleString() ?? "未知"}{" "}
+                            Token · {activity.groups[kind]?.calls ?? 0} 次
+                            {activity.groups[kind]?.unknown_calls ? "（含未知用量）" : ""}
+                          </span>
+                        ))}
+                      </div>
+                    </details>
                     {(isLoading || stream.values.status) && (
                       <div
                         role="status"
@@ -492,18 +514,18 @@ export function Thread() {
                           <span
                             className={cn(
                               "size-1.5 shrink-0 rounded-full",
-                              isLoading
-                                ? "animate-pulse bg-emerald-500"
-                                : "bg-muted-foreground/50",
+                              isLoading ? "animate-pulse bg-emerald-500" : "bg-muted-foreground/50",
                             )}
                           />
                           {isLoading
-                            ? stream.progress?.text || "正在处理请求"
+                            ? stream.workRunning
+                              ? "工作进行中，聊天不会打断任务"
+                              : "正在回复"
                             : statusLabel(stream.values.status)}
                         </span>
-                        {!isLoading &&
+                        {!stream.workRunning &&
                           ["paused", "awaiting_user", "output_limit_reached"].includes(
-                            stream.values.status || "",
+                            stream.values.work?.status || stream.values.status || "",
                           ) && (
                             <Button
                               type="button"

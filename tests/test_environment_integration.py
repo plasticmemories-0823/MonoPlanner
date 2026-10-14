@@ -110,7 +110,7 @@ def test_pause_during_preparation_preserves_work_and_resume_does_not_reask_model
         saved = checkpoint(conversation, first['task_id'])
         assert saved['coding_preparation_pending'] and not saved.get('baseline')
         conversation.store.enqueue(conversation.thread, 'resume-env', 'resume')
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             result = conversation.compiled.invoke({'messages': []}, conversation.config)
     assert result['task_id'] == first['task_id']
     assert result['status'] != 'runtime_error'
@@ -172,7 +172,7 @@ def test_existing_entry_pause_during_preparation_does_not_start_or_consume_call(
     conversation.store.enqueue(conversation.thread, 'resume-env', 'resume')
     with patch('agent.execution.preparation.ensure_prepared', return_value=binding()), patch.object(
         graph_fixture.FixtureDocker, 'run_process', execute
-    ), patch('agent.server.graph.model_factory', return_value=model):
+    ), patch('tests.legacy.graph.model_factory', return_value=model):
         resumed = conversation.compiled.invoke({'messages': []}, conversation.config)
     assert resumed['status'] == 'chat_complete'
     assert resumed['task_id'] == result['task_id']

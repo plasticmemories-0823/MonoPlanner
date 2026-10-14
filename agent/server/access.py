@@ -1,4 +1,4 @@
-"""为完整的本地 Agent Server ASGI 栈提供实例认证。"""
+"""为本机产品 ASGI 接口提供实例认证。"""
 
 import hmac
 import os

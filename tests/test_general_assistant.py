@@ -65,7 +65,7 @@ class GeneralAssistantTests(unittest.TestCase):
             ]
         )
         with patch(
-            'agent.server.runtime.ConversationRunner.activate',
+            'tests.legacy.runtime.ConversationRunner.activate',
             side_effect=AssertionError('not execution'),
         ):
             result = self.invoke(model, '查询文件')
@@ -88,7 +88,7 @@ class GeneralAssistantTests(unittest.TestCase):
                 text_reply(),
             ]
         )
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             result = self.compiled.invoke(
                 {
                     'repo': '',
@@ -131,7 +131,7 @@ class GeneralAssistantTests(unittest.TestCase):
             [self.task("print('真实失败')\nraise SystemExit(3)\n"), text_reply('失败，要修复吗')]
         )
         with patch(
-            'agent.server.runtime.ConversationRunner.bootstrap_work',
+            'tests.legacy.runtime.ConversationRunner.bootstrap_work',
             side_effect=AssertionError('not coding'),
         ):
             result = self.invoke(model, '运行已有任务')
@@ -229,7 +229,7 @@ class GeneralAssistantTests(unittest.TestCase):
             paused = self.invoke(model, '读两份')
         self.assertEqual(paused['status'], 'paused')
         self.store.enqueue(self.thread, 'resume', 'resume')
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             result = self.compiled.invoke({'messages': []}, self.config)
         self.assertEqual(result['status'], 'chat_complete')
         self.assertEqual(len(model.calls), 2)

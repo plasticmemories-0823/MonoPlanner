@@ -1,32 +1,56 @@
-"""One existing planner loop; persistent lookup and resume do not need a model."""
+"""独立编码任务入口；历史查询不调用模型，旧记录只由冻结版本恢复。"""
 
 import argparse
 import json
-import uuid
+import os
 from pathlib import Path
-from langchain_core.messages import messages_from_dict
-from agent.task.budget import StepBudget
-from agent.storage.history import LocalHistory
-from agent.server.runtime import ConversationRunner
+import re
+import sqlite3
+import uuid
+
+from agent.application.work_bridge import run_work
 from agent.execution.projects import workspace_binding
+from agent.storage.history import LocalHistory
+from agent.storage.preferences import Preferences
+from agent.storage.records import save
 
 
 class LazyModel:
-    def __init__(self):
+    def __init__(self, settings=None):
         self.model = None
+        self.settings = settings
 
     def bind_tools(self, tools):
         if self.model is None:
             from agent.settings import load_settings
             from agent.model.client import create_model
 
-            self.model = create_model(load_settings())
+            self.model = create_model(load_settings(self.settings))
         return self.model.bind_tools(tools)
+
+
+def _history(folder, query=None):
+    """只读旧索引和原件，不取得执行租约或创建检查点。"""
+    if not (folder / 'history.sqlite3').is_file():
+        return None
+    store = LocalHistory(folder)
+    connection = None
+    try:
+        connection = sqlite3.connect(
+            (folder / 'history.sqlite3').as_uri() + '?mode=ro', uri=True
+        )
+        store.connection = connection
+        return store.find(query) if query is not None else store.load()
+    finally:
+        if connection is not None:
+            connection.close()
+            store.connection = None
+        store.close()
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--state-dir', required=True)
+    parser.add_argument('--state-dir', required=True, help='独立记录目录，不能位于工作源码内')
     parser.add_argument('--repo')
     parser.add_argument('--task')
     parser.add_argument('--verify-command')
@@ -36,84 +60,86 @@ def main(argv=None):
     parser.add_argument('--find', help='Search existing history metadata; no model or shell')
     parser.add_argument('--status', action='store_true')
     args = parser.parse_args(argv)
-    folder = Path(args.state_dir).resolve()
-    old = None
-    if (folder / 'history.sqlite3').exists():
-        store = LocalHistory(folder)
-        try:
-            with store.lease():
-                old = store.load()
-                if args.find is not None:
-                    print(json.dumps(store.find(args.find), ensure_ascii=False, indent=2))
-                    return 0
-                if args.status:
-                    print(
-                        json.dumps(
-                            {k: old.get(k) for k in ('status', 'reason', 'source', 'plan_count')},
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                    )
-                    return 0
-        finally:
-            store.close()
-    elif args.find is not None or args.status:
-        parser.error('No existing indexed task at this path')
-    old = old or {}
-    repo = args.repo or old.get('repo') or old.get('environment_key', {}).get('repo')
-    task = args.task or old.get('request')
-    if not repo or not task:
-        parser.error('A new task requires --repo and --task')
-    if old and not old.get('execution_binding'):
+    for name in ('max_steps', 'pause_after_steps'):
+        value = getattr(args, name)
+        if value is not None and value <= 0:
+            parser.error(name + ' must be positive')
+    for name in ('verify_command', 'acceptance'):
+        value = getattr(args, name)
+        if value is not None and not value.strip():
+            parser.error(name + ' cannot be empty')
+
+    root = Path(args.state_dir).expanduser().resolve()
+    job_path = root / 'bridge-job.json'
+    job = None
+    if job_path.exists():
+        if job_path.is_symlink():
+            parser.error('任务入口记录不能是链接。')
+        job = json.loads(job_path.read_text(encoding='utf-8'))
+        if (job.get('format') != 1
+                or not re.fullmatch(r'[0-9a-f]{32}', job.get('task_id', ''))
+                or job.get('state_root') != str(root)):
+            parser.error('任务入口原件无效或记录目录已改变；不会迁移旧任务。')
+    folder = root / 'tasks' / job['task_id'] if job else root
+    old = _history(folder)
+    if args.find is not None or args.status:
+        if old is None:
+            parser.error('No existing indexed task at this path')
+        value = (_history(folder, args.find) if args.find is not None else
+                 {key: old.get(key) for key in ('status', 'reason', 'source', 'plan_count')})
+        print(json.dumps(value, ensure_ascii=False, indent=2))
+        return 0
+    if old is not None and job is None:
         parser.error('旧任务须使用冻结源码和原执行后端恢复，不迁移检查点')
-    saved = old.get('budget', {})
-    policy = (
-        'max_steps',
-        'max_tokens',
-        'timeout_seconds',
-        'report_reserve',
-        'report_token_reserve',
-        'report_time_reserve',
-        'transport_retry_limit',
-    )
-    values = {k: saved[k] for k in policy if k in saved}
+
+    if job is None:
+        if not args.repo or not args.task:
+            parser.error('A new task requires --repo and --task')
+        repo = Path(args.repo).expanduser().resolve()
+        if not repo.is_dir() or root == repo or root.is_relative_to(repo):
+            parser.error('请选择已有工作目录，并把 --state-dir 放在工作目录之外。')
+        job = {
+            'format': 1, 'task_id': uuid.uuid4().hex, 'kind': 'coding',
+            'state_root': str(root), 'repo': str(repo), 'request': args.task,
+            'settings': Preferences().defaults(), 'public_conversation': [],
+            'execution_binding': workspace_binding(str(repo)),
+            'verify_command': args.verify_command, 'acceptance': args.acceptance,
+            'budget': {'max_steps': args.max_steps or 1000},
+            'pause_after_steps': args.pause_after_steps,
+        }
+        root.mkdir(parents=True, exist_ok=True)
+        # 原件只创建一次；同时启动的另一个 CLI 不能覆盖任务身份。
+        with job_path.open('x', encoding='utf-8') as stream:
+            json.dump(job, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+    else:
+        for name, stored in (('repo', job['repo']), ('task', job['request']),
+                             ('verify_command', job.get('verify_command')),
+                             ('acceptance', job.get('acceptance'))):
+            requested = getattr(args, name)
+            if name == 'repo' and requested is not None:
+                requested = str(Path(requested).expanduser().resolve())
+            if requested is not None and requested != stored:
+                parser.error('已有任务的需求、项目和验收原件不能替换，请使用新的 --state-dir。')
+
+    invocation = {**job, 'budget': dict(job['budget'])}
     if args.max_steps is not None:
-        values['max_steps'] = args.max_steps
-    budget = StepBudget(**values)
-    history = []
-    if old:
-        history = messages_from_dict(old.get('public_conversation', []))
-    controls = (
-        [{'id': uuid.uuid4().hex, 'kind': 'resume'}]
-        if old.get('status') in {'paused', 'awaiting_user', 'output_limit_reached'}
-        else []
-    )
-    loop = ConversationRunner(
-        LazyModel(),
-        repo,
-        state_dir=folder,
-        pause_after_steps=args.pause_after_steps,
-        control_source=lambda: controls,
-        yield_boundary=False,
-        execution_binding=old.get('execution_binding') or workspace_binding(repo),
-    )
-    result = loop.run(
-        history,
-        task,
-        budget,
-        verify_command=(
-            args.verify_command if args.verify_command is not None else old.get('verify_command')
-        ),
-        acceptance=args.acceptance if args.acceptance is not None else old.get('acceptance'),
-    )
-    print(
-        json.dumps(
-            {k: v for k, v in result.items() if k not in {'messages', 'rounds', 'verification'}},
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    return 0 if result['status'] in {'verified_success', 'paused', 'chat_complete'} else 1
+        invocation['budget']['max_steps'] = args.max_steps
+    # 步数暂停是本次调用的调试边界，不在下次显式续跑时重复触发。
+    invocation['pause_after_steps'] = args.pause_after_steps
+    controls = ([{'id': uuid.uuid4().hex, 'kind': 'resume'}]
+                if old and old.get('status') in {'paused', 'awaiting_user', 'output_limit_reached'}
+                else [])
+    save(root / 'cli-invocations' / (uuid.uuid4().hex + '.json'),
+         {'task_id': job['task_id'], 'budget': invocation['budget'],
+          'pause_after_steps': invocation.get('pause_after_steps'), 'controls': controls})
+    result = run_work(invocation, lambda *_: None, lambda: controls,
+                      model=LazyModel(job['settings']), root=root)
+    print(json.dumps({key: value for key, value in result.items()
+                      if key not in {'messages', 'rounds', 'verification'}},
+                     ensure_ascii=False, indent=2))
+    return 0 if result['status'] in {'verified_success', 'paused'} else 1
 
 
 if __name__ == '__main__':

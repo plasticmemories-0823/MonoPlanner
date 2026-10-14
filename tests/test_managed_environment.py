@@ -198,11 +198,20 @@ class FakeDockerManager(ManagedEnvironments):
         self.failure = None
         self.installs = 0
         self.image_counter = 1
+        self.containers = {}
+        self.volumes, self.networks = {}, {}
+
+    def _space_guard(self, *, initial=False):
+        # 这个替身完全不连接宿主 Docker，也不依赖宿主 Docker 数据盘位置。
+        return None
 
     def _new_image(self):
         image = 'sha256:' + format(self.image_counter, '064x')
         self.image_counter += 1
         return image
+
+    def _stop_owned_container(self, name):
+        self.calls.append(['kill', name])
 
     def _run(self, arguments, *, log, cancelled=None, timeout=60, check=True):
         from agent.execution.managed import _check_cancel
@@ -216,26 +225,65 @@ class FakeDockerManager(ManagedEnvironments):
         if arguments[:2] == ['image', 'inspect']:
             found = self.images.get(arguments[2])
             if found:
-                stdout = json.dumps([{'Id': found, 'Os': 'linux', 'Architecture': 'amd64'}])
+                stdout = json.dumps([{'Id': found, 'Os': 'linux', 'Architecture': 'amd64', 'Size': 100}])
             else:
                 code = 1
-        elif arguments[0] == 'build':
+        elif arguments[0] == 'pull':
+            image = 'sha256:' + 'f' * 64
+            self.images[arguments[-1]] = image
+            self.images[image] = image
+        elif arguments[0] == 'create' or arguments[:2] == ['run', '--detach']:
+            name = arguments[arguments.index('--name') + 1]
+            labels = dict(arguments[i + 1].split('=', 1)
+                          for i, item in enumerate(arguments) if item == '--label')
+            identity = format(len(self.containers) + 1, '064x')
+            self.containers[identity] = {
+                'Id': identity, 'Name': '/' + name,
+                'Image': next(value for value in arguments if value.startswith('sha256:')),
+                'Config': {'Labels': labels},
+                'HostConfig': {'Memory': 2 * 1024**3, 'LogConfig': {
+                    'Type': 'local', 'Config': {'max-size': '10m', 'max-file': '3'}}},
+            }
+            stdout = identity
+        elif arguments[:2] == ['container', 'inspect']:
+            value = self.containers.get(arguments[-1]) or next((value for value in self.containers.values()
+                if value['Name'] == '/' + arguments[-1]), None)
+            stdout, code = (json.dumps([value]), 0) if value else ('No such container', 1)
+        elif arguments[:2] == ['buildx', 'rm']:
+            self.containers = {key: value for key, value in self.containers.items()
+                               if value['Name'] != '/buildx_buildkit_' + arguments[-1] + '0'}
+            self.volumes.pop('buildx_buildkit_' + arguments[-1] + '0_state', None)
+        elif arguments[:2] == ['buildx', 'build']:
             image = self._new_image()
             self.images[arguments[arguments.index('--tag') + 1]] = image
             self.images[image] = image
-        elif arguments[:2] == ['network', 'inspect']:
-            stdout = json.dumps(
-                [
-                    {
+        elif arguments[:2] == ['network', 'create']:
+            self.networks[arguments[-1]] = {
+                        'Id': 'd' * 64,
+                        'Labels': dict(arguments[i + 1].split('=', 1)
+                                       for i, item in enumerate(arguments) if item == '--label'),
                         'Internal': True,
                         'EnableIPv6': False,
                         'Driver': 'bridge',
                         'Options': {'com.docker.network.bridge.gateway_mode_ipv4': 'isolated'},
                     }
-                ]
-            )
+        elif arguments[:2] == ['network', 'inspect']:
+            stdout = json.dumps([self.networks[arguments[-1]]])
+        elif arguments[:2] == ['volume', 'create']:
+            self.volumes[arguments[-1]] = {'Labels': dict(arguments[i + 1].split('=', 1)
+                                       for i, item in enumerate(arguments) if item == '--label')}
         elif arguments[:2] == ['volume', 'inspect']:
-            code, stdout = 1, 'Error: No such volume'
+            value = self.volumes.get(arguments[-1])
+            code, stdout = (0, json.dumps([value])) if value else (1, 'Error: No such volume')
+        elif arguments[:2] == ['container', 'rm']:
+            identity = next((key for key, value in self.containers.items()
+                if key == arguments[-1] or value['Name'] == '/' + arguments[-1]), None)
+            if identity:
+                self.containers.pop(identity)
+            else:
+                code, stdout = 1, 'No such container'
+        elif arguments[:2] == ['volume', 'rm']:
+            self.volumes.pop(arguments[-1], None)
         elif arguments[:2] == ['start', '--attach']:
             self.installs += 1
         elif arguments[:2] == ['inspect', '--format']:
@@ -268,7 +316,8 @@ class ManagedPreparationTests(ManagedFixture):
             [e['stage'] for e in events],
             ['checking', 'materials', 'downloading', 'installing', 'saving', 'ready'],
         )
-        create = next(c for c in self.manager.calls if c[0] == 'create')
+        create = next(c for c in self.manager.calls if c[0] == 'create'
+                      and c[c.index('--name') + 1].endswith('-work'))
         self.assertIn('--network', create)
         self.assertTrue(create[create.index('--network') + 1].endswith('-net'))
         self.assertIn(
@@ -302,7 +351,8 @@ class ManagedPreparationTests(ManagedFixture):
 
         self.manager.prepare(self.repo)
         proxy = next(c for c in self.manager.calls if c[:2] == ['run', '--detach'])
-        setup = next(c for c in self.manager.calls if c[0] == 'create')
+        setup = next(c for c in self.manager.calls if c[0] == 'create'
+                     and c[c.index('--name') + 1].endswith('-work'))
         for command, deadline in ((proxy, PROXY_LIFETIME), (setup, SETUP_TIMEOUT)):
             self.assertIn('--init', command)
             self.assertEqual(command[command.index('--entrypoint') + 1], '/usr/bin/timeout')
@@ -310,6 +360,33 @@ class ManagedPreparationTests(ManagedFixture):
             self.assertIn('--kill-after=10s', command)
             self.assertIn(str(deadline) + 's', command)
         self.assertGreater(PROXY_LIFETIME, SETUP_TIMEOUT)
+
+    def test_base_builder_is_owned_bounded_and_does_not_replace_user_default(self):
+        self.manager.prepare(self.repo)
+        create = next(c for c in self.manager.calls if c[:2] == ['buildx', 'create'])
+        build = next(c for c in self.manager.calls if c[:2] == ['buildx', 'build'])
+        self.assertNotIn('--use', create)
+        self.assertIn('memory=2g', create)
+        self.assertIn('cpu-quota=200000', create)
+        self.assertIn('restart-policy=no', create)
+        name = create[create.index('--name') + 1]
+        self.assertEqual(build[build.index('--builder') + 1], name)
+        self.assertIn('--load', build)
+        self.assertIn(['buildx', 'rm', '--force', name], self.manager.calls)
+
+    def test_cancel_during_base_build_kills_builder_and_preserves_its_state(self):
+        def cancelled():
+            return any(c[:2] == ['buildx', 'build'] for c in self.manager.calls)
+
+        with self.assertRaises(PreparationCancelled):
+            self.manager.prepare(self.repo, cancelled=cancelled)
+        create = next(c for c in self.manager.calls if c[:2] == ['buildx', 'create'])
+        node = create[create.index('--node') + 1]
+        container = next(value for value in self.manager.containers.values()
+                         if value['Name'] == '/buildx_buildkit_' + node)
+        self.assertIn(['kill', container['Id']], self.manager.calls)
+        self.assertFalse(any(c[:2] == ['buildx', 'rm'] for c in self.manager.calls))
+        self.assertFalse(any(c[0] == 'commit' for c in self.manager.calls))
 
     def test_cleared_docker_cache_is_detected_and_reprepared(self):
         first = self.manager.prepare(self.repo)
@@ -333,14 +410,15 @@ class ManagedPreparationTests(ManagedFixture):
         self.assertEqual(replies[0], replies[1])
         self.assertEqual(self.manager.installs, 1)
 
-    def test_cancel_after_proxy_creation_cleans_owned_resources_and_never_commits(self):
+    def test_cancel_after_proxy_creation_kills_owned_container_and_preserves_unknown_scene(self):
         def cancelled():
             return any(c[:2] == ['run', '--detach'] for c in self.manager.calls)
 
         with self.assertRaises(PreparationCancelled):
             self.manager.prepare(self.repo, cancelled=cancelled)
-        self.assertTrue(any(c[:2] == ['rm', '--force'] for c in self.manager.calls))
-        self.assertTrue(any(c[:2] == ['network', 'rm'] for c in self.manager.calls))
+        self.assertTrue(any(c[0] == 'kill' for c in self.manager.calls))
+        self.assertFalse(any(c[:2] == ['rm', '--force'] for c in self.manager.calls))
+        self.assertFalse(any(c[:2] == ['network', 'rm'] for c in self.manager.calls))
         self.assertFalse(any(c[0] == 'commit' for c in self.manager.calls))
         self.assertEqual(self.manager.status(self.repo)['state'], 'needs_preparation')
 

@@ -196,7 +196,6 @@ def build(destination, make_zip=True):
         'MonoPlanner.exe',
         'README.md',
         'LICENSE',
-        'langgraph.json',
         'requirements.txt',
         'requirements-web.txt',
         'requirements.lock',

@@ -22,6 +22,7 @@ from agent.execution.docker import (
     proxy_environment,
     PROXY_VARIABLES,
     dependency_cache_usable,
+    LOG_OPTIONS,
 )
 from agent.execution.managed_plan import (
     PreparationError,
@@ -36,6 +37,7 @@ MAX_LOG = 16 * 1024 * 1024
 SETUP_TIMEOUT = 1800
 PROXY_LIFETIME = SETUP_TIMEOUT + 300
 IMAGE_ID = re.compile(r'sha256:[0-9a-f]{64}')
+BUILDKIT_IMAGE = 'moby/buildkit:v0.34.0'
 _LOCKS = weakref.WeakValueDictionary()
 _LOCKS_GUARD = threading.Lock()
 
@@ -48,7 +50,9 @@ class PreparationCancelled(PreparationError):
 
 
 def _check_cancel(cancelled):
-    if cancelled and cancelled():
+    from agent.storage.resources import owner_cancelled
+
+    if owner_cancelled() or (cancelled and cancelled()):
         raise PreparationCancelled('环境准备已取消，尚未开始执行任务。')
 
 
@@ -126,15 +130,193 @@ def _lock(path, cancelled=None):
 # ============================================================
 class ManagedEnvironments:
     def __init__(self, root=None):
-        self.root = (Path(root) if root else state_root()) / 'managed-environments'
+        from agent.storage.resources import current_root
+
+        self.root = current_root(root) / 'managed-environments'
 
     def _record(self, repo):
         return self.root / 'projects' / (_digest(str(Path(repo).resolve())) + '.json')
+
+    def _register_binding(self, repo, binding, work):
+        from agent.storage.resources import resource_catalog
+
+        catalog = resource_catalog(self.root.parent)
+        owner = 'project:' + hashlib.sha256(str(Path(repo).resolve()).encode()).hexdigest()
+        image = binding['image']
+        inspected = self._image(image, work) or {}
+        metadata = {'repo': str(Path(repo).resolve()),
+                    'fingerprint': binding.get('managed', {}).get('fingerprint')}
+        identity = catalog.register('image:' + image, 'image', image,
+                                    size_bytes=inspected.get('Size'),
+                                    metadata=metadata, owner=owner)
+        base = binding.get('managed', {}).get('base_image')
+        if base:
+            catalog.link('environment:' + image, 'image:' + base)
+        # 新环境提交后才释放同项目旧版本；旧任务自己的引用仍然有效。
+        with catalog._db() as db:
+            db.execute('DELETE FROM resource_refs WHERE owner=? AND resource<>?', (owner, identity))
+        usage = catalog.usage()
+        if usage['idle_bytes'] > usage['cache_limit_bytes'] or usage['idle_unknown_count']:
+            from agent.storage.resources import delete_owned_docker_resource
+
+            catalog.cleanup(docker=delete_owned_docker_resource)
+        return binding
+
+    def _stop_owned_container(self, name):
+        result = subprocess.run(
+            [docker_executable(), 'kill', name], capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=8,
+            **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}),
+        )
+        if result.returncode and not any(text in result.stderr.lower()
+                                        for text in ('no such container', 'is not running')):
+            raise PreparationError('Docker 未确认安装容器已停止。')
+
+    def _finish_resources(self, owner, identities, work, *, completed):
+        from agent.storage.resources import resource_catalog, delete_owned_docker_resource
+
+        def query(arguments):
+            return self._run(arguments, check=False,
+                log=work / ('cleanup-' + _digest(arguments)[:16] + '.log'))
+        result = resource_catalog(self.root.parent).finish_resources(
+            owner, identities, completed=completed, docker=lambda kind, identity, metadata:
+            delete_owned_docker_resource(kind, identity, metadata, query=query, stop_running=True))
+        if result.get('errors'):
+            raise PreparationError('环境资源收尾未完成，现场已保留。')
+        return result
+
+    def _space_guard(self, *, initial=False):
+        from agent.storage.resources import preflight_space, resource_catalog
+        from agent.storage.disk_space import require_docker_space
+
+        reserve = resource_catalog(self.root.parent).usage()['reserve_bytes']
+        preflight_space(self.root, 0, reserve_bytes=reserve)
+        self._docker_storage = require_docker_space(
+            reserve, previous=None if initial else getattr(self, '_docker_storage', None),
+            verify_context=initial or not hasattr(self, '_docker_storage'),
+        )
+
+    def _build_base(self, build, tag, work, proxy_arguments, cancelled):
+        """具名构建容器带固定镜像、日志限额和精确身份，不改用户默认 builder。"""
+        from agent.storage.resources import (
+            current_owner, register_active_container, unregister_active_container,
+            resource_catalog, owner_cancelled, ownership_labels,
+        )
+
+        name = 'monoplanner-build-' + uuid.uuid4().hex
+        node = name + '0'
+        container, volume = 'buildx_buildkit_' + node, 'buildx_buildkit_' + node + '_state'
+        owner = current_owner('prepare:' + name)
+        labels = ownership_labels(owner, self.root.parent)
+        label_args = [part for key, value in labels.items() for part in ('--label', key + '=' + value)]
+        catalog = resource_catalog(self.root.parent)
+        identity, volume_identity = 'container:' + container, 'volume:' + volume
+        actual_id = None
+        image = self._image(BUILDKIT_IMAGE, work, cancelled)
+        downloaded = image is None
+        if image is None:
+            self._run(['pull', BUILDKIT_IMAGE], log=work / 'builder-pull.log',
+                      cancelled=cancelled, timeout=SETUP_TIMEOUT)
+            image = self._image(BUILDKIT_IMAGE, work, cancelled)
+        if image is None:
+            raise PreparationError('无法核验固定版本 BuildKit 镜像。')
+        with catalog._db() as db:
+            existing = db.execute('SELECT owned FROM resources WHERE id=?',
+                                  ('image:' + image['Id'],)).fetchone()
+        catalog.register('image:' + image['Id'], 'image', image['Id'],
+                         owned=bool(existing['owned']) if existing else downloaded,
+                         size_bytes=image.get('Size'), metadata={'downloaded': BUILDKIT_IMAGE},
+                         owner=owner)
+        metadata = {'builder': name, 'builder_node': node, 'builder_volume': volume,
+                    'container_id': None, 'image': image['Id'], 'labels': labels}
+        catalog.register(identity, 'container', container, owner=owner, metadata=metadata)
+        control = register_active_container(
+            owner, container, lambda: self._stop_owned_container(actual_id or container),
+            root=self.root.parent,
+        )
+        complete = False
+        def receipt(status):
+            _save(work / 'builder.json', {'name': name, 'node': node, 'container': container,
+                'owner': owner, 'status': status, 'container_id': actual_id,
+                'volume': volume, 'image': image['Id'], 'labels': labels})
+        receipt('starting')
+        try:
+            self._run(['volume', 'create', *label_args, '--label',
+                       'com.monoplanner.builder=' + name, volume],
+                      log=work / 'builder-volume.log', cancelled=cancelled)
+            catalog.register(volume_identity, 'volume', volume, owner=owner,
+                             metadata={'builder': name, 'labels': labels})
+            created = self._run([
+                'create', '--name', container, '--pull', 'never', '--init',
+                '--privileged', '--memory', '2g', '--memory-swap', '2g', '--cpus', '2',
+                '--pids-limit', '256', '--restart', 'no', *LOG_OPTIONS, *label_args,
+                '--mount', 'type=volume,source=' + volume + ',target=/var/lib/buildkit',
+                *proxy_environment(), image['Id'],
+            ], log=work / 'builder-container.log', cancelled=cancelled)
+            actual_id = created.stdout.strip()
+            if not re.fullmatch(r'[0-9a-f]{64}', actual_id):
+                raise PreparationError('构建容器身份未确认，已保留现场。')
+            metadata['container_id'] = actual_id
+            catalog.register(identity, 'container', container, owner=owner, metadata=metadata)
+            receipt('created')
+            config = work / 'buildkitd.toml'
+            config.write_text(
+                '[worker.oci]\nmax-parallelism = 1\ngc = true\nreservedSpace = "512MB"\n'
+                'maxUsedSpace = "20GB"\nminFreeSpace = "5GB"\n', encoding='utf-8')
+            self._run(['cp', str(config), container + ':/etc/buildkit/buildkitd.toml'],
+                      log=work / 'builder-config.log', cancelled=cancelled)
+            self._run([
+                'buildx', 'create', '--name', name, '--node', node, '--driver', 'docker-container',
+                '--driver-opt', 'image=' + BUILDKIT_IMAGE,
+                '--driver-opt', 'memory=2g', '--driver-opt', 'cpu-period=100000',
+                '--driver-opt', 'cpu-quota=200000', '--driver-opt', 'restart-policy=no',
+            ], log=work / 'builder-create.log', cancelled=cancelled)
+            self._run(['buildx', 'inspect', '--bootstrap', name],
+                      log=work / 'builder-bootstrap.log', cancelled=cancelled)
+            inspected = self._run(['container', 'inspect', actual_id],
+                                 log=work / 'builder-inspect.log', cancelled=cancelled)
+            actual = json.loads(inspected.stdout)[0]
+            host = actual.get('HostConfig', {})
+            if (actual.get('Id') != actual_id or actual.get('Image') != image['Id']
+                    or any(actual.get('Config', {}).get('Labels', {}).get(key) != value
+                           for key, value in labels.items())
+                    or host.get('LogConfig') != {
+                        'Type': 'local', 'Config': {'max-size': '10m', 'max-file': '3'}}
+                    or host.get('Memory') != 2 * 1024**3):
+                raise PreparationError('构建容器身份或资源限制与记录不符。')
+            receipt('building')
+            self._run([
+                'buildx', 'build', '--builder', name, '--load', '--network', 'none',
+                *proxy_arguments, '--tag', tag, str(build),
+            ], log=work / 'base-build.log', cancelled=cancelled, timeout=SETUP_TIMEOUT)
+            _check_cancel(cancelled)
+            complete = True
+        finally:
+            try:
+                if complete and not owner_cancelled(owner, self.root.parent):
+                    self._finish_resources(owner, [identity, volume_identity], work, completed=True)
+                else:
+                    try:
+                        self._stop_owned_container(actual_id or container)
+                    except (PreparationError, OSError, subprocess.SubprocessError):
+                        pass
+                receipt('completed' if complete else 'interrupted')
+            finally:
+                unregister_active_container(control)
+
 
     def status(self, repo):
         plan = inspect_project(repo)
         record = _load(self._record(plan.root))
         current = record and record.get('fingerprint') == plan.fingerprint
+        if current:
+            from agent.storage.resources import resource_catalog
+
+            with resource_catalog(self.root.parent)._db() as db:
+                resource = db.execute('SELECT status FROM resources WHERE id=?',
+                                      ('image:' + record['binding']['image'],)).fetchone()
+            if resource and resource['status'] != 'ready':
+                current = False
         return {
             **plan.public(),
             'state': 'ready' if current else 'needs_preparation',
@@ -164,9 +346,13 @@ class ManagedEnvironments:
             except OSError as exc:
                 raise PreparationError('无法连接 Docker，请启动 Docker Desktop 后重试。') from exc
             started = time.monotonic()
+            checked_space = started
             try:
                 while process.poll() is None:
                     _check_cancel(cancelled)
+                    if hasattr(self, '_docker_storage') and time.monotonic() - checked_space >= 1:
+                        self._space_guard()
+                        checked_space = time.monotonic()
                     if time.monotonic() - started > timeout:
                         raise PreparationError(
                             '环境准备超时。已保留日志；请检查网络或项目的安装步骤后重试。'
@@ -178,6 +364,8 @@ class ManagedEnvironments:
                 process.kill()
                 process.wait(timeout=10)
                 raise
+        if log.stat().st_size > MAX_LOG:
+            raise PreparationError('安装程序输出过多，已停止准备并保留日志。')
         text = log.read_text(encoding='utf-8', errors='replace')
         if check and process.returncode:
             # 本地保留日志以便诊断；不要向模型或界面返回任意安装输出，
@@ -237,10 +425,17 @@ class ManagedEnvironments:
         recipe = {'revision': REVISION, 'python': plan.python, 'node': plan.node}
         key = _digest(recipe)[:24]
         tag = 'monoplanner-base:' + key
+        def record(image):
+            from agent.storage.resources import resource_catalog, current_owner
+
+            resource_catalog(self.root.parent).register(
+                'image:' + image['Id'], 'image', image['Id'], size_bytes=image.get('Size'),
+                metadata={'base_key': key}, owner=current_owner())
+            return image['Id']
         with _lock(self.root / 'locks' / ('base-' + key + '.lock'), cancelled):
             image = self._image(tag, work, cancelled)
             if image:
-                return image['Id']
+                return record(image)
             progress('downloading', '正在下载 Python、Node.js 和常用开发工具。')
             build = work / 'base'
             build.mkdir()
@@ -264,12 +459,7 @@ LABEL org.monoplanner.managed-base="{key}"
                 proxy_arguments = [
                     arg for name in PROXY_VARIABLES for arg in ('--build-arg', name + '=')
                 ]
-                self._run(
-                    ['build', '--network', 'none', *proxy_arguments, '--tag', tag, str(build)],
-                    log=work / 'base-build.log',
-                    cancelled=cancelled,
-                    timeout=SETUP_TIMEOUT,
-                )
+                self._build_base(build, tag, work, proxy_arguments, cancelled)
             except PreparationCancelled:
                 raise
             except PreparationError as exc:
@@ -279,7 +469,7 @@ LABEL org.monoplanner.managed-base="{key}"
             image = self._image(tag, work, cancelled)
             if not image:
                 raise PreparationError('基础环境生成后无法读取，未开始执行。')
-            return image['Id']
+            return record(image)
 
     def _copy(self, plan, work, cancelled):
         target = work / 'source'
@@ -289,6 +479,9 @@ LABEL org.monoplanner.managed-base="{key}"
 
         if plan.materials is None:
             plan.materials = collect(plan, cancelled)
+        from agent.storage.resources import preflight_space
+
+        preflight_space(work, sum(item['size'] for item in plan.materials.values()))
         _save(work / 'installation-materials.json', plan.materials)
         for name, item in plan.materials.items():
             relative = Path(name)
@@ -318,7 +511,40 @@ LABEL org.monoplanner.managed-base="{key}"
         network, proxy, setup = (
             'monoplanner-prepare-' + identity + suffix for suffix in ('-net', '-proxy', '-work')
         )
-        owned = {'network': False, 'proxy': False, 'setup': False}
+        from agent.storage.resources import (
+            current_owner, register_active_container, unregister_active_container,
+            owner_cancelled, resource_catalog, ownership_labels,
+        )
+
+        control_keys = []
+        owner = current_owner('prepare:' + identity)
+        labels = ownership_labels(owner, self.root.parent)
+        label_args = [part for key, value in labels.items() for part in ('--label', key + '=' + value)]
+        catalog = resource_catalog(self.root.parent)
+        owned_records = {}
+        container_ids = {}
+        complete = False
+
+        def register(name):
+            owned_records[name] = catalog.register(
+                'container:' + name, 'container', name, owner=owner,
+                metadata={'container_id': None, 'preparation': str(work), 'image': base, 'labels': labels},
+            )
+            def stop():
+                self._stop_owned_container(container_ids.get(name, name))
+            control_keys.append(register_active_container(
+                owner, name, stop, root=self.root.parent
+            ))
+
+        def record_identity(name, result):
+            container_id = result.stdout.strip()
+            if re.fullmatch(r'[0-9a-f]{64}', container_id):
+                container_ids[name] = container_id
+                catalog.register(owned_records[name], 'container', name, owner=owner,
+                                 metadata={'container_id': container_id, 'preparation': str(work),
+                                           'image': base, 'labels': labels})
+            else:
+                raise PreparationError('环境准备容器身份未确认，已保留现场。')
         source = self._copy(plan, work, cancelled)
         from agent.execution import managed_proxy, managed_setup
 
@@ -337,15 +563,19 @@ LABEL org.monoplanner.managed-base="{key}"
             '2',
             '--memory',
             '3g',
+            *LOG_OPTIONS,
+            *label_args,
         ]
         try:
             # 分派前先记录名称：取消或 CLI 失败时，Docker 可能已经
             # 创建了这个名称唯一、由程序管理的资源。
-            owned['network'] = True
+            owned_records[network] = catalog.register('network:' + network, 'network', network,
+                owner=owner, metadata={'network_id': None, 'labels': labels})
             self._run(
                 [
                     'network',
                     'create',
+                    *label_args,
                     '--internal',
                     '--opt',
                     'com.docker.network.bridge.gateway_mode_ipv4=isolated',
@@ -372,10 +602,15 @@ LABEL org.monoplanner.managed-base="{key}"
                 raise PreparationError(
                     'Docker 未提供所需的准备网络隔离，请更新 Docker Desktop 后重试。'
                 )
-            owned['proxy'] = True
+            network_id = network_state.get('Id')
+            if not isinstance(network_id, str) or not re.fullmatch(r'[0-9a-f]{64}', network_id):
+                raise PreparationError('准备网络身份未确认，现场已保留。')
+            catalog.register(owned_records[network], 'network', network, owner=owner,
+                             metadata={'network_id': network_id, 'labels': labels})
+            register(proxy)
             # 即使后端意外退出，容器内部的超时控制仍有效。
             # 主进程退出后，init 也会结束容器中的子进程命名空间。
-            self._run(
+            proxy_result = self._run(
                 [
                     'run',
                     '--detach',
@@ -402,13 +637,14 @@ LABEL org.monoplanner.managed-base="{key}"
                 log=work / 'proxy.log',
                 cancelled=cancelled,
             )
+            record_identity(proxy, proxy_result)
             self._run(
                 ['network', 'connect', '--alias', 'download-proxy', network, proxy],
                 log=work / 'proxy-connect.log',
                 cancelled=cancelled,
             )
-            owned['setup'] = True
-            self._run(
+            register(setup)
+            setup_result = self._run(
                 [
                     'create',
                     '--name',
@@ -438,6 +674,7 @@ LABEL org.monoplanner.managed-base="{key}"
                 log=work / 'setup-create.log',
                 cancelled=cancelled,
             )
+            record_identity(setup, setup_result)
             for local, destination in (
                 (source, '/monoplanner-source'),
                 (work / 'setup.py', '/opt/monoplanner/setup.py'),
@@ -515,6 +752,7 @@ LABEL org.monoplanner.managed-base="{key}"
             image = self._image(commit.stdout.strip(), work, cancelled)
             if not image or not IMAGE_ID.fullmatch(commit.stdout.strip()):
                 raise PreparationError('已准备环境无法固定版本，未开始执行。')
+            complete = True
             return {
                 'backend': 'docker',
                 'image': image['Id'],
@@ -526,27 +764,22 @@ LABEL org.monoplanner.managed-base="{key}"
                     'node': plan.node,
                     'node_modules': modules,
                     'manifest_count': len(plan.files),
+                    'base_image': base,
                 },
             }
         finally:
             # 只能清理本次尝试生成的资源名称。
-            for kind, name in (('setup', setup), ('proxy', proxy)):
-                if owned[kind]:
-                    try:
-                        self._run(
-                            ['rm', '--force', name],
-                            log=work / ('cleanup-' + kind + '.log'),
-                            check=False,
-                        )
-                    except (PreparationError, OSError):
-                        pass
-            if owned['network']:
-                try:
-                    self._run(
-                        ['network', 'rm', network], log=work / 'cleanup-network.log', check=False
-                    )
-                except (PreparationError, OSError):
-                    pass
+            interrupted = (not complete or owner_cancelled(owner, self.root.parent)
+                           or (cancelled and cancelled()))
+            if interrupted:
+                from agent.storage.resources import cancel_owned_containers
+
+                cancel_owned_containers(owner, root=self.root.parent)
+            try:
+                self._finish_resources(owner, list(owned_records.values()), work, completed=not interrupted)
+            finally:
+                for key in control_keys:
+                    unregister_active_container(key)
 
     def _empty_environment(self, plan, base, work, progress, cancelled):
         """无项目依赖时，共享同一套已准备的基础工具。"""
@@ -626,7 +859,9 @@ LABEL org.monoplanner.managed-base="{key}"
                         and self._dependencies_usable(cached['binding'], work, cancelled)
                     ):
                         emit('ready', '已复用这个项目的环境。')
-                        return cached['binding']
+                        return self._register_binding(repo, cached['binding'], work)
+                # 镜像下载前同时核验记录盘与 Docker 数据盘；缓存复用无需下载。
+                self._space_guard(initial=True)
                 self._run(
                     ['info', '--format', '{{.OSType}}'],
                     log=work / 'docker-info.log',
@@ -661,7 +896,7 @@ LABEL org.monoplanner.managed-base="{key}"
                     },
                 )
                 emit('ready', '项目环境已就绪，下次可以直接复用。')
-                return binding
+                return self._register_binding(repo, binding, work)
             except BaseException as exc:
                 emit(
                     'cancelled' if isinstance(exc, PreparationCancelled) else 'failed',
@@ -674,7 +909,10 @@ LABEL org.monoplanner.managed-base="{key}"
                 raise
             finally:
                 source = work / 'source'
-                if source.exists():
+                import sys
+                from agent.storage.resources import owner_cancelled
+
+                if source.exists() and sys.exc_info()[0] is None and not owner_cancelled():
                     # 这里只处理上面创建的临时目录，而不是用户选择的路径；
                     # 递归清理前必须拒绝链接。
                     if _link(source) or not source.resolve().is_relative_to(self.root.resolve()):

@@ -77,12 +77,24 @@ class SourceView:
 
     def export(self, destination, *, cancel=None):
         """隔离调查只使用归档字节生成副本，不使用实时文件。"""
+        from agent.storage.resources import owner_cancelled, preflight_space
+
+        total = 0
+        for name, sha in self.files.items():
+            if owner_cancelled() or (cancel is not None and cancel.is_set()):
+                from concurrent.futures import CancelledError
+                raise CancelledError()
+            source = self.root / 'blobs' / sha
+            if not source.exists() and self.baseline is not None:
+                source = _safe_file(self.baseline.root, Path(name))
+            total += source.stat().st_size
+        preflight_space(destination, total)
         destination = Path(destination)
         destination.mkdir(parents=True, exist_ok=False)
         target = destination / 'source'
         target.mkdir()
         for name in self.files:
-            if cancel is not None and cancel.is_set():
+            if owner_cancelled() or (cancel is not None and cancel.is_set()):
                 from concurrent.futures import CancelledError
 
                 raise CancelledError()
@@ -91,7 +103,7 @@ class SourceView:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open('xb') as stream:
                 for offset in range(0, len(raw), 1024 * 1024):
-                    if cancel is not None and cancel.is_set():
+                    if owner_cancelled() or (cancel is not None and cancel.is_set()):
                         from concurrent.futures import CancelledError
 
                         raise CancelledError()

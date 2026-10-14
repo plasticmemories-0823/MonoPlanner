@@ -244,10 +244,10 @@ class ProjectDockerTests(unittest.TestCase):
         from contextlib import redirect_stdout
         import io
         from agent.cli.tasks import main
+        from agent.application.work_bridge import run_work
         from test_web_graph import (
             FixtureDocker,
             ScriptedModel,
-            start_reply,
             investigation,
             BlockedModel,
         )
@@ -255,9 +255,13 @@ class ProjectDockerTests(unittest.TestCase):
         self.configure()
         for name in ('one.py', 'two.py'):
             (self.repo / name).write_text('VALUE = 1\n')
-        folder = self.root / 'state/tasks/cli'
-        model = ScriptedModel([start_reply(), investigation(['one.py', 'two.py'])])
-        with patch('agent.execution.task_docker.TaskDocker', FixtureDocker), patch(
+        folder = self.root / 'cli-state'
+        model = ScriptedModel([investigation(['one.py', 'two.py'])])
+
+        def execute(*args, **kwargs):
+            return run_work(*args, environment_factory=FixtureDocker, **kwargs)
+
+        with patch('agent.cli.tasks.run_work', side_effect=execute), patch(
             'agent.cli.tasks.LazyModel', return_value=model
         ), redirect_stdout(io.StringIO()):
             self.assertEqual(
@@ -275,12 +279,14 @@ class ProjectDockerTests(unittest.TestCase):
                 ),
                 0,
             )
-        before = [(p, p.read_bytes()) for p in folder.glob('plans/*/*/result.json')]
+        job = json.loads((folder / 'bridge-job.json').read_text(encoding='utf-8'))
+        records = folder / 'tasks' / job['task_id']
+        before = [(p, p.read_bytes()) for p in records.glob('plans/*/*/result.json')]
         self.assertEqual(len(before), 1)
-        with patch('agent.execution.task_docker.TaskDocker', FixtureDocker), patch(
+        with patch('agent.cli.tasks.run_work', side_effect=execute), patch(
             'agent.cli.tasks.LazyModel', return_value=BlockedModel()
         ), redirect_stdout(io.StringIO()):
             self.assertEqual(main(['--state-dir', str(folder)]), 1)
-        self.assertEqual(len(list(folder.glob('plans/*/*/result.json'))), 2)
+        self.assertEqual(len(list(records.glob('plans/*/*/result.json'))), 2)
         self.assertEqual(before[0][0].read_bytes(), before[0][1])
-        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(len(model.calls), 1)

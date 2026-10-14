@@ -22,16 +22,16 @@ from langgraph.types import Overwrite
 from agent.model.client import create_model
 from agent.model.errors import ModelRequestNotSent
 from agent.settings import load_settings
-from agent.storage.conversations import ConversationStore
+from tests.legacy.conversations import ConversationStore
 from agent.task.budget import StepBudget
-from agent.server.runtime import ConversationRunner
+from tests.legacy.runtime import ConversationRunner
 from agent.storage.preferences import Preferences, state_root
 from agent.execution.assistant_files import authorized_roots
 from agent.storage.permissions import Permissions
 from agent.storage.read_sources import ReadSources
 from agent.storage.records import save
 from agent.storage.usage import summarize
-from agent.server import interrupts
+from agent.task import control as interrupts
 from agent.execution.projects import workspace_binding
 
 ACTIVE = {'needs_plan', 'executing'}
@@ -198,7 +198,7 @@ def intake(state: ConversationState, config: RunnableConfig):
     # ========================================================================
     # 保存会话，并为新会话预留后台标题任务
     # ========================================================================
-    from agent.server.titles import reservation, schedule
+    from tests.legacy.server_titles import reservation, schedule
 
     first_message = next((m for m in public if isinstance(m, HumanMessage)), latest)
     title_created = store.save_session(

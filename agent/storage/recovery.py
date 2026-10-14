@@ -48,8 +48,11 @@ def code_key(root=None):
         'agent/model/network.py',
         'agent/model/payload.py',
         'agent/server/__init__.py',
-        'agent/server/service.py',
-        'agent/server/lifecycle.py',
+        'agent/task/control.py',
+        'agent/storage/requests.py',
+        'agent/storage/resources.py',
+        'agent/storage/disk_space.py',
+        'agent/application/work_bridge.py',
         'agent/source/__init__.py',
         'agent/storage/__init__.py',
         'agent/task/__init__.py',
@@ -72,20 +75,12 @@ def code_key(root=None):
         'agent/execution/runtime_inventory.py',
         'agent/cli/interactive.py',
         'agent/cli/tasks.py',
-        'agent/server/interrupts.py',
         'agent/model/streaming.py',
         'agent/task/runner.py',
         'agent/task/dialogue.py',
         'agent/task/output_limit.py',
         'resources/prompts/conversation.txt',
         'agent/task/operations.py',
-        'agent/server/graph.py',
-        'agent/server/app.py',
-        'langgraph.json',
-        'agent/server/titles.py',
-        'agent/storage/titles.py',
-        'resources/prompts/title.txt',
-        'agent/server/runtime.py',
         'agent/storage/preferences.py',
         'agent/settings.py',
         'agent/execution/docker.py',
@@ -106,7 +101,6 @@ def code_key(root=None):
         'launcher/FilePicker.cs',
         'agent/execution/file_actions.py',
         'agent/storage/read_sources.py',
-        'agent/server/portable.py',
         'agent/source/syntax.py',
         'agent/source/excerpts.py',
         'agent/acceptance/results.py',
@@ -134,10 +128,9 @@ def code_key(root=None):
         'agent/source/exploration.py',
         'agent/storage/recovery.py',
         'agent/storage/history.py',
-        'agent/storage/conversations.py',
+        'agent/storage/product.py',
         'agent/storage/activity.py',
         'agent/storage/live_reasoning.py',
-        'agent/storage/purge.py',
         'agent/execution/probe_batch.py',
         'agent/source/preparation.py',
         'agent/source/probe_preparation.py',
@@ -161,6 +154,8 @@ def code_key(root=None):
 # 检查点校验与恢复
 # ========================================================================
 def restore(loop, stored, identity):
+    if stored.get('hard_interruption') or (loop.root / 'hard-interruption.json').exists():
+        return conflict(loop, stored, 'Operation was forcefully interrupted; inspect retained evidence before continuing')
     if stored.get('identity') != identity or stored.get('code_key') != code_key():
         raise ValueError('Task or engine changed; stored plan was not executed')
     if stored.get('environment_key') != environment_key(loop.environment):

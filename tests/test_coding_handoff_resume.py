@@ -30,7 +30,7 @@ class WorkPreparationResumeTests(unittest.TestCase):
 
     def resume(self, model, identity='resume'):
         self.store.enqueue(self.thread, identity, 'resume')
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             return self.compiled.invoke({'messages': []}, self.config)
 
     def test_environment_resume_prepares_work_without_repeating_chat_decision(self):
@@ -97,7 +97,7 @@ class WorkPreparationResumeTests(unittest.TestCase):
         missing = self.invoke(model, 'Directly inspect first.py.')
         self.configure_environment()
         with patch(
-            'agent.server.runtime.ConversationRunner.activate',
+            'tests.legacy.runtime.ConversationRunner.activate',
             side_effect=AssertionError('Chat must stay chat'),
         ):
             chatted = self.invoke(model, 'What is the current status?', 'question')
@@ -122,8 +122,8 @@ class WorkPreparationResumeTests(unittest.TestCase):
         missing = self.invoke(model, 'Directly inspect first.py.')
         self.configure_environment()
         self.store.enqueue(self.thread, 'pause', 'pause')
-        with patch('agent.server.graph.model_factory', return_value=model), patch(
-            'agent.server.runtime.ConversationRunner.activate', side_effect=AssertionError('Paused')
+        with patch('tests.legacy.graph.model_factory', return_value=model), patch(
+            'tests.legacy.runtime.ConversationRunner.activate', side_effect=AssertionError('Paused')
         ):
             paused = self.compiled.invoke({'messages': []}, self.config)
         self.assertEqual(paused['status'], 'paused')

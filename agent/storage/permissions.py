@@ -1,11 +1,11 @@
 """会话权限由用户控制，模型消息不能修改。"""
 
-from agent.storage.conversations import ConversationStore
+from agent.storage.product import ProductDatabase
 
 
 class Permissions:
     def __init__(self, root):
-        self.store = ConversationStore(root)
+        self.store = ProductDatabase(root)
         with self.store.connection() as db:
             db.execute(
                 'CREATE TABLE IF NOT EXISTS permissions '
@@ -18,6 +18,9 @@ class Permissions:
             row = db.execute(
                 'SELECT requested,effective FROM permissions WHERE thread=?', (thread,)
             ).fetchone()
+        legacy = self.store.legacy_row('permissions', thread) if row is None else None
+        if legacy:
+            return {key: legacy[key] for key in ('requested', 'effective')}
         return dict(row) if row else {'requested': 'sandbox', 'effective': 'sandbox'}
 
     def request(self, thread, mode):

@@ -18,7 +18,6 @@ def service_identity(root=PROJECT):
     files = [
         *root.joinpath('agent').rglob('*.py'),
         *(p for p in root.joinpath('resources').rglob('*') if p.is_file()),
-        root / 'langgraph.json',
         root / 'requirements-web.txt',
     ]
     digest = hashlib.sha256()

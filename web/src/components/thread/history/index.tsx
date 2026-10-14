@@ -3,12 +3,7 @@ import { useThreads, ManagedThread, Visibility } from "@/providers/Thread";
 import { useEffect, useRef, useState } from "react";
 import { getContentString } from "../utils";
 import { useQueryState, parseAsBoolean } from "nuqs";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { MoreHorizontal, PanelLeftClose } from "lucide-react";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
@@ -22,16 +17,11 @@ import {
 } from "@/components/ui/dialog";
 
 function HistoryList({ close }: { close?: () => void }) {
-  const {
-    threads,
-    threadsLoading,
-    threadsError,
-    getThreads,
-    setVisibility,
-    deletePermanently,
-  } = useThreads();
+  const { threads, threadsLoading, threadsError, getThreads, setVisibility, deletePermanently } =
+    useThreads();
   const [confirmDelete, setConfirmDelete] = useState<ManagedThread>();
   const [deleting, setDeleting] = useState(false);
+  const [retainEnvironment, setRetainEnvironment] = useState(false);
   const [threadId, setThreadId] = useQueryState("threadId");
   const [view, setView] = useState<Visibility>("active");
   const [menu, setMenu] = useState<{
@@ -60,8 +50,7 @@ function HistoryList({ close }: { close?: () => void }) {
     if (!menu) return;
     try {
       await setVisibility(menu.thread.thread_id, visibility);
-      if (visibility !== "active" && threadId === menu.thread.thread_id)
-        setThreadId(null);
+      if (visibility !== "active" && threadId === menu.thread.thread_id) setThreadId(null);
       toast.success(
         visibility === "archived"
           ? "对话已归档"
@@ -84,7 +73,7 @@ function HistoryList({ close }: { close?: () => void }) {
     if (!confirmDelete || deleting) return;
     setDeleting(true);
     try {
-      await deletePermanently(confirmDelete.thread_id);
+      await deletePermanently(confirmDelete.thread_id, retainEnvironment);
       if (threadId === confirmDelete.thread_id) setThreadId(null);
       setConfirmDelete(undefined);
       toast.success("对话已彻底删除，无法恢复");
@@ -152,27 +141,21 @@ function HistoryList({ close }: { close?: () => void }) {
           ))
         ) : !visible.length ? (
           <p className="text-muted-foreground px-2 py-4 text-xs">
-            {view === "active"
-              ? "暂无对话"
-              : view === "archived"
-                ? "暂无归档对话"
-                : "回收站为空"}
+            {view === "active" ? "暂无对话" : view === "archived" ? "暂无归档对话" : "回收站为空"}
           </p>
         ) : (
           visible.map((thread) => {
-            const values = thread.values as
-              { messages?: { content: any }[] } | undefined;
+            const values = thread.values as { messages?: { content: any }[] } | undefined;
             const title =
               thread.title?.title ||
-              (values?.messages?.[0]
-                ? getContentString(values.messages[0].content)
-                : "新对话");
+              (values?.messages?.[0] ? getContentString(values.messages[0].content) : "新对话");
             return (
               <div
                 key={thread.thread_id}
                 data-testid="history-item"
                 className="group hover:bg-muted flex min-w-0 items-center rounded-lg"
                 onContextMenu={(event) => {
+                  if (thread.read_only) return;
                   event.preventDefault();
                   showMenu(thread, event.clientX, event.clientY);
                 }}
@@ -182,7 +165,7 @@ function HistoryList({ close }: { close?: () => void }) {
                   className="min-w-0 flex-1 justify-start px-2 text-left font-normal"
                   title={title}
                   onClick={() => {
-                    if (thread.visibility === "deleted") {
+                    if (thread.visibility === "deleted" && !thread.read_only) {
                       toast.info("请先从回收站恢复这条对话");
                       return;
                     }
@@ -191,19 +174,24 @@ function HistoryList({ close }: { close?: () => void }) {
                   }}
                 >
                   <span className="truncate">{title}</span>
+                  {thread.read_only && (
+                    <span className="text-muted-foreground ml-1 text-xs">只读</span>
+                  )}
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-7 shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100"
-                  aria-label={`管理对话：${title}`}
-                  onClick={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    showMenu(thread, rect.left, rect.bottom);
-                  }}
-                >
-                  <MoreHorizontal className="size-4" />
-                </Button>
+                {!thread.read_only && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    aria-label={`管理对话：${title}`}
+                    onClick={(event) => {
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      showMenu(thread, rect.left, rect.bottom);
+                    }}
+                  >
+                    <MoreHorizontal className="size-4" />
+                  </Button>
+                )}
               </div>
             );
           })
@@ -217,21 +205,12 @@ function HistoryList({ close }: { close?: () => void }) {
           className="bg-background fixed z-50 w-44 rounded-xl border p-1 shadow-lg"
           style={{ left: menu.x, top: menu.y }}
           onKeyDown={(event) => {
-            const buttons = [
-              ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                "button",
-              ),
-            ];
+            const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button")];
             if (event.key === "ArrowDown" || event.key === "ArrowUp") {
               event.preventDefault();
-              const index = buttons.indexOf(
-                document.activeElement as HTMLButtonElement,
-              );
+              const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
               buttons[
-                (index +
-                  (event.key === "ArrowDown" ? 1 : -1) +
-                  buttons.length) %
-                  buttons.length
+                (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length
               ]?.focus();
             }
           }}
@@ -272,6 +251,7 @@ function HistoryList({ close }: { close?: () => void }) {
               variant="ghost"
               className="text-destructive w-full justify-start"
               onClick={() => {
+                setRetainEnvironment(false);
                 setConfirmDelete(menu.thread);
                 setMenu(undefined);
               }}
@@ -294,6 +274,17 @@ function HistoryList({ close }: { close?: () => void }) {
               对话消息、思考内容和关联任务记录将被删除，无法恢复。工作仓库中的文件和独立评测记录会保留。
             </DialogDescription>
           </DialogHeader>
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={retainEnvironment}
+              disabled={deleting}
+              onChange={(event) => setRetainEnvironment(event.target.checked)}
+            />
+            <span>
+              保留项目环境，方便下次复用。未勾选时清理此对话独占的闲置环境；其他任务仍需的资料会保留。
+            </span>
+          </label>
           <div className="flex justify-end gap-2">
             <Button
               variant="outline"

@@ -24,10 +24,7 @@ test("created threads appear immediately and survive an older empty search", () 
   const search = store.startRefresh();
   store.upsert(thread("1"), "帮我整理一下项目目录");
   assert.equal(store.rows[0].thread_id, "1");
-  assert.equal(
-    store.rows[0].values.messages[0].content,
-    "帮我整理一下项目目录",
-  );
+  assert.equal(store.rows[0].values.messages[0].content, "帮我整理一下项目目录");
   store.applyRefresh(search, []);
   assert.equal(store.rows.length, 1);
 });
@@ -77,9 +74,7 @@ test("server acknowledgement releases local visibility override for later change
   const store = new ThreadHistoryStore();
   store.upsert(thread("1"));
   store.setVisibility("1", "archived");
-  store.applyRefresh(store.startRefresh(), [
-    thread("1", { visibility: "archived" }),
-  ]);
+  store.applyRefresh(store.startRefresh(), [thread("1", { visibility: "archived" })]);
   store.applyRefresh(store.startRefresh(), [thread("1")]);
   assert.equal(store.rows[0].visibility, "active");
 });
@@ -133,47 +128,4 @@ test("title token costs accumulate without resetting the main request context", 
   assert.equal(result.input_tokens, 1100);
   assert.equal(result.cache_rate, 900 / 1100);
   assert.deepEqual(result.context, context);
-});
-
-test("background title updates complete after selection changes without regressing activity revisions", () => {
-  const store = new ThreadHistoryStore();
-  const now = Date.now();
-  store.upsert(thread("1"));
-  store.waitForTitle("1", "第一条需求", now);
-  store.upsert(thread("2"));
-  store.waitForTitle("2", "第二条需求", now);
-  assert.equal(store.titleRefreshState(now).pending, true);
-  store.applyTitles({ 1: title(3, "第一条标题") });
-  store.applyTitle("1", { title: "旧标题", status: "running", revision: 2 });
-  assert.equal(
-    store.rows.find((row) => row.thread_id === "1").title.title,
-    "第一条标题",
-  );
-  assert.equal(store.titleRefreshState(now).pending, true);
-  store.applyTitles({ 2: title(3, "第二条标题") });
-  assert.equal(store.titleRefreshState(now).pending, false);
-});
-
-test("title registration timeout stops polling and retry only resumes display reads", () => {
-  const store = new ThreadHistoryStore();
-  const now = Date.now();
-  store.applyRefresh(store.startRefresh(), [thread("0")]);
-  store.waitForTitle("0", "旧会话不补生成", now);
-  assert.equal(store.titleRefreshState(now).pending, false);
-  store.upsert(thread("1"));
-  store.waitForTitle("1", "新会话", now);
-  assert.deepEqual(store.titleRefreshState(now + 30_000), {
-    pending: false,
-    expired: true,
-  });
-  assert.equal(
-    store.rows.find((row) => row.thread_id === "1").values.messages[0].content,
-    "新会话",
-  );
-  store.waitForTitle("1", "下一轮不会重复启动", now + 31_000);
-  assert.equal(store.titleRefreshState(now + 31_000).pending, false);
-  store.retryTitles(now + 31_000);
-  assert.equal(store.titleRefreshState(now + 31_000).pending, true);
-  store.purge("1");
-  assert.equal(store.titleRefreshState(now + 31_000).pending, false);
 });

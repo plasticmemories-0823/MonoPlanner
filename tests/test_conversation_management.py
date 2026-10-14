@@ -7,9 +7,11 @@ import uuid
 from unittest.mock import AsyncMock, patch
 import httpx
 from tests.http_client import TestClient
-from agent.storage.conversations import ConversationStore
+from tests.legacy.conversations import ConversationStore
 from agent.server.app import app
-from agent.storage.purge import begin_purge, finish_purge
+from tests.legacy.purge import begin_purge, finish_purge
+from agent.application.store import ApplicationStore
+from agent.application.api import get_service
 
 
 class ConversationManagementTests(unittest.TestCase):
@@ -26,6 +28,12 @@ class ConversationManagementTests(unittest.TestCase):
             'public_messages': [{'type': 'human', 'data': {'id': 'u', 'content': '中文消息'}}],
         }
         self.store.save_session(self.thread, self.session)
+
+    def application_thread(self):
+        self.thread = str(uuid.uuid4())
+        application = ApplicationStore(self.root)
+        application.create(self.thread)
+        return application
 
     def test_archive_delete_and_restore_preserve_session_and_task_files(self):
         task = self.root / 'tasks' / ('a' * 32)
@@ -49,6 +57,7 @@ class ConversationManagementTests(unittest.TestCase):
         self.assertEqual(self.store.visibility(), {})
 
     def test_endpoint_validates_origin_and_allows_only_presentation_state(self):
+        application = self.application_thread()
         with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), TestClient(
             app
         ) as client:
@@ -66,9 +75,10 @@ class ConversationManagementTests(unittest.TestCase):
             )
             self.assertEqual(client.post(url, json={'visibility': 'archived'}).status_code, 200)
             self.assertEqual(
-                client.get('/conversations').json()['visibility'][self.thread], 'archived'
+                next(row for row in client.get('/conversations').json()['conversations']
+                     if row['thread_id'] == self.thread)['visibility'], 'archived'
             )
-        self.assertEqual(self.store.session(self.thread), self.session)
+        self.assertEqual(application.get(self.thread)['status'], 'idle')
 
     def test_permanent_delete_removes_only_owned_messages_and_tasks_and_blocks_stale_tabs(self):
         self.store.set_visibility(self.thread, 'deleted')
@@ -156,13 +166,13 @@ class ConversationManagementTests(unittest.TestCase):
             begin_purge(self.store, self.thread)
         self.assertEqual((outside / 'keep.txt').read_text(), 'keep')
 
-    def test_purge_endpoint_confirms_target_and_cleans_sdk_before_local_records(self):
-        self.store.set_visibility(self.thread, 'deleted')
-        sdk = AsyncMock()
-        sdk.threads.get.return_value = {'status': 'idle'}
-        with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), patch(
-            'agent.server.app.get_client', return_value=sdk
-        ) as factory, TestClient(app) as client:
+    def test_purge_endpoint_confirms_target_and_cleans_owned_records(self):
+        application = self.application_thread()
+        application.visibility(self.thread, 'deleted')
+        owned = self.root / 'application-records' / self.thread
+        owned.mkdir(parents=True)
+        (owned / 'request.json').write_text('private record')
+        with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), TestClient(app) as client:
             url = f'/threads/{self.thread}/purge'
             body = {'confirm_thread_id': self.thread}
             self.assertEqual(
@@ -172,58 +182,41 @@ class ConversationManagementTests(unittest.TestCase):
             self.assertEqual(
                 client.post(url, json={'confirm_thread_id': str(uuid.uuid4())}).status_code, 400
             )
-            sdk.threads.delete.assert_not_called()
+            self.assertTrue(owned.exists())
             response = client.post(url, json=body)
             self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(
-                factory.call_args.kwargs['headers'],
-                {
-                    'X-MonoPlanner-Service': os.environ['MONOPLANER_SERVICE_TOKEN'],
-                    'Host': '127.0.0.1:' + os.getenv('MONOPLANER_BACKEND_PORT', '2024'),
-                },
-            )
-            self.assertIsNone(factory.call_args.kwargs['url'])
-            sdk.threads.delete.assert_awaited_once_with(self.thread)
-            sdk.aclose.assert_awaited_once()
+            self.assertFalse(owned.exists())
+            self.assertEqual(application.get(self.thread)['visibility'], 'purged')
             self.assertIsNone(self.store.session(self.thread))
 
-    def test_sdk_failure_preserves_retry_context_without_automatic_retry(self):
-        self.store.set_visibility(self.thread, 'deleted')
-        sdk = AsyncMock()
-        sdk.threads.get.return_value = {'status': 'idle'}
-        sdk.threads.delete.side_effect = httpx.ReadTimeout('unknown')
-        with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), patch(
-            'agent.server.app.get_client', return_value=sdk
-        ), TestClient(app) as client:
+    def test_resource_failure_preserves_retry_context_without_automatic_retry(self):
+        application = self.application_thread()
+        application.visibility(self.thread, 'deleted')
+        with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), TestClient(app) as client:
             url = f'/threads/{self.thread}/purge'
             body = {'confirm_thread_id': self.thread}
-            self.assertEqual(client.post(url, json=body).status_code, 503)
-            self.assertEqual(self.store.session(self.thread), self.session)
-            self.assertEqual(self.store.visibility()[self.thread], 'purging')
-            sdk.threads.delete.assert_awaited_once()
-            missing = httpx.Response(404, request=httpx.Request('GET', 'http://api/threads/x'))
-            sdk.threads.get.side_effect = httpx.HTTPStatusError(
-                'missing', request=missing.request, response=missing
-            )
+            with patch('agent.application.purge.cleanup', side_effect=OSError('unknown')) as cleanup:
+                self.assertEqual(client.post(url, json=body).status_code, 503)
+                cleanup.assert_called_once()
+            self.assertIsNone(self.store.session(self.thread))
+            self.assertEqual(application.get(self.thread)['visibility'], 'purging')
             response = client.post(url, json=body)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertIsNone(self.store.session(self.thread))
-            sdk.threads.delete.assert_awaited_once()
 
-    def test_busy_sdk_thread_cannot_be_deleted_even_if_local_state_is_stale(self):
+    def test_busy_application_cannot_be_deleted_without_any_legacy_mirror(self):
+        application = self.application_thread()
+        application.visibility(self.thread, 'deleted')
         self.store.set_visibility(self.thread, 'deleted')
-        sdk = AsyncMock()
-        sdk.threads.get.return_value = {'status': 'busy'}
-        with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), patch(
-            'agent.server.app.get_client', return_value=sdk
-        ), TestClient(app) as client:
+        with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), TestClient(app) as client:
+            application.chat_state(self.thread, 'running')
             response = client.post(
                 f'/threads/{self.thread}/purge', json={'confirm_thread_id': self.thread}
             )
-            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.status_code, 409)
             self.assertEqual(self.store.visibility()[self.thread], 'deleted')
-            sdk.threads.delete.assert_not_called()
-            self.assertEqual(self.store.session(self.thread), self.session)
+            self.assertIsNone(self.store.session(self.thread))
+            application.chat_state(self.thread, 'paused')
 
     def test_unknown_operation_in_archive_prevents_purge(self):
         from agent.storage.history import LocalHistory
@@ -238,27 +231,21 @@ class ConversationManagementTests(unittest.TestCase):
         self.assertEqual(self.store.visibility()[self.thread], 'deleted')
         self.assertTrue(history.root.exists())
 
-    def test_partial_cleanup_remains_visible_after_sdk_delete_and_can_be_retried(self):
-        self.store.set_visibility(self.thread, 'deleted')
-        sdk = AsyncMock()
-        sdk.threads.get.return_value = {'status': 'idle'}
-        with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), patch(
-            'agent.server.app.get_client', return_value=sdk
-        ), TestClient(app) as client:
+    def test_partial_cleanup_remains_visible_and_can_be_retried(self):
+        application = self.application_thread()
+        application.visibility(self.thread, 'deleted')
+        with patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.root)}), TestClient(app) as client:
             url = f'/threads/{self.thread}/purge'
             body = {'confirm_thread_id': self.thread}
-            with patch('agent.server.app.finish_purge', side_effect=OSError('cleanup interrupted')):
+            with patch('agent.application.purge.cleanup', side_effect=OSError('cleanup interrupted')):
                 self.assertEqual(client.post(url, json=body).status_code, 503)
-            pending = client.get('/conversations').json()['pending_deletions']
-            self.assertEqual(pending, [{'thread_id': self.thread, 'title': '中文消息'}])
-            self.assertEqual(self.store.session(self.thread), self.session)
-            missing = httpx.Response(404, request=httpx.Request('GET', 'http://api/threads/x'))
-            sdk.threads.get.side_effect = httpx.HTTPStatusError(
-                'missing', request=missing.request, response=missing
-            )
+            pending = client.get('/conversations').json()['conversations']
+            self.assertTrue(any(row['thread_id'] == self.thread and row['visibility'] == 'purging'
+                                for row in pending))
+            self.assertIsNone(self.store.session(self.thread))
             self.assertEqual(client.post(url, json=body).status_code, 200)
-            self.assertEqual(client.get('/conversations').json()['pending_deletions'], [])
-            sdk.threads.delete.assert_awaited_once()
+            self.assertFalse(any(row['thread_id'] == self.thread for row in
+                                 client.get('/conversations').json()['conversations']))
 
     def test_readonly_original_in_owned_archive_can_be_removed(self):
         import stat

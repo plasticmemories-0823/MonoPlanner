@@ -60,7 +60,7 @@ def archive_source(directory):
         )
     files.extend(
         PROJECT_ROOT / name
-        for name in ('langgraph.json', 'README.md', 'web/LICENSE', 'web/.env.example')
+        for name in ('README.md', 'web/LICENSE', 'web/.env.example')
     )
     for folder in ("agent", "tests", "resources"):
         files.extend(

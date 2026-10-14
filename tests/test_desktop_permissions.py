@@ -39,6 +39,9 @@ class DesktopPermissionsTests(unittest.TestCase):
         self.assertEqual(permissions.boundary(self.thread)['effective'], 'sandbox')
 
     def test_settings_before_first_message_do_not_initialize_a_task(self):
+        from agent.application.store import ApplicationStore
+
+        ApplicationStore(self.store.root).create(self.thread)
         with TestClient(Starlette(routes=routes)) as client:
             response = client.post(
                 f'/threads/{self.thread}/permission',
@@ -47,13 +50,15 @@ class DesktopPermissionsTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {'requested': 'full', 'effective': 'sandbox'})
-        self.assertIsNone(self.store.store.session(self.thread))
+        self.assertIsNone(self.store.store.session(self.thread)['work_id'])
         self.assertFalse((self.root / 'state/tasks').exists())
         self.assertEqual(self.store.list(self.thread), [])
 
     def test_file_selection_before_first_message_authorizes_only_selected_file(self):
+        from agent.application.store import ApplicationStore
         from types import SimpleNamespace
 
+        ApplicationStore(self.store.root).create(self.thread)
         selected = self.root / 'selected.txt'
         selected.write_text('only this file')
         other = self.root / 'other.txt'
@@ -70,7 +75,8 @@ class DesktopPermissionsTests(unittest.TestCase):
                 )
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()['path'], str(selected.resolve()))
-        self.assertIsNone(self.store.store.session(self.thread))
+        self.assertIsNone(self.store.store.session(self.thread)['work_id'])
+        self.assertFalse((self.root / 'state/tasks').exists())
         self.assertEqual(Permissions(self.root / 'state').get(self.thread)['effective'], 'sandbox')
         with self.assertRaises(ValueError):
             self.store.preview(self.thread, str(other), '', [])
@@ -145,6 +151,9 @@ class DesktopPermissionsTests(unittest.TestCase):
             self.store.request_open(self.thread, app['id'], self.repo / 'payload.cmd')
 
     def test_preview_cannot_access_controls_and_mutations_require_ui_origin(self):
+        from agent.application.store import ApplicationStore
+
+        ApplicationStore(self.store.root).create(self.thread)
         record = self.store.preview(self.thread, str(self.file), str(self.repo), [])
         with TestClient(Starlette(routes=routes)) as client:
             result = client.get(f'/threads/{self.thread}/preview/{record["id"]}')
@@ -165,6 +174,27 @@ class DesktopPermissionsTests(unittest.TestCase):
                 headers={'Origin': 'http://127.0.0.1:3000'},
             )
             self.assertEqual(response.status_code, 200)
+
+    def test_legacy_conversation_can_preview_but_cannot_change_permissions(self):
+        from tests.legacy.conversations import ConversationStore
+
+        # 原有预览是旧版创建的原件，新版只读它而不再为旧会话创建操作。
+        record = self.store.preview(self.thread, str(self.file), str(self.repo), [])
+        ConversationStore(self.store.root).save_session(self.thread, {
+            'repo': str(self.repo), 'task_id': 'a' * 32, 'status': 'paused',
+            'public_messages': [],
+        })
+        with TestClient(Starlette(routes=routes)) as client:
+            self.assertEqual(
+                client.get(f'/threads/{self.thread}/preview/{record["id"]}').status_code,
+                200,
+            )
+            result = client.post(
+                f'/threads/{self.thread}/permission', json={'mode': 'full'},
+                headers={'Origin': 'http://127.0.0.1:3000'},
+            )
+        self.assertEqual(result.status_code, 400)
+        self.assertEqual(Permissions(self.store.root).get(self.thread)['requested'], 'sandbox')
 
     @unittest.skipUnless(os.name == 'nt', 'Registered Windows applications')
     def test_unfinished_launch_is_not_replayed(self):
@@ -191,13 +221,19 @@ class DesktopPermissionsTests(unittest.TestCase):
             start.assert_not_called()
 
     def test_purge_removes_permissions_and_preview_but_not_original_file(self):
-        from agent.storage.purge import begin_purge, finish_purge
+        from agent.application.store import ApplicationStore
+        from agent.application.scheduler import Scheduler
 
+        application = ApplicationStore(self.store.root)
+        application.create(self.thread)
         record = self.store.preview(self.thread, str(self.file), str(self.repo), [])
         Permissions(self.root / 'state').request(self.thread, 'full')
-        self.store.store.set_visibility(self.thread, 'deleted')
-        identities = begin_purge(self.store.store, self.thread)
-        finish_purge(self.store.store, self.thread, identities)
+        application.visibility(self.thread, 'deleted')
+        scheduler = Scheduler(application)
+        try:
+            scheduler.purge(self.thread)
+        finally:
+            scheduler.close()
         self.assertFalse(Path(record['record']).exists())
         self.assertTrue(self.file.exists())
         self.assertEqual(self.store.list(self.thread), [])

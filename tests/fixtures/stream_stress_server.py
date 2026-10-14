@@ -4,9 +4,9 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 
 from agent.model.client import ConfiguredModel
-from agent.server import graph as application
+from tests.legacy import graph as application
 from agent.server.app import app
-from agent.server import titles
+from tests.legacy import server_titles as titles
 from tests.fixtures.title_model import OfflineTitle
 from tests.test_public_model_stream import CallbackModel
 

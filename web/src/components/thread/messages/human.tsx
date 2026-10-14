@@ -1,4 +1,4 @@
-import { Message } from "@langchain/langgraph-sdk";
+import type { Message } from "@/lib/conversation-types";
 import { getContentString } from "../utils";
 import { CommandBar } from "./shared";
 import { memo } from "react";

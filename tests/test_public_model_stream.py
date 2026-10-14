@@ -8,7 +8,7 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langgraph.graph import END, START, StateGraph, MessagesState
 
 from agent.model.client import ConfiguredModel, create_model
-from agent.server.graph import model_factory
+from tests.legacy.graph import model_factory
 
 
 class CallbackModel(BaseChatModel):
@@ -64,8 +64,8 @@ def test_production_client_suppresses_sdk_raw_messages_without_api_changes():
 
 def test_graph_factory_keeps_nostream_through_real_callback():
     client = CallbackModel(tags=['nostream', 'existing-local-tag'])
-    with patch('agent.server.graph.create_model', return_value=ConfiguredModel(client)), patch(
-        'agent.server.graph.load_settings', return_value={}
+    with patch('tests.legacy.graph.create_model', return_value=ConfiguredModel(client)), patch(
+        'tests.legacy.graph.load_settings', return_value={}
     ):
         model = model_factory()
     assert 'existing-local-tag' in model.client.tags

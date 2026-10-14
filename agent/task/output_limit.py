@@ -158,7 +158,7 @@ def resume_validated(loop):
             break
     applied = loop.state.setdefault('applied_inputs', [])
     applied.extend(identity for identity in processed if identity not in applied)
-    from agent.server.interrupts import current
+    from agent.task.control import current
 
     signal = current()
     if signal:

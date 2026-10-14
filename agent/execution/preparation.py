@@ -1,10 +1,7 @@
-"""供界面、聊天交接和 CLI 共用的有界后台任务队列。
-
-这里只允许重试一次性的环境准备。模型请求、源码修改和验收执行
-不进入这个任务管理器。
-"""
+"""单一环境管理者：作业与等待者持久保存在资源台账，安装操作不自动恢复。"""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import hashlib
 import json
 from pathlib import Path
@@ -12,8 +9,12 @@ from threading import Event, RLock
 import time
 import uuid
 
+from agent.application.lease import ServiceLease
 from agent.execution.projects import EnvironmentRequired, ProjectEnvironments, workspace_path
-from agent.storage.preferences import atomic_write, state_root
+from agent.storage.resources import (
+    resource_catalog, current_root, current_owner, container_owner,
+    register_active_container, unregister_active_container, cancel_owned_containers,
+)
 
 
 class PreparationCancelled(EnvironmentRequired):
@@ -23,69 +24,44 @@ class PreparationCancelled(EnvironmentRequired):
 class PreparationJobs:
     def __init__(self, root):
         self.root = Path(root).resolve()
-        self.folder = self.root / 'environment-jobs'
-        self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='environment-setup')
-        self.lock = RLock()
-        self.jobs = {}
-        self.closed = False
+        self.catalog = resource_catalog(self.root)
+        lease_root = self.root / 'environment-manager'
+        lease_root.mkdir(exist_ok=True)
+        self.lease = ServiceLease(lease_root)
+        self.lock, self.workers, self.closed = RLock(), {}, False
+        try:
+            self.lease.acquire()
+        except RuntimeError:
+            self.pool = None
+        else:
+            self.catalog.recover_environment_jobs()
+            self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='environment-setup')
 
-    def _path(self, repo):
-        return self.folder / (hashlib.sha256(repo.encode()).hexdigest() + '.json')
-
-    def _read(self, repo):
-        path = self._path(repo)
-        return json.loads(path.read_text(encoding='utf-8')) if path.is_file() else None
-
-    def _save(self, repo, value):
-        value = {**value, 'updated_at': time.time()}
-        atomic_write(self._path(repo), json.dumps(value, ensure_ascii=False).encode())
-        return value
+    def _legacy(self, repo):
+        # 旧 JSON 仅用于解释历史状态，不导入新队列、不恢复旧安装。
+        path = self.root / 'environment-jobs' / (hashlib.sha256(repo.encode()).hexdigest() + '.json')
+        if path.is_file() and not path.is_symlink() and path.stat().st_size <= 1024 * 1024:
+            return {'mode': 'auto', 'status': 'interrupted', 'stage': 'interrupted',
+                    'message': '旧版环境准备记录仅供保留，请重新准备环境。'}
+        return None
 
     def status(self, repo):
         repo = workspace_path(repo)
         binding = ProjectEnvironments(self.root).get(repo)
         if binding.get('image'):
-            return {
-                'mode': 'manual',
-                'status': 'ready',
-                'stage': 'ready',
-                'message': '使用已保存的高级环境配置',
-                'environment': binding,
-            }
-        with self.lock:
-            value = self._read(repo)
-            if value and value['status'] == 'preparing':
-                if repo in self.jobs:
-                    return {**value, 'mode': 'auto'}
-                value = self._save(
-                    repo,
-                    {
-                        **value,
-                        'status': 'failed',
-                        'stage': 'interrupted',
-                        'error': '上次环境准备被中断；可以重新准备，不会重放编码任务。',
-                        'message': '环境准备尚未完成',
-                    },
-                )
-        if value and value['status'] in {'failed', 'cancelled'}:
-            return {**value, 'mode': 'auto'}
+            return {'mode': 'manual', 'status': 'ready', 'stage': 'ready',
+                    'message': '使用已保存的高级环境配置', 'environment': binding}
+        value = self.catalog.environment_job(repo)
+        if value:
+            return value
         from agent.execution.managed import ManagedEnvironments
 
         ready = ManagedEnvironments(self.root).status(repo)
-        cached = ready.get('state') == 'ready'
-        result = {
-            **ready,
-            'mode': 'auto',
-            'status': 'ready' if cached else 'idle',
-            'stage': 'ready' if cached else 'checking',
-        }
-        if cached and ready.get('runtime'):
-            result['environment'] = {
-                key: ready[key]
-                for key in ('backend', 'image', 'runtime', 'managed')
-                if key in ready
-            }
-        return result
+        if ready.get('state') == 'ready':
+            return {**ready, 'mode': 'auto', 'status': 'ready', 'stage': 'ready',
+                    'environment': {key: ready[key] for key in ('backend', 'image', 'runtime', 'managed')
+                                    if key in ready}}
+        return self._legacy(repo) or {**ready, 'mode': 'auto', 'status': 'idle', 'stage': 'checking'}
 
     def start(self, repo, *, background=True):
         repo = workspace_path(repo)
@@ -94,153 +70,180 @@ class PreparationJobs:
         with self.lock:
             if self.closed:
                 raise EnvironmentRequired('环境准备服务正在关闭，请重新打开应用。')
-            if repo in self.jobs:
-                self.jobs[repo]['background'] |= background
-                return self._read(repo)
-            # 同时限制执行中和排队中的任务；浏览目录不能触发构建排队。
-            if len(self.jobs) >= 2:
-                raise EnvironmentRequired('已有两个项目正在准备环境，请稍后重试。')
-            value = self._save(
-                repo,
-                {
-                    'mode': 'auto',
-                    'status': 'preparing',
-                    'id': uuid.uuid4().hex,
-                    'stage': 'checking',
-                    'message': '正在检查项目环境',
-                },
-            )
+            if self.pool is None:
+                raise EnvironmentRequired('此数据目录已有环境管理者，请连接原服务。')
+            existing = self.catalog.environment_job(repo)
+            if existing and existing['id'] in self.workers:
+                if background and not existing.get('background'):
+                    existing = self.catalog.save_environment_job({**existing, 'background': True})
+                return existing
+            if any(not worker['future'].done() for worker in self.workers.values()):
+                raise EnvironmentRequired('已有一个项目正在准备环境，请稍后重试。')
+            if existing and existing['status'] == 'interrupted':
+                results = cancel_owned_containers(existing['owner'], self.root)
+                if any(not result['stopped'] for result in results):
+                    raise EnvironmentRequired('上次准备容器停止未确认，不能创建新环境。')
+            identity = uuid.uuid4().hex
+            value = self.catalog.save_environment_job({
+                'id': identity, 'repo': repo, 'owner': 'prepare:' + identity,
+                'mode': 'auto', 'status': 'preparing', 'stage': 'checking',
+                'message': '正在检查项目环境', 'background': background,
+            })
             cancel = Event()
-            self.jobs[repo] = {
-                'cancel': cancel,
-                'id': value['id'],
-                'background': background,
-                'waiters': 0,
-            }
-            self.pool.submit(self._run, repo, value, cancel)
+            future = self.pool.submit(copy_context().run, self._run, value, cancel)
+            self.workers[identity] = {'future': future, 'cancel': cancel}
+            future.add_done_callback(lambda _: self._finished(identity))
             return value
 
-    def _run(self, repo, value, cancel):
-        def progress(update):
-            nonlocal value
-            # 构建器只提供面向用户的阶段说明，不返回可能含包凭据的
-            # 原始子进程输出或 URL。
-            with self.lock:
-                value = self._save(
-                    repo,
-                    {
-                        **value,
-                        'stage': update['stage'],
-                        'message': update['message'],
-                        'projects': update.get('projects'),
-                        'materials': update.get('materials'),
-                        'status': 'preparing',
-                    },
-                )
+    def _finished(self, identity):
+        with self.lock:
+            self.workers.pop(identity, None)
+            if self.closed and not self.workers:
+                self.lease.close()
 
-        try:
-            from agent.execution.managed import ManagedEnvironments
+    def _run(self, value, cancel):
+        with container_owner(value['owner'], root=self.root):
+            def progress(update):
+                current = self.catalog.environment_job(job_id=value['id'])
+                self.catalog.save_environment_job({**current,
+                    'stage': update['stage'], 'message': update['message'],
+                    'projects': update.get('projects'), 'materials': update.get('materials')})
+            try:
+                from agent.execution.managed import ManagedEnvironments
 
-            binding = ManagedEnvironments(self.root).prepare(
-                repo, progress=progress, cancelled=cancel.is_set
-            )
-            if cancel.is_set():
-                raise PreparationCancelled('环境准备已取消')
-            value = {
-                **value,
-                'status': 'ready',
-                'stage': 'ready',
-                'message': '项目环境已就绪',
-                'environment': binding,
-            }
-        except Exception as exc:
-            from agent.execution.managed_plan import PreparationError
+                binding = ManagedEnvironments(self.root).prepare(
+                    value['repo'], progress=progress, cancelled=cancel.is_set)
+                if cancel.is_set():
+                    raise PreparationCancelled('环境准备已取消')
+                result = {'status': 'ready', 'stage': 'ready', 'message': '项目环境已就绪',
+                          'environment': binding}
+                # 完成的安装资源已经通过同一台账收尾；镜像由项目引用保留。
+                self.catalog.unlink(value['owner'])
+            except Exception as exc:
+                from agent.execution.managed_plan import PreparationError
 
-            cancelled = cancel.is_set() or isinstance(exc, PreparationCancelled)
-            # 详细技术日志保留在私有环境准备记录中。
-            value = {
-                **value,
-                'status': 'cancelled' if cancelled else 'failed',
-                'stage': 'cancelled' if cancelled else 'failed',
-                'message': '环境准备已取消' if cancelled else '环境准备未完成',
-                'error': (
-                    '环境准备已取消，项目文件未修改。'
-                    if cancelled
-                    else (
-                        str(exc)
-                        if isinstance(exc, (EnvironmentRequired, PreparationError))
-                        else 'Docker 环境准备未完成，请查看本地准备记录并重试。'
-                    )
-                ),
-            }
-        finally:
-            with self.lock:
-                try:
-                    self._save(repo, value)
-                finally:
-                    self.jobs.pop(repo, None)
+                stopped = cancel.is_set() or isinstance(exc, PreparationCancelled)
+                result = {'status': 'cancelled' if stopped else 'failed',
+                          'stage': 'cancelled' if stopped else 'failed',
+                          'message': '环境准备已取消' if stopped else '环境准备未完成',
+                          'error': '环境准备已取消，项目文件未修改。' if stopped else (
+                              str(exc) if isinstance(exc, (EnvironmentRequired, PreparationError))
+                              else 'Docker 环境准备未完成，请查看本地记录后重试。')}
+            current = self.catalog.environment_job(job_id=value['id'])
+            self.catalog.save_environment_job({**current, **result})
+
+    def _stop(self, value):
+        with self.lock:
+            worker = self.workers.get(value['id'])
+            if worker:
+                worker['cancel'].set()
+        results = cancel_owned_containers(value['owner'], self.root)
+        if any(not result['stopped'] for result in results):
+            raise EnvironmentRequired('环境准备容器停止未确认，现场已保留。')
+        return results
 
     def cancel(self, repo):
         repo = workspace_path(repo)
-        with self.lock:
-            if repo in self.jobs:
-                self.jobs[repo]['cancel'].set()
-                value = self._read(repo)
-                return self._save(
-                    repo, {**value, 'stage': 'cancelling', 'message': '正在停止环境准备'}
-                )
+        value = self.catalog.environment_job(repo)
+        if value and value['status'] in {'preparing', 'interrupted', 'cancelled'}:
+            self._stop(value)
         return self.status(repo)
+
+    def _detach(self, value, token, owner, *, cancel):
+        with self.lock:
+            if not any(item['token'] == token for item in self.catalog.environment_waiters(value['id'])):
+                return {'preparation_job': value['id'], 'stopped': True, 'detached': True}
+            others = self.catalog.detach_environment_waiter(value['id'], token)
+            if not cancel or others or (not owner and value.get('background')):
+                return {'preparation_job': value['id'], 'stopped': True, 'detached': True}
+            try:
+                self._stop(value)
+            except Exception:
+                self.catalog.attach_environment_waiter(value['id'], owner, token=token)
+                raise
+            return {'preparation_job': value['id'], 'stopped': True, 'detached': False}
+
+    def cancel_owner(self, owner):
+        """服务重启后仍按持久等待关系撤销这个任务的准备，不影响其他等待任务。"""
+        with self.catalog._db() as db:
+            rows = list(db.execute('SELECT j.value,w.token FROM environment_waiters w '
+                'JOIN environment_jobs j ON j.id=w.job WHERE w.owner=? '
+                "AND j.status IN ('preparing','interrupted','cancelled','failed')", (owner,)))
+        results = []
+        for row in rows:
+            value = json.loads(row['value'])
+            try:
+                results.append(self._detach(value, row['token'], owner, cancel=True))
+            except Exception as exc:
+                results.append({'preparation_job': value['id'], 'stopped': False,
+                                'error': type(exc).__name__})
+        return results
 
     def wait(self, repo, *, progress=None, cancelled=None):
         repo = workspace_path(repo)
         value = self.start(repo, background=False)
-        if value.get('mode') == 'manual' and value.get('status') == 'ready':
+        if value.get('mode') == 'manual':
             return value['environment']
-        with self.lock:
-            if repo in self.jobs:
-                self.jobs[repo]['waiters'] += 1
+        owner = current_owner()
+        token = self.catalog.attach_environment_waiter(value['id'], owner)
+        detached, control = Event(), None
+        def stop_waiting():
+            detached.set()
+            return self._detach(value, token, owner, cancel=True)
+        if owner:
+            control = register_active_container(
+                owner, 'prepare-wait:' + value['id'] + ':' + token, stop_waiting, root=self.root)
         last = None
-        detached = False
         try:
             while True:
-                if cancelled and cancelled():
-                    detached = True
+                if detached.is_set() or (cancelled and cancelled()):
                     raise PreparationCancelled('环境准备等待已中断；项目执行尚未开始。')
+                current = self.catalog.environment_job(job_id=value['id'])
+                if progress and (current['stage'], current['message']) != last:
+                    progress(current)
+                    last = (current['stage'], current['message'])
+                if current['status'] != 'preparing':
+                    if current['status'] == 'ready':
+                        return current['environment']
+                    if current['status'] == 'cancelled':
+                        raise PreparationCancelled(current.get('error', '环境准备已取消'))
+                    raise EnvironmentRequired(current.get('error', '环境准备未完成'))
                 with self.lock:
-                    value = self._read(repo) or value
-                    running = repo in self.jobs
-                if progress and (value.get('stage'), value.get('message')) != last:
-                    progress(value)
-                    last = (value.get('stage'), value.get('message'))
-                if not running:
-                    if value['status'] == 'ready':
-                        return value['environment']
-                    if value['status'] == 'cancelled':
-                        raise PreparationCancelled(value.get('error', '环境准备已取消'))
-                    raise EnvironmentRequired(value.get('error', 'Docker 环境准备未完成'))
-                time.sleep(0.15)
+                    if value['id'] not in self.workers:
+                        raise EnvironmentRequired('准备记录未能正常完成，现场已保留；不会自动重试。')
+                time.sleep(0.05)
         finally:
-            with self.lock:
-                job = self.jobs.get(repo)
-                if job and job['id'] == value.get('id'):
-                    job['waiters'] = max(0, job['waiters'] - 1)
-                    if detached and not job['waiters'] and not job['background']:
-                        job['cancel'].set()
+            if control:
+                unregister_active_container(control)
+            self._detach(value, token, owner,
+                         cancel=detached.is_set() or bool(cancelled and cancelled()))
 
     def close(self):
         with self.lock:
+            if self.closed:
+                return
             self.closed = True
-            for job in self.jobs.values():
-                job['cancel'].set()
-        self.pool.shutdown(wait=True, cancel_futures=False)
+            workers = list(self.workers.items())
+        for identity, worker in workers:
+            worker['cancel'].set()
+            cancel_owned_containers('prepare:' + identity, self.root)
+        if self.pool:
+            self.pool.shutdown(wait=False, cancel_futures=False)
+        for _, worker in workers:
+            try:
+                worker['future'].result(timeout=2)
+            except Exception:
+                pass
+        with self.lock:
+            if not self.workers:
+                self.lease.close()
 
 
-_services = {}
-_services_lock = RLock()
+_services, _services_lock = {}, RLock()
 
 
 def jobs(root=None):
-    root = Path(root or state_root()).resolve()
+    root = current_root(root)
     with _services_lock:
         if root not in _services:
             _services[root] = PreparationJobs(root)
@@ -256,12 +259,12 @@ def close_jobs(root):
 
 def active_count(root=None):
     with _services_lock:
-        service = _services.get(Path(root or state_root()).resolve())
+        service = _services.get(current_root(root))
     if service is None:
         return 0
     with service.lock:
-        return len(service.jobs)
+        return sum(not item['future'].done() for item in service.workers.values())
 
 
-def ensure_prepared(repo, *, progress=None, cancelled=None):
-    return jobs().wait(repo, progress=progress, cancelled=cancelled)
+def ensure_prepared(repo, *, progress=None, cancelled=None, root=None):
+    return jobs(root).wait(repo, progress=progress, cancelled=cancelled)

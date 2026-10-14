@@ -54,6 +54,21 @@ class TaskDocker(DockerEnvironment):
         ):
             raise ValueError('工作目录包含助手密钥文件，请使用不包含助手密钥的独立源码目录')
         self.binding_path = task_root / 'execution-container.json'
+        from agent.storage.resources import current_owner
+
+        self.resource_owner = current_owner('task:' + task_root.name)
+        self.resource_root = task_root.parent.parent
+        from agent.storage.resources import resource_catalog
+
+        catalog = resource_catalog(self.resource_root)
+        image_resource = 'image:' + image
+        with catalog._db() as db:
+            known = db.execute('SELECT 1 FROM resources WHERE id=?', (image_resource,)).fetchone()
+        if known:
+            catalog.link(self.resource_owner, image_resource)
+        else:
+            # 手动指定的镜像仅引用，不据此取得清理权。
+            catalog.register(image_resource, 'image', image, owned=False, owner=self.resource_owner)
         self.runtime_facts_path = task_root / 'execution-runtime-facts.json'
         self._runtime_checked = self._probing_runtime = False
         self._runtime_materials(task_root / 'execution-runtime-materials.json')
@@ -75,9 +90,16 @@ class TaskDocker(DockerEnvironment):
                 target = task_root.parent.parent / 'materials' / task_root.name / str(index)
                 if target.exists():
                     raise ValueError('资料副本已有未确认记录，不自动覆盖')
+                catalog.register(
+                    f'materials:{task_root.name}:{index}', 'temporary', target,
+                    owner=self.resource_owner, metadata={'task': task_root.name},
+                )
                 if item['kind'] == 'directory':
                     copied = SourceSnapshot.capture(path, target).root
                 else:
+                    from agent.storage.resources import preflight_space
+
+                    preflight_space(target, path.stat().st_size)
                     copied = target / path.name
                     copied.parent.mkdir(parents=True)
                     shutil.copy2(path, copied)
@@ -156,6 +178,7 @@ class TaskDocker(DockerEnvironment):
             ):
                 raise ValueError('Task container identity or isolation changed')
             self.running = bool(actual['State']['Running'])
+            self._register_control()
         else:
             self.running = False
 
@@ -329,6 +352,7 @@ class TaskDocker(DockerEnvironment):
         self.start()
 
     def start(self):
+        self._check_cancelled()
         if self._container_id is not None:
             self._prepare_dependencies(allow_create=False)
             if not self.running:

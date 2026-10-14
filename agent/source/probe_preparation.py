@@ -1,6 +1,7 @@
 """模型请求等待期间，最多准备一个不可变的调查副本。"""
 
 from concurrent.futures import CancelledError
+from contextvars import copy_context
 import hashlib
 import os
 from pathlib import Path
@@ -73,7 +74,7 @@ class ProbePreparation:
         self.active = {
             'version': view.version,
             'cancel': cancel,
-            'future': self.pool.submit(prepare_copy, view, directory, cancel),
+            'future': self.pool.submit(copy_context().run, prepare_copy, view, directory, cancel),
         }
 
     def _finish(self, status):
@@ -91,6 +92,12 @@ class ProbePreparation:
                 raise
             return None
         self.jobs.append({k: v for k, v in result.items() if k != 'snapshot'} | {'status': status})
+        if status in {'unused', 'stale'}:
+            from agent.storage.resources import owner_cancelled, remove_private_tree
+
+            if not owner_cancelled():
+                remove_private_tree(result['snapshot'].root.parent, self.directory)
+                return None
         return result['snapshot']
 
     def take(self, version):

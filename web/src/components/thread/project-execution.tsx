@@ -4,21 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, LoaderCircle, PackageCheck } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import {
-  ProjectEnvironmentMonitor,
-  type ProjectEnvironment,
-} from "@/lib/project-environment";
+import { ProjectEnvironmentMonitor, type ProjectEnvironment } from "@/lib/project-environment";
 
 type Image = { id: string; names: string[]; size: string };
 const defaultRuntime = { python: "/usr/local/bin/python", conda_env: "" };
 
-export function ProjectExecution({
-  apiUrl,
-  repo,
-}: {
-  apiUrl: string;
-  repo: string;
-}) {
+export function ProjectExecution({ apiUrl, repo }: { apiUrl: string; repo: string }) {
   return (
     <ProjectEnvironmentCard
       key={`${apiUrl}\0${repo}`}
@@ -28,13 +19,7 @@ export function ProjectExecution({
   );
 }
 
-function ProjectEnvironmentCard({
-  apiUrl,
-  repo,
-}: {
-  apiUrl: string;
-  repo: string;
-}) {
+function ProjectEnvironmentCard({ apiUrl, repo }: { apiUrl: string; repo: string }) {
   const [status, setStatus] = useState<ProjectEnvironment>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -132,7 +117,7 @@ function ProjectEnvironmentCard({
       </div>
       <p className="text-muted-foreground mt-2 text-xs leading-5">
         {status?.message ||
-          "首次工作时自动检查项目、下载所需工具并安装依赖，之后复用。聊天与资料查询无需准备。"}
+          "确认选择目录后自动检查项目，复用已有环境或下载所需工具并安装依赖。浏览目录不会开始安装。"}
       </p>
       {status?.projects && (
         <p className="text-muted-foreground mt-2 text-xs">
@@ -207,16 +192,12 @@ function ProjectEnvironmentCard({
               {busy ? "正在保存…" : "改为自动准备"}
             </Button>
           )}
-          <span className="text-muted-foreground text-xs">
-            已开始的任务继续使用原环境
-          </span>
+          <span className="text-muted-foreground text-xs">已开始的任务继续使用原环境</span>
         </div>
       )}
       {!!status?.details?.length && (
         <details className="mt-3 text-xs">
-          <summary className="text-muted-foreground cursor-pointer">
-            准备详情
-          </summary>
+          <summary className="text-muted-foreground cursor-pointer">准备详情</summary>
           <ul className="mt-2 max-h-28 space-y-1 overflow-y-auto break-words">
             {status.details.map((detail, index) => (
               <li key={index}>{detail}</li>
@@ -252,13 +233,9 @@ function ProjectEnvironmentCard({
                 onChange={(e) => setImage(e.target.value)}
                 className="bg-background h-9 w-full rounded-md border px-2 text-sm"
               >
-                <option value="">
-                  {imagesLoading ? "正在读取已有镜像…" : "请选择已有镜像"}
-                </option>
+                <option value="">{imagesLoading ? "正在读取已有镜像…" : "请选择已有镜像"}</option>
                 {image && !images.some((v) => v.id === image) && (
-                  <option value={image}>
-                    {image.slice(0, 22)}（尚未在镜像列表找到）
-                  </option>
+                  <option value={image}>{image.slice(0, 22)}（尚未在镜像列表找到）</option>
                 )}
                 {images.map((v) => (
                   <option
@@ -276,9 +253,7 @@ function ProjectEnvironmentCard({
                 aria-label="容器内 Python 路径"
                 value={runtime.python}
                 disabled={busy || preparing}
-                onChange={(e) =>
-                  setRuntime({ ...runtime, python: e.target.value })
-                }
+                onChange={(e) => setRuntime({ ...runtime, python: e.target.value })}
               />
             </label>
             <label className="block space-y-1">
@@ -287,9 +262,7 @@ function ProjectEnvironmentCard({
                 aria-label="Conda 环境"
                 value={runtime.conda_env}
                 disabled={busy || preparing}
-                onChange={(e) =>
-                  setRuntime({ ...runtime, conda_env: e.target.value })
-                }
+                onChange={(e) => setRuntime({ ...runtime, conda_env: e.target.value })}
               />
             </label>
             {imageError && (

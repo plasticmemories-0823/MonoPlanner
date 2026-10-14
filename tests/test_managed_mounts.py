@@ -25,6 +25,7 @@ class DockerFixture:
         self.calls, self.volumes = [], {}
         self.fail_seed = False
         self.container = None
+        self.seeds = {}
 
     def __call__(self, args, **kwargs):
         self.calls.append(args)
@@ -55,6 +56,21 @@ class DockerFixture:
                 '' if seed else 'a' * 64,
                 'seed failed' if seed and self.fail_seed else '',
             )
+        if args[0] == 'create':
+            name = args[args.index('--name') + 1]
+            self.seeds[name] = {'Id': 'c' * 64, 'Name': '/' + name, 'State': {'Running': False},
+                'Config': {'Labels': dict(args[i + 1].split('=', 1)
+                                          for i, arg in enumerate(args) if arg == '--label')}}
+            return subprocess.CompletedProcess(args, 0, 'c' * 64, '')
+        if args[:2] == ['container', 'inspect']:
+            return subprocess.CompletedProcess(args, 0, json.dumps([self.seeds[args[-1]]]), '')
+        if args[:2] == ['container', 'rm']:
+            self.seeds.pop(args[-1], None)
+            return subprocess.CompletedProcess(args, 0, '', '')
+        if args[:2] == ['start', '--attach']:
+            return subprocess.CompletedProcess(args, int(self.fail_seed), '', 'seed failed' if self.fail_seed else '')
+        if args[:2] == ['inspect', '--format']:
+            return subprocess.CompletedProcess(args, 0, '0', '')
         if args[0] == 'inspect':
             return subprocess.CompletedProcess(args, 0, json.dumps([self.container]), '')
         return subprocess.CompletedProcess(args, 0, '', '')
@@ -83,6 +99,10 @@ class ManagedMountTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
         self.docker = DockerFixture()
+        space = patch.object(DockerEnvironment, '_dependency_space_budget',
+                             return_value={'estimated': True, 'fixture': True})
+        space.start()
+        self.addCleanup(space.stop)
 
     def environment(self, **kwargs):
         return DockerEnvironment(

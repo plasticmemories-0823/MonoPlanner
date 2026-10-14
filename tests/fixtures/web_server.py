@@ -5,7 +5,7 @@ import os
 import time
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from agent.task.contracts import WorkRequest
-from agent.server import graph as application
+from tests.legacy import graph as application
 import agent.execution.web as retrieval
 
 
@@ -130,7 +130,7 @@ application.model_factory = lambda settings=None: OfflineModel()
 
 # 此服务器也会启动生产标题工作线程。标题模型须与主回复模型分开，
 # 且绝不允许离线测试环境读取真实密钥。
-from agent.server import titles
+from tests.legacy import server_titles as titles
 from tests.fixtures.title_model import OfflineTitle
 
 titles.model_factory = OfflineTitle

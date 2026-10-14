@@ -1,21 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  ArrowLeft,
-  ChevronRight,
-  Folder,
-  FolderOpen,
-  LoaderCircle,
-} from "lucide-react";
+import { ArrowLeft, ChevronRight, Folder, FolderOpen, LoaderCircle } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { ProjectExecution } from "./project-execution";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "../ui/dialog";
+import { requestJson } from "@/lib/conversation-api";
+import { toast } from "sonner";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
 
 type DirectoryPage = {
   path: string;
@@ -47,12 +37,18 @@ export function Workspace({
   onChange,
   disabled,
   readOnly = false,
+  onSelect,
+  hasWork = false,
+  working = false,
 }: {
   apiUrl: string;
   repo: string;
   onChange: (value: string) => void;
   disabled: boolean;
   readOnly?: boolean;
+  onSelect?: (repo: string) => Promise<void>;
+  hasWork?: boolean;
+  working?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [page, setPage] = useState<DirectoryPage>();
@@ -60,6 +56,7 @@ export function Workspace({
   const [loading, setLoading] = useState(false);
   const [selecting, setSelecting] = useState(false);
   const [error, setError] = useState("");
+  const [retainPrevious, setRetainPrevious] = useState(true);
   const requestId = useRef(0);
 
   async function browse(path: string) {
@@ -67,10 +64,9 @@ export function Workspace({
     setLoading(true);
     setError("");
     try {
-      const r = await fetch(
-        `${apiUrl}/workspace/directories?${new URLSearchParams({ path })}`,
-        { cache: "no-store" },
-      );
+      const r = await fetch(`${apiUrl}/workspace/directories?${new URLSearchParams({ path })}`, {
+        cache: "no-store",
+      });
       const result = await r.json();
       if (!r.ok)
         throw new Error(
@@ -83,8 +79,7 @@ export function Workspace({
         setAddress(result.path);
       }
     } catch (e) {
-      if (id === requestId.current)
-        setError(e instanceof Error ? e.message : String(e));
+      if (id === requestId.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (id === requestId.current) setLoading(false);
     }
@@ -95,6 +90,23 @@ export function Workspace({
     setSelecting(true);
     try {
       if (readOnly) {
+        onChange(page.path);
+        setOpen(false);
+        return;
+      }
+      if (onSelect) {
+        await onSelect(page.path);
+        if (repo && repo !== page.path && !retainPrevious) {
+          try {
+            await requestJson(`${apiUrl}/resources/project`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ repo, retain: false }),
+            });
+          } catch {
+            toast.error("目录已切换，旧环境暂未清理；可在空间与环境中检查。");
+          }
+        }
         onChange(page.path);
         setOpen(false);
         return;
@@ -137,9 +149,7 @@ export function Workspace({
         }}
       >
         <FolderOpen className="size-4 shrink-0" />
-        <span className="truncate">
-          {name || (readOnly ? "额外可读目录" : "工作目录")}
-        </span>
+        <span className="truncate">{name || (readOnly ? "额外可读目录" : "工作目录")}</span>
         <ChevronRight className="size-3 shrink-0" />
       </Button>
       <Dialog
@@ -160,7 +170,7 @@ export function Workspace({
             <DialogDescription className="text-muted-foreground text-sm">
               {readOnly
                 ? "仅授权查询资料，不授权运行或修改。发送下一条消息时登记至本对话。"
-                : "打开文件夹后，选择当前目录。普通聊天无需选择。"}
+                : "打开文件夹后确认选择，程序会自动检查并复用或准备项目环境。普通聊天无需选择。"}
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-2">
@@ -225,9 +235,7 @@ export function Workspace({
                 目录读取失败。请查看下方原因，修复后重新打开。
               </p>
             ) : !page?.path ? (
-              <p className="text-muted-foreground p-3 text-sm">
-                请选择本机目录，或输入完整路径。
-              </p>
+              <p className="text-muted-foreground p-3 text-sm">请选择本机目录，或输入完整路径。</p>
             ) : (
               <p className="text-muted-foreground p-3 text-sm">
                 这个目录没有子文件夹，可以直接选择。
@@ -239,6 +247,31 @@ export function Workspace({
               apiUrl={apiUrl}
               repo={page.path}
             />
+          )}
+          {!readOnly && hasWork && page?.path && page.path !== repo && (
+            <p
+              className="rounded-lg border p-3 text-sm"
+              role="note"
+            >
+              {working
+                ? "确认后会立即暂停当前工作，并为新目录创建对话。"
+                : "该对话已经绑定工作，确认后会为新目录创建对话。"}
+              旧环境暂时保留，可在“空间与环境”中清理闲置环境。
+            </p>
+          )}
+          {!readOnly && repo && page?.path && page.path !== repo && (
+            <label className="flex items-center justify-between gap-3 text-sm">
+              之前的项目环境
+              <select
+                aria-label="之前的项目环境"
+                className="bg-background rounded-md border p-2 text-sm"
+                value={retainPrevious ? "retain" : "cleanup"}
+                onChange={(event) => setRetainPrevious(event.target.value === "retain")}
+              >
+                <option value="retain">保留，方便下次复用</option>
+                <option value="cleanup">清理闲置环境</option>
+              </select>
+            </label>
           )}
           {error && (
             <p
@@ -258,13 +291,7 @@ export function Workspace({
             </Button>
             <Button
               type="button"
-              disabled={
-                !page?.path ||
-                loading ||
-                selecting ||
-                !!error ||
-                address !== page.path
-              }
+              disabled={!page?.path || loading || selecting || !!error || address !== page.path}
               onClick={() => void select()}
             >
               {selecting ? "正在选择…" : "选择此目录"}

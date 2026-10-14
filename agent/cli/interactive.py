@@ -95,14 +95,9 @@ def load_model():
 
 
 def create_workspace_agent(model, environment):
-    from agent.server.runtime import ConversationRunner
+    from agent.application.cli import ConsoleConversation
 
-    return ConversationRunner(
-        model,
-        str(environment.repo_root),
-        yield_boundary=False,
-        state_dir=state_root() / 'tasks' / uuid.uuid4().hex,
-    )
+    return ConsoleConversation(model, str(environment.repo_root))
 
 
 def run_one_turn(agent, history, text, max_steps, verify_command=None, acceptance=None):
@@ -158,11 +153,15 @@ def run_session(
         if not text:
             continue
         if text == "/exit":
+            if agent is not None and hasattr(agent, 'close'):
+                agent.close()
             return 0
         if text == "/help":
             print(SESSION_HELP)
             continue
         if text == "/clear":
+            if agent is not None and hasattr(agent, 'close'):
+                agent.close()
             messages = []
             agent = None
             verify_command, acceptance = None, None
@@ -194,6 +193,8 @@ def run_session(
                 print(f"切换失败，仍在 {environment.repo_root}：{exc}")
                 continue
             environment = new_environment
+            if agent is not None and hasattr(agent, 'close'):
+                agent.close()
             agent, messages = None, []
             verify_command, acceptance = None, None
             print(f"已切换工作区：{environment.repo_root}，并开始新会话。")
@@ -209,7 +210,8 @@ def run_session(
         try:
             if model is None:
                 model = load_model()
-            agent = create_workspace_agent(model, environment)
+            if agent is None:
+                agent = create_workspace_agent(model, environment)
             result = run_one_turn(
                 agent,
                 messages,
@@ -222,6 +224,8 @@ def run_session(
 
         except Exception as exc:
             # 失败步骤可能已执行工具，不能声称回滚或保留了完整执行轨迹。
+            if agent is not None and hasattr(agent, 'close'):
+                agent.close()
             agent, messages = None, []
             print(f"本轮失败：{type(exc).__name__}: {exc}", file=sys.stderr)
             print("已清空对话；已执行的文件修改不会回滚，下一条需求请先检查当前文件状态。")

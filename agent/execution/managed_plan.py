@@ -11,7 +11,7 @@ import tomllib
 
 from agent.storage.preferences import private_path, state_root
 
-REVISION = 2
+REVISION = 3
 MAX_MANIFEST = 4 * 1024 * 1024
 MAX_FILES = 20000
 MAX_BYTES = 256 * 1024 * 1024
@@ -121,16 +121,8 @@ def _digest(value):
 
 
 def _recipe():
-    return {
-        name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-        for name in (
-            'managed.py',
-            'managed_plan.py',
-            'managed_setup.py',
-            'managed_proxy.py',
-            'installation_materials.py',
-        )
-    }
+    # 只有安装协议、工具版本或安全边界变化才升级；排版和注释不使用户环境失效。
+    return {'environment_protocol': REVISION, 'installer': 1, 'download_isolation': 1}
 
 
 def _link(path):

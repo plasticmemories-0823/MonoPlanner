@@ -165,7 +165,7 @@ class RuntimeMaterialsTests(unittest.TestCase):
         )
 
     def test_chat_bootstrap_probe_and_acceptance_copy_keep_ignored_runtime_files(self):
-        from agent.server.runtime import ConversationRunner
+        from tests.legacy.runtime import ConversationRunner
         from agent.execution.docker import DockerEnvironment
         from agent.execution.probe_batch import ProbeBatch
 

@@ -13,9 +13,9 @@ from unittest.mock import patch
 
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from agent.server.graph import builder
+from tests.legacy.graph import builder
 from agent.storage.activity import projection, read_activity
-from agent.storage.conversations import ConversationStore
+from tests.legacy.conversations import ConversationStore
 from test_web_graph import FixtureDocker, ScriptedModel, text_reply, investigation, start_reply
 
 
@@ -56,7 +56,7 @@ class ActivityTests(unittest.TestCase):
         self.graph = builder.compile(checkpointer=InMemorySaver())
 
     def run_model(self, model, identity='first'):
-        with patch('agent.server.graph.model_factory', return_value=model):
+        with patch('tests.legacy.graph.model_factory', return_value=model):
             return self.graph.invoke(
                 {'repo': str(self.repo), 'messages': [HumanMessage(content='读取', id=identity)]},
                 {'configurable': {'thread_id': self.thread}, 'recursion_limit': 100},

@@ -11,8 +11,8 @@ import uuid
 from starlette.exceptions import HTTPException
 
 from agent.storage.activity import checked
-from agent.storage.conversations import ConversationStore
-from agent.server import interrupts
+from tests.legacy.conversations import ConversationStore
+from agent.task import control as interrupts
 
 STOPPED = {
     'paused',

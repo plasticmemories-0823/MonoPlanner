@@ -18,6 +18,12 @@ from agent.settings import PROJECT_ROOT
 
 
 def trusted_ui(request):
+    thread = request.path_params.get('thread')
+    if thread:
+        from agent.application.api import get_service
+        saved = get_service().store.get(thread)
+        if saved.get('read_only'):
+            raise ValueError("旧版对话只读；请新开对话设置权限或操作文件。")
     origin = request.headers.get('origin', '')
     parsed = urlsplit(origin)
     if (

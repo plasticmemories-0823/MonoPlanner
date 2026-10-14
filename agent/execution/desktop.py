@@ -9,7 +9,7 @@ import time
 import uuid
 
 from agent.execution.assistant_files import AssistantFiles
-from agent.storage.conversations import ConversationStore
+from agent.storage.product import ProductDatabase
 from agent.storage.read_sources import ReadSources
 from agent.storage.permissions import Permissions
 from agent.execution import applications as installed
@@ -104,7 +104,7 @@ def applications(refresh=False):
 class DesktopStore:
     def __init__(self, root):
         self.root = Path(root).resolve()
-        self.store = ConversationStore(self.root)
+        self.store = ProductDatabase(self.root)
         self.permissions = Permissions(self.root)
         with self.store.connection() as db:
             db.execute(
@@ -168,7 +168,11 @@ class DesktopStore:
                 'SELECT id,status,data FROM desktop_requests WHERE thread=? ORDER BY rowid',
                 (self.store.thread(thread),),
             )
-            return [{**json.loads(r['data']), 'id': r['id'], 'status': r['status']} for r in rows]
+            current = [{**json.loads(r['data']), 'id': r['id'], 'status': r['status']} for r in rows]
+        if current or self.store.session(thread):
+            return current
+        return [{**json.loads(row['data']), 'id': row['id'], 'status': row['status']}
+                for row in self.store.legacy_rows('desktop_requests', thread)]
 
     def get(self, thread, identity):
         return next((r for r in self.list(thread) if r['id'] == identity), None)
@@ -342,7 +346,7 @@ class DesktopStore:
 def invoke(loop, name, args):
     from agent.storage.preferences import state_root
 
-    store, thread = DesktopStore(state_root()), loop.conversation_id
+    store, thread = DesktopStore(getattr(loop, 'data_root', None) or state_root()), loop.conversation_id
     if not thread:
         raise ValueError('应用打开需要已保存的对话')
     if name == 'list_applications':

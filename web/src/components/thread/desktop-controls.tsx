@@ -49,10 +49,14 @@ export function DesktopCards({
   apiUrl,
   threadId,
   running,
+  eventCursor = 0,
+  readOnly = false,
 }: {
   apiUrl: string;
   threadId: string | null;
   running: boolean;
+  eventCursor?: number;
+  readOnly?: boolean;
 }) {
   const scope = `${apiUrl}\0${threadId || ""}`;
   const current = useRef(scope);
@@ -70,6 +74,8 @@ export function DesktopCards({
   useEffect(() => {
     setPreview(null);
     setError("");
+  }, [scope]);
+  useEffect(() => {
     if (!threadId) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
@@ -101,7 +107,7 @@ export function DesktopCards({
           setError(e instanceof Error ? e.message : "无法读取操作记录");
       } finally {
         active = false;
-        if (!controller.signal.aborted && (running || requested)) {
+        if (!controller.signal.aborted && requested) {
           const immediate = requested;
           requested = false;
           timer = setTimeout(poll, immediate ? 0 : 1000);
@@ -119,7 +125,7 @@ export function DesktopCards({
       clearTimeout(timer);
       window.removeEventListener("monoplanner-opens", refresh);
     };
-  }, [apiUrl, threadId, running, scope, retry]);
+  }, [apiUrl, threadId, eventCursor, scope, retry]);
 
   async function decide(item: OpenRecord, action: "approve" | "reject") {
     if (busy) return;
@@ -139,8 +145,7 @@ export function DesktopCards({
           items: old.items.map((r) => (r.id === item.id ? result : r)),
         }));
     } catch (e) {
-      if (current.current === scope)
-        setError(e instanceof Error ? e.message : "操作未完成");
+      if (current.current === scope) setError(e instanceof Error ? e.message : "操作未完成");
     } finally {
       setBusy("");
     }
@@ -173,19 +178,16 @@ export function DesktopCards({
               ? "文件预览"
               : item.kind === "file_operation"
                 ? names[item.operation || ""]
-                : item.application?.name} · {item.path || "启动应用"}
+                : item.application?.name}{" "}
+            · {item.path || "启动应用"}
           </p>
           {item.destination && item.destination !== item.path && (
-            <p className="text-muted-foreground mt-1 break-all">
-              目标：{item.destination}
-            </p>
+            <p className="text-muted-foreground mt-1 break-all">目标：{item.destination}</p>
           )}
           {item.diff && (
             <details className="my-2">
               <summary className="cursor-pointer">查看内容变更</summary>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap">
-                {item.diff}
-              </pre>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap">{item.diff}</pre>
             </details>
           )}
           {item.kind === "preview" ? (
@@ -209,7 +211,7 @@ export function DesktopCards({
                 <Button
                   type="button"
                   size="sm"
-                  disabled={!!busy}
+                  disabled={!!busy || readOnly}
                   onClick={() => void decide(item, "approve")}
                 >
                   {item.kind === "external" ? "打开一次" : "批准一次"}
@@ -218,7 +220,7 @@ export function DesktopCards({
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={!!busy}
+                  disabled={!!busy || readOnly}
                   onClick={() => void decide(item, "reject")}
                 >
                   拒绝
@@ -233,9 +235,7 @@ export function DesktopCards({
                   ? "操作已完成"
                   : item.status === "rejected"
                     ? "已拒绝，未执行"
-                    : ["launching", "executing", "unknown"].includes(
-                          item.status,
-                        )
+                    : ["launching", "executing", "unknown"].includes(item.status)
                       ? "结果待核对，不会重复执行"
                       : item.error || "操作未完成"}
             </p>
@@ -258,9 +258,7 @@ export function DesktopCards({
       >
         <DialogContent className="h-[80vh] max-w-[90vw] grid-rows-[auto_minmax(0,1fr)] sm:max-w-5xl">
           <DialogHeader>
-            <DialogTitle className="text-sm break-all">
-              {preview?.path}
-            </DialogTitle>
+            <DialogTitle className="text-sm break-all">{preview?.path}</DialogTitle>
           </DialogHeader>
           {preview && (
             <iframe

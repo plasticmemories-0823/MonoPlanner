@@ -50,6 +50,7 @@ class ProbeBatch:
         )
         self.child.repo_read_only = True
         self.child.root_read_only = True
+        self.child.disposable = True
         self.stats = {
             'source_version': version,
             'source_digest': self.snapshot.digest,
@@ -61,6 +62,7 @@ class ProbeBatch:
         try:
             self.child.start()
         except BaseException:
+            self.child._execution_unknown = True
             self._finish_session()
             raise
         self.version = version
@@ -82,6 +84,11 @@ class ProbeBatch:
         finally:
             self.stats['teardown_seconds'] = time.monotonic() - started
             self._save_stats()
+        from agent.storage.resources import owner_cancelled, remove_private_tree
+
+        if not getattr(child, '_execution_unknown', False) and not owner_cancelled():
+            # 结果和源码清单已归档；完成的只读调查不再持有整份物化源码。
+            remove_private_tree(self.snapshot.root, self.snapshot.root.parent)
 
     def close(self):
         self.closed = True
@@ -127,6 +134,7 @@ class ProbeBatch:
                 shell=False,
             )
         except BaseException:
+            self.child._execution_unknown = True
             self._finish_session()
             raise
         finally:

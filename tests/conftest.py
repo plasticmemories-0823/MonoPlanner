@@ -13,7 +13,7 @@ def offline_conversation_service(tmp_path, monkeypatch):
     )
     if 'MONOPLANER_STATE_DIR' not in os.environ:
         monkeypatch.setenv('MONOPLANER_STATE_DIR', str(tmp_path / 'conversation-state'))
-    from agent.server import titles
+    from tests.legacy import server_titles as titles
 
     class OfflineTitleModel:
         def invoke(self, messages):
@@ -29,6 +29,9 @@ def offline_conversation_service(tmp_path, monkeypatch):
             )
 
     monkeypatch.setattr(titles, 'model_factory', OfflineTitleModel)
+    from agent.application import titles as application_titles
+
+    monkeypatch.setattr(application_titles, 'model_factory', OfflineTitleModel)
     # 环境缺失的对话测试绝不能下载生产镜像。
     # 托管环境准备测试会明确替换此处边界。
     from agent.execution import preparation
@@ -38,3 +41,10 @@ def offline_conversation_service(tmp_path, monkeypatch):
         raise EnvironmentRequired('Docker 离线测试未准备环境；不会下载依赖。')
 
     monkeypatch.setattr(preparation, 'ensure_prepared', offline_prepare)
+    yield
+    # 无 lifespan 的读取测试也可能懒创建服务；不能让它跨测试引用前一个临时目录。
+    from agent.application import api
+
+    if api._service is not None:
+        api._service.close()
+        api._service = None

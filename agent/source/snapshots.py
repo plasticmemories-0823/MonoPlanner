@@ -126,12 +126,39 @@ def _safe_file(root, relative):
 # ========================================================================
 # 源码发现与版本控制文件选择
 # ========================================================================
-def _walk(root, preserve_files=(), ignored_directories=()):
+def _generated_records(directory):
+    """按程序产物组合识别记录根，不把任意同名用户目录都视作缓存。"""
+    directory = Path(directory)
+    signatures = (
+        ('history.sqlite3', 'state.json'),
+        ('application.sqlite3', 'application-records'),
+        ('application.sqlite3', 'resources.sqlite3'),
+        ('conversations.sqlite3', 'tasks'),
+        ('before-source.zip', 'baseline.json'),
+        ('evaluated-source.zip', 'source-sha256.json', 'trials'),
+        ('checksums.json', 'portable-manifest.json', 'MonoPlanner.exe'),
+    )
+    return any(all((directory / name).exists() for name in group) for group in signatures)
+
+
+def _walk(root, preserve_files=(), ignored_directories=(), cancel=None, check_projects=False):
     """即使链接指向内部也不跟随；报告链接而非复制其目标。"""
     retained_directories = {parent for name in preserve_files for parent in Path(name).parents}
     ignored_directories = set(ignored_directories)
+    projects = []
     for directory, directories, files in os.walk(root, followlinks=False):
+        from agent.storage.resources import owner_cancelled
+
+        if owner_cancelled() or (cancel is not None and cancel.is_set()):
+            raise InterruptedError('源码扫描已中断。')
         parent = Path(directory)
+        if check_projects and parent != root and (parent / '.git').exists():
+            projects.append(parent.relative_to(root).as_posix())
+            if len(projects) > 1:
+                raise SnapshotError(
+                    '所选目录包含多个独立 Git 项目，请选择实际工作项目：'
+                    + '、'.join(projects[:2])
+                )
         for name in list(directories):
             relative = (parent / name).relative_to(root)
             if relative in ignored_directories and relative not in retained_directories:
@@ -147,11 +174,16 @@ def _walk(root, preserve_files=(), ignored_directories=()):
                 raise SnapshotError(
                     f"Links and Windows reparse points are not supported: {relative}"
                 )
+            elif relative not in retained_directories and _generated_records(parent / name):
+                directories.remove(name)
+                yield relative, 'monoplanner_generated_records'
         for name in files:
+            if owner_cancelled() or (cancel is not None and cancel.is_set()):
+                raise InterruptedError('源码扫描已中断。')
             yield (parent / name).relative_to(root), None
 
 
-def _selected_files(root, runtime_files=()):
+def _selected_files(root, runtime_files=(), cancel=None):
     """通过 Git 纳入暂存、已修改和新增文件；后备方案按排除规则遍历源码。"""
     options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
     # 源码发现属于可信主机操作；不能仅因 Git 读取索引，
@@ -227,11 +259,34 @@ def _selected_files(root, runtime_files=()):
         # 通过哈希，使后续候选能够安全报告未验证的改动。
         selected.update(
             relative
-            for relative, skip in _walk(root, tracked, ignored_directories)
+            for relative, skip in _walk(root, tracked, ignored_directories, cancel=cancel)
             if not skip and _reason(relative) in _SECRET_REASONS
         )
-        return "git", [(relative, None, relative in tracked) for relative in sorted(selected)]
-    return "source_walk", [(relative, skip, False) for relative, skip in _walk(root)]
+        retained, generated, checked = [], set(), {}
+        for relative in sorted(selected):
+            record_root = None
+            if relative not in tracked:
+                for parent in relative.parents:
+                    if parent == Path('.'):
+                        continue
+                    if parent not in checked:
+                        checked[parent] = _generated_records(root / parent)
+                    if checked[parent]:
+                        record_root = parent
+                        break
+            if record_root is None:
+                retained.append((relative, None, relative in tracked))
+            else:
+                generated.add(record_root)
+        return "git", retained + [
+            (relative, 'monoplanner_generated_records', False) for relative in sorted(generated)
+        ]
+    if _generated_records(root):
+        raise SnapshotError('所选目录是 MonoPlanner 运行记录，请选择实际工作项目。')
+    return "source_walk", [
+        (relative, skip, False)
+        for relative, skip in _walk(root, cancel=cancel, check_projects=True)
+    ]
 
 
 def _save(path, payload):
@@ -250,7 +305,7 @@ class SourceSnapshot:
     excluded_files: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def capture(cls, repo_root, destination, excluded_roots=(), runtime_files=()):
+    def capture(cls, repo_root, destination, excluded_roots=(), runtime_files=(), cancel=None):
         source = Path(repo_root).expanduser().resolve()
         destination = Path(destination).expanduser().resolve()
         if not source.is_dir():
@@ -283,10 +338,30 @@ class SourceSnapshot:
         }
         _save(manifest_path, manifest)
         try:
-            selection, candidates = _selected_files(source, runtime_files)
+            from agent.storage.resources import owner_cancelled, preflight_space
+
+            def check_cancel():
+                if owner_cancelled() or (cancel is not None and cancel.is_set()):
+                    raise InterruptedError('源码快照已中断；部分现场已保留。')
+
+            check_cancel()
+            selection, candidates = _selected_files(source, runtime_files, cancel=cancel)
             manifest["selection"] = selection
             manifest["runtime_files"] = sorted(runtime_files)
+            required = 0
             for relative, skip, tracked in candidates:
+                check_cancel()
+                path = source / relative
+                reason = skip or _reason(relative)
+                if tracked and reason not in _SECRET_REASONS:
+                    reason = None
+                if reason or any(_within(path.resolve(), item) for item in excluded):
+                    continue
+                if path.exists():
+                    required += _safe_file(source, relative).stat().st_size
+            manifest['space_budget'] = preflight_space(destination, required)
+            for relative, skip, tracked in candidates:
+                check_cancel()
                 path = source / relative
                 skip = skip or _reason(relative)
                 if tracked and skip not in _SECRET_REASONS:
@@ -312,7 +387,11 @@ class SourceSnapshot:
                     continue
                 target = root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, target)
+                with path.open('rb') as original, target.open('xb') as output:
+                    while chunk := original.read(1024 * 1024):
+                        check_cancel()
+                        output.write(chunk)
+                shutil.copystat(path, target)
                 copied_sha, copied_private = _inspect_file(target)
                 after = path.stat()
                 if copied_private:
@@ -364,9 +443,13 @@ class SourceSnapshot:
             )
             child.repo_read_only = read_only
             child.root_read_only = read_only
+            child.disposable = True
             try:
                 child.start()
                 yield child
+            except BaseException:
+                child._execution_unknown = True
+                raise
             finally:
                 child.close()
         elif isinstance(environment, LocalEnvironment):

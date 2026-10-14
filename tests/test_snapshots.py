@@ -277,14 +277,14 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual((outside / "private.txt").read_text(), "secret")
 
     def test_changes_during_copy_fail_instead_of_saving_mixed_content(self):
-        copy = shutil.copy2
+        copy = shutil.copystat
 
         def mutate(source, destination):
             copied = copy(source, destination)
             Path(source).write_text("changed during capture\n")
             return copied
 
-        with patch("agent.source.snapshots.shutil.copy2", side_effect=mutate):
+        with patch("agent.source.snapshots.shutil.copystat", side_effect=mutate):
             with self.assertRaisesRegex(SnapshotError, "changed during capture"):
                 self.capture()
         manifest = json.loads((self.base / "snapshot/manifest.json").read_text())
