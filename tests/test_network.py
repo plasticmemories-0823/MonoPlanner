@@ -17,24 +17,29 @@ from agent.model.network import AsyncSystemProxyTransport, SystemProxyTransport,
 
 @contextmanager
 def registry_settings(settings):
-    def query_value(key, name):
-        if name not in settings:
-            raise FileNotFoundError(name)
-        return settings[name], 0
+    # 动态模拟系统返回值，避免修改测试机器的网络配置。
+    def current():
+        return {
+            "auto_detect": settings.get("AutoDetect", False),
+            "config_url": settings.get("AutoConfigURL", ""),
+            "proxy": settings.get("ProxyServer", "") if settings.get("ProxyEnable") else "",
+            "bypass": settings.get("ProxyOverride", ""),
+        }
 
-    with patch("winreg.OpenKey"), patch("winreg.QueryValueEx", side_effect=query_value):
+    with patch("agent.model.network._windows_settings", side_effect=current):
         yield
 
 
 @unittest.skipUnless(os.name == "nt", "Windows 系统代理读取")
 class WindowsProxyTests(unittest.TestCase):
-    def test_deepseek_stays_direct_when_system_proxy_is_enabled(self):
+    def test_deepseek_follows_system_proxy_like_other_hosts(self):
         settings = {"ProxyEnable": 1, "ProxyServer": "127.0.0.1:1", "ProxyOverride": ""}
         with registry_settings(settings), patch.dict(
             os.environ, {"HTTPS_PROXY": "http://127.0.0.1:2"}
         ):
-            self.assertIsNone(
-                system_proxy_for(httpx.URL("https://api.deepseek.com/beta/chat/completions"))
+            self.assertEqual(
+                system_proxy_for(httpx.URL("https://api.deepseek.com/beta/chat/completions")),
+                "http://127.0.0.1:1",
             )
             self.assertEqual(
                 system_proxy_for(httpx.URL("https://api.deepseek.com.example.org")),
@@ -163,7 +168,7 @@ class HttpRoutingTests(unittest.TestCase):
             self.assertEqual(len(created), 2)
             self.assertTrue(all(transport.closed for transport in created))
 
-    def test_real_sdk_stays_direct_and_keeps_authentication_and_payload(self):
+    def test_real_sdk_uses_selected_proxy_and_keeps_authentication_and_payload(self):
         routes, requests = [], []
 
         def transport(**kwargs):
@@ -203,7 +208,7 @@ class HttpRoutingTests(unittest.TestCase):
             finally:
                 model.client.http_client.close()
                 asyncio.run(model.client.http_async_client.aclose())
-        self.assertEqual(routes, [None])
+        self.assertEqual(routes, ["http://127.0.0.1:1"])
         self.assertTrue(all(r.url.host == "api.deepseek.com" for r in requests))
         self.assertTrue(
             all(r.headers["authorization"] == "Bearer offline-placeholder" for r in requests)

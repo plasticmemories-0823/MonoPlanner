@@ -73,6 +73,7 @@ def code_key(root=None):
         'agent/execution/managed_plan.py',
         'agent/execution/installation_materials.py',
         'agent/execution/managed_proxy.py',
+        'agent/execution/download_relay.py',
         'agent/execution/managed_setup.py',
         'agent/execution/runtime_inventory.py',
         'agent/cli/interactive.py',

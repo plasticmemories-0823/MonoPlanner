@@ -374,6 +374,34 @@ class ManagedPreparationTests(ManagedFixture):
         self.assertIn('--load', build)
         self.assertIn(['buildx', 'rm', '--force', name], self.manager.calls)
 
+    def test_build_and_install_use_ephemeral_host_relay_without_system_credentials(self):
+        with patch.dict(os.environ, {'HTTPS_PROXY': 'http://user:secret@stale.invalid:99'}):
+            self.manager.prepare(self.repo)
+        builder = next(call for call in self.manager.calls if call[0] == 'create'
+                       and call[call.index('--name') + 1].startswith('buildx_buildkit_'))
+        helper = next(call for call in self.manager.calls if call[:2] == ['run', '--detach'])
+        setup = next(call for call in self.manager.calls if call[0] == 'create'
+                     and call[call.index('--name') + 1].endswith('-work'))
+        self.assertTrue(any(value.startswith('HTTPS_PROXY=http://prepare:')
+                            and '@host.docker.internal:' in value for value in builder))
+        self.assertTrue(any(value.startswith('MONOPLANNER_DOWNLOAD_RELAY=http://prepare:')
+                            and '@host.docker.internal:' in value for value in helper))
+        self.assertIn('HTTPS_PROXY=http://download-proxy:3128', setup)
+        self.assertNotIn('host.docker.internal', repr(setup))
+        self.assertNotIn('user:secret', repr(self.manager.calls))
+        commit = next(call for call in self.manager.calls if call[0] == 'commit')
+        self.assertNotIn('prepare:', repr(commit))
+
+    def test_bootstrap_pull_failure_identifies_docker_owned_route_without_retry(self):
+        self.manager.failure = ['pull']
+        with patch('agent.execution.download_relay.docker_proxy_modes', return_value={
+            'desktop': 'manual', 'containers': 'unknown'
+        }):
+            with self.assertRaisesRegex(PreparationError, 'Docker Desktop.*manual'):
+                self.manager.prepare(self.repo)
+        self.assertEqual(sum(call[0] == 'pull' for call in self.manager.calls), 1)
+        self.assertFalse(any(call[:2] == ['buildx', 'build'] for call in self.manager.calls))
+
     def test_cancel_during_base_build_kills_builder_and_preserves_its_state(self):
         def cancelled():
             return any(c[:2] == ['buildx', 'build'] for c in self.manager.calls)

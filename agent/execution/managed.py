@@ -5,6 +5,7 @@
 """
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -40,6 +41,36 @@ IMAGE_ID = re.compile(r'sha256:[0-9a-f]{64}')
 BUILDKIT_IMAGE = 'moby/buildkit:v0.34.0'
 _LOCKS = weakref.WeakValueDictionary()
 _LOCKS_GUARD = threading.Lock()
+_DOWNLOAD_RELAY = ContextVar('monoplanner_preparation_download_relay', default=None)
+_CONTAINER_INSPECT = (
+    '[{"Id":{{json .Id}},"Name":{{json .Name}},"Image":{{json .Image}},'
+    '"State":{{json .State}},"Config":{"Labels":{{json .Config.Labels}}},'
+    '"HostConfig":{"Memory":{{json .HostConfig.Memory}},'
+    '"LogConfig":{{json .HostConfig.LogConfig}}}}]'
+)
+
+
+@contextmanager
+def _default_downloads():
+    from agent.execution.download_relay import DownloadRelay
+
+    with DownloadRelay() as relay:
+        token = _DOWNLOAD_RELAY.set(relay)
+        try:
+            yield relay
+        finally:
+            _DOWNLOAD_RELAY.reset(token)
+
+
+@contextmanager
+def _preparation_log(path):
+    try:
+        with path.open('wb') as output:
+            yield output
+    finally:
+        relay = _DOWNLOAD_RELAY.get()
+        if relay is not None and path.is_file():
+            relay.redact_log(path)
 
 
 # ============================================================
@@ -193,6 +224,10 @@ class ManagedEnvironments:
         )
 
     def _build_base(self, build, tag, work, proxy_arguments, cancelled):
+        with _default_downloads():
+            return self._build_base_with_downloads(build, tag, work, proxy_arguments, cancelled)
+
+    def _build_base_with_downloads(self, build, tag, work, proxy_arguments, cancelled):
         """具名构建容器带固定镜像、日志限额和精确身份，不改用户默认 builder。"""
         from agent.storage.resources import (
             current_owner, register_active_container, unregister_active_container,
@@ -211,8 +246,26 @@ class ManagedEnvironments:
         image = self._image(BUILDKIT_IMAGE, work, cancelled)
         downloaded = image is None
         if image is None:
-            self._run(['pull', BUILDKIT_IMAGE], log=work / 'builder-pull.log',
-                      cancelled=cancelled, timeout=SETUP_TIMEOUT)
+            from agent.execution.download_relay import docker_proxy_modes
+
+            modes = docker_proxy_modes()
+            _save(work / 'builder-network.json', {
+                'bootstrap': 'docker-desktop-daemon', 'proxy_modes': modes,
+                'build_and_install': 'current-system-network',
+            })
+            try:
+                self._run(['pull', BUILDKIT_IMAGE], log=work / 'builder-pull.log',
+                          cancelled=cancelled, timeout=SETUP_TIMEOUT)
+            except PreparationCancelled:
+                raise
+            except PreparationError as exc:
+                raise PreparationError(
+                    '首次下载构建工具失败：这一步由 Docker Desktop 下载，使用它已有的代理设置'
+                    f'（桌面：{modes["desktop"]}；容器：{modes["containers"]}）。'
+                    '系统代理开关无法覆盖 Docker 的手动代理。请在 Docker Desktop 的代理设置中'
+                    '核对系统代理模式或现有手动配置；本次不会修改全局设置或自动重试。'
+                    '详细错误已保存到 builder-pull.log。'
+                ) from exc
             image = self._image(BUILDKIT_IMAGE, work, cancelled)
         if image is None:
             raise PreparationError('无法核验固定版本 BuildKit 镜像。')
@@ -247,7 +300,7 @@ class ManagedEnvironments:
                 '--privileged', '--memory', '2g', '--memory-swap', '2g', '--cpus', '2',
                 '--pids-limit', '256', '--restart', 'no', *LOG_OPTIONS, *label_args,
                 '--mount', 'type=volume,source=' + volume + ',target=/var/lib/buildkit',
-                *proxy_environment(), image['Id'],
+                *proxy_environment(_DOWNLOAD_RELAY.get().url(container=True)), image['Id'],
             ], log=work / 'builder-container.log', cancelled=cancelled)
             actual_id = created.stdout.strip()
             if not re.fullmatch(r'[0-9a-f]{64}', actual_id):
@@ -395,14 +448,19 @@ class ManagedEnvironments:
 
     def _run(self, arguments, *, log, cancelled=None, timeout=60, check=True):
         _check_cancel(cancelled)
+        # 身份核验不需要 Env/Cmd；一次性中继口令不随 inspect 写入本地日志。
+        if arguments[:2] == ['container', 'inspect'] and len(arguments) == 3:
+            arguments = [*arguments[:2], '--format', _CONTAINER_INSPECT, arguments[2]]
         log.parent.mkdir(parents=True, exist_ok=True)
-        with log.open('wb') as output:
+        with _preparation_log(log) as output:
             try:
                 process = subprocess.Popen(
                     [docker_executable(), *arguments],
                     stdout=output,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
+                    env=(_DOWNLOAD_RELAY.get().environment()
+                         if _DOWNLOAD_RELAY.get() is not None else None),
                     **({'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}),
                 )
             except OSError as exc:
@@ -526,7 +584,7 @@ LABEL org.monoplanner.managed-base="{key}"
                 raise
             except PreparationError as exc:
                 raise PreparationError(
-                    '无法下载或准备基础工具。请检查 Docker Desktop 的网络或代理设置后重试；详细原因已保存在本机日志。'
+                    '无法下载或准备基础工具。' + str(exc)
                 ) from exc
             image = self._image(tag, work, cancelled)
             if not image:
@@ -569,6 +627,10 @@ LABEL org.monoplanner.managed-base="{key}"
     # 隔离容器中的依赖安装
     # ============================================================
     def _setup(self, plan, base, work, progress, cancelled):
+        with _default_downloads():
+            return self._setup_with_downloads(plan, base, work, progress, cancelled)
+
+    def _setup_with_downloads(self, plan, base, work, progress, cancelled):
         identity = uuid.uuid4().hex
         network, proxy, setup = (
             'monoplanner-prepare-' + identity + suffix for suffix in ('-net', '-proxy', '-work')
@@ -688,6 +750,8 @@ LABEL org.monoplanner.managed-base="{key}"
                     *constraints,
                     '--init',
                     *proxy_environment(),
+                    '--env',
+                    'MONOPLANNER_DOWNLOAD_RELAY=' + _DOWNLOAD_RELAY.get().url(container=True),
                     '--entrypoint',
                     '/usr/bin/timeout',
                     base,
