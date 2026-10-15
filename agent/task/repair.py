@@ -74,9 +74,28 @@ def location(value, path):
 # ========================================================================
 # 按明确允许的路径应用修正
 # ========================================================================
+def literal(edit, index, field):
+    """只补充字段和解析位置，不修复 JSON 或改写提交的字符串。"""
+    try:
+        return loads(getattr(edit, field))
+    except ValueError as exc:
+        position = ""
+        if isinstance(exc, json.JSONDecodeError):
+            position = (
+                f"line {exc.lineno}, column {exc.colno} (1-based), "
+                f"character {exc.pos} (0-based) inside this field JSON, not Python source; "
+            )
+        raise ValueError(
+            f"category=correction_json; field=/edits/{index}/{field}; "
+            f"operation={edit.operation}; target={edit.path}; {position}{exc}. "
+            "set before/after and remove before require JSON literals; "
+            "encode string values as JSON strings."
+        ) from exc
+
+
 def apply(value, edits, allowed):
     result = deepcopy(value)
-    for edit in edits:
+    for index, edit in enumerate(edits):
         if not any(
             edit.path == p or (p != "$raw" and edit.path.startswith(p + "/")) for p in allowed
         ):
@@ -94,12 +113,20 @@ def apply(value, edits, allowed):
         )
         current = parent[key] if present else None
         if edit.operation == "edit_text":
-            if not isinstance(current, str) or not edit.before or current.count(edit.before) != 1:
-                raise ValueError("Text correction requires one exact nonempty match: " + edit.path)
+            matches = current.count(edit.before) if isinstance(current, str) and edit.before else 0
+            if not isinstance(current, str) or not edit.before or matches != 1:
+                length = len(current) if isinstance(current, str) else "not-a-string"
+                raise ValueError(
+                    "Text correction requires one exact nonempty match: " + edit.path
+                    + f"; category=correction_text_match; field=/edits/{index}/before; "
+                    f"match_count={matches}; before_length={len(edit.before)}; "
+                    f"target_length={length}. No unique source location is available; "
+                    "before must be copied exactly from the retained original string."
+                )
             parent[key] = current.replace(edit.before, edit.after, 1)
         else:
             if (not present and edit.before != "") or (
-                present and encode(current) != encode(loads(edit.before))
+                present and encode(current) != encode(literal(edit, index, "before"))
             ):
                 raise ValueError("Original value does not match: " + edit.path)
             if edit.operation == "remove":
@@ -111,7 +138,7 @@ def apply(value, edits, allowed):
             else:
                 if isinstance(parent, list) and not present:
                     raise ValueError("List position does not exist: " + edit.path)
-                parent[key] = loads(edit.after)
+                parent[key] = literal(edit, index, "after")
         if edit.path == "$raw":
             result = parent[key]
     return loads(result) if isinstance(result, str) else result

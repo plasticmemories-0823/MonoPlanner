@@ -329,6 +329,38 @@ class LocalRepairTests(unittest.TestCase):
         self.assertIn("语法错误", notice)
         self.assertNotIn("缺少顶格 ARTIFACT_CHECKS", notice)
 
+    def test_repeated_format_errors_return_diagnostics_without_executing_work(self):
+        broken = f.CODE.replace("\n", "\\n")
+        plan = self.candidate(test_code=broken)
+        original_source = (self.repo / "sample.py").read_bytes()
+
+        def correct(messages, edits):
+            self.assertEqual((self.repo / "sample.py").read_bytes(), original_source)
+            self.assertEqual(self.engine.state.get("rounds", []), [])
+            return correction(messages, edits)
+
+        result = self.run_replies([
+            f.reply(plan),
+            lambda m: correct(m, [edit("/test_code", broken, f.CODE)]),
+            lambda m: correct(m, [edit("/test_code", broken + "x", f.CODE, "edit_text")]),
+            lambda m: correct(m, [edit("/test_code", json.dumps(broken), json.dumps(f.CODE))]),
+        ])
+        self.assertEqual(result["status"], "verified_success", result)
+        notices = [json.loads(self.model.calls[i][-1].content.split("] ", 1)[1].split("\n", 1)[0])
+                   for i in (1, 2, 3)]
+        self.assertIn("category=python_syntax", notices[0]["error"])
+        self.assertIn("source line 1, column", notices[0]["error"])
+        self.assertIn("/edits/0/before", notices[1]["error"])
+        self.assertIn("field JSON", notices[1]["error"])
+        self.assertIn("match_count=0", notices[2]["error"])
+        self.assertEqual(len({notice["draft_id"] for notice in notices}), 1)
+        self.assertTrue(all(notice["allowed_paths"] == ["/test_code"] for notice in notices))
+        accepted = json.loads((self.root / "state/plans/p0001/plan.json").read_text())
+        self.assertEqual(accepted["plan"]["test_code"], f.CODE)
+        self.assertEqual(len(accepted["plan"]["steps"]), len(plan["steps"]))
+        for actual, original in zip(accepted["plan"]["steps"], plan["steps"]):
+            self.assertEqual({key: actual[key] for key in original}, original)
+
     def test_review_parameters_and_code_are_checked_together_without_execution(self):
         from agent.acceptance.revisions import Review
 
@@ -520,6 +552,44 @@ class LocalRepairTests(unittest.TestCase):
 
 
 class CorrectionSafetyTests(unittest.TestCase):
+    def test_json_diagnostic_identifies_inner_field_and_multiline_position(self):
+        for field in ("before", "after"):
+            item = edit("/note", json.dumps("old"), json.dumps("new"))
+            item[field] = '[\n  invalid\n]'
+            original = {"note": "old"}
+            with self.subTest(field=field), self.assertRaises(ValueError) as caught:
+                repair.apply(original, [repair.Edit(**item)], ["/note"])
+            message = str(caught.exception)
+            self.assertIn("category=correction_json", message)
+            self.assertIn("/edits/0/" + field, message)
+            self.assertIn("target=/note", message)
+            self.assertIn("line 2, column 3", message)
+            self.assertIn("field JSON", message)
+            self.assertIn("JSON literals", message)
+            self.assertEqual(original, {"note": "old"})
+
+    def test_strict_json_rejections_keep_the_parameter_context(self):
+        for invalid in ('{"same": 1, "same": 2}', 'NaN'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError) as caught:
+                repair.apply({"note": "old"}, [repair.Edit(**edit(
+                    "/note", json.dumps("old"), invalid))], ["/note"])
+            self.assertIn("/edits/0/after", str(caught.exception))
+            self.assertIn("category=correction_json", str(caught.exception))
+            self.assertNotIn("line ", str(caught.exception))
+
+    def test_text_diagnostic_counts_matches_without_guessing_a_missing_location(self):
+        original = {"test_code": "same\nsame"}
+        for before, count in (("same", 2), ("missing", 0)):
+            with self.subTest(before=before), self.assertRaises(ValueError) as caught:
+                repair.apply(original, [repair.Edit(**edit(
+                    "/test_code", before, "different", "edit_text"))], ["/test_code"])
+            message = str(caught.exception)
+            self.assertIn("category=correction_text_match", message)
+            self.assertIn("/edits/0/before", message)
+            self.assertIn("match_count=" + str(count), message)
+            self.assertIn("target_length=9", message)
+            self.assertEqual(original, {"test_code": "same\nsame"})
+
     def test_exact_text_preserves_unicode_quotes_slashes_and_newlines(self):
         value = {"test_code": 'print("中文\\n")\r\npath = "C:\\\\files"\n# imports 错误\n'}
         changed = repair.apply(

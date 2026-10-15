@@ -12,7 +12,11 @@ def _validate_test_code(code: str, required_consumer=None, required_calls=()) ->
         tree = ast.parse(code, filename="test_acceptance.py")
         compile(tree, "test_acceptance.py", "exec")
     except SyntaxError as exc:
-        raise ValueError(f"验收测试有语法错误：{exc}") from exc
+        raise ValueError(
+            f"验收测试有语法错误：{exc}; category=python_syntax; "
+            f"source line {exc.lineno}, column {exc.offset} "
+            "(1-based, Python source coordinates)"
+        ) from exc
     issues = oracle_issues(tree)
     errors = ["生成的验收缺少独立预期：" + "；".join(issues)] if issues else []
     try:
