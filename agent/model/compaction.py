@@ -228,9 +228,19 @@ def validate_summary(raw):
 def commit(loop, pending):
     text = validate_summary(pending['response'])
     state = loop.state
+    original = (
+        state['history'][:pending['cutoff']] if pending.get('prefix_guard') else state['history']
+    )
     if (
-        fingerprint(state['history']) != pending['archive_hash']
+        fingerprint(original) != pending['archive_hash']
         or state.get('context_view') != pending['previous_view']
+        or (
+            pending.get('prefix_guard')
+            and (
+                fingerprint(state['rules']) != pending['rules_hash']
+                or requirements(state) != pending['requirements']
+            )
+        )
     ):
         raise ModelRequestNotSent(
             'state_conflict', 'History changed during summarization; original view retained.'
@@ -332,7 +342,7 @@ def commit(loop, pending):
 # ========================================================================
 # 上下文压力检查与可恢复压缩流程
 # ========================================================================
-def prepare(loop, output_cap, *, force=False):
+def prepare(loop, output_cap, *, force=False, preserve_recent=False):
     guard_archive(loop.state)
     if any(
         loop.state.get(key)
@@ -388,7 +398,7 @@ def prepare(loop, output_cap, *, force=False):
             snapshot = execution_snapshot(loop)
             request, cutoff, selected_hash = select(
                 loop,
-                0 if force else retain,
+                0 if force and not preserve_recent else retain,
                 min(output_cap, CONFIG['summary_max_tokens']),
                 snapshot,
             )

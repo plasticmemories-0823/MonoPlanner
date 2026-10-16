@@ -228,25 +228,6 @@ function Test-Ready([string]$Kind, [int]$Port) {
     }
 }
 
-function Repair-ServiceState {
-    $taskRequest = New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Post, "http://127.0.0.1:$BackendPort/service/reconcile")
-    $null = $taskRequest.Headers.TryAddWithoutValidation('X-MonoPlanner-Service', $env:MONOPLANER_SERVICE_TOKEN)
-    $taskRequest.Content = New-Object Net.Http.StringContent('{}', [Text.Encoding]::UTF8, 'application/json')
-    try {
-        $taskResponse = $taskClient.SendAsync($taskRequest).GetAwaiter().GetResult()
-        try {
-            # 旧版服务没有此入口；继续沿用原有空闲检查，不绕过保护。
-            if ([int]$taskResponse.StatusCode -ne 404 -and -not $taskResponse.IsSuccessStatusCode) {
-                throw '无法核验服务状态恢复；未强制停止任务。'
-            }
-        } finally {
-            $taskResponse.Dispose()
-        }
-    } finally {
-        $taskRequest.Dispose()
-    }
-}
-
 # 关闭或重启前确认任务已停止，并管理所属服务进程。
 function Assert-BackendIdle {
     if (@(Get-Listener $BackendPort).Count -eq 0) {
@@ -255,11 +236,6 @@ function Assert-BackendIdle {
     try {
         $taskStatus = (Get-ServiceText $BackendPort '/service/status') | ConvertFrom-Json
         $taskQueue = $taskStatus.queue
-        if ($taskQueue -and $taskQueue.n_running -gt 0 -and $taskQueue.n_pending -eq 0) {
-            Repair-ServiceState
-            $taskStatus = (Get-ServiceText $BackendPort '/service/status') | ConvertFrom-Json
-            $taskQueue = $taskStatus.queue
-        }
         if ($null -eq $taskQueue -or $null -eq $taskQueue.n_running -or $null -eq $taskQueue.n_pending) {
             throw '任务状态不完整'
         }
@@ -553,7 +529,6 @@ try {
         $taskBackendProcess = Start-ServiceProcess $taskBackend $taskArguments $taskProject 'backend'
     }
     Wait-Service 'backend' $BackendPort $taskBackendProcess
-    Repair-ServiceState
 
     $taskMode = if ($taskPortable) {
         'portable'

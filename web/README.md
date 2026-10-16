@@ -2,9 +2,9 @@
 
 基于官方 Agent Chat UI；来源及改动见 [UPSTREAM.md](UPSTREAM.md)，保留 MIT 许可。
 
-从项目根目录运行 `pnpm --dir web install --config.manage-package-manager-versions=false` 和 `scripts/start-web.ps1`。后端由 `scripts/start-server.ps1` 启动。完整安装、恢复与验证说明见 [项目 README](../README.md)。
+从项目根目录运行 `pnpm --dir web install --frozen-lockfile` 安装前端依赖，再运行 `.\scripts\start-app.ps1 -NoBrowser` 一起启动本机前后端。完整安装、恢复与验证说明见 [项目 README](../README.md)。
 
-默认后端 `http://127.0.0.1:2024`，图 ID `monoplaner`；页面 `http://127.0.0.1:3000`。如需改端口，使用 `.env.example` 所列公开连接设置，并同步后端 CORS。本轮仅支持本机使用。
+默认后端 `http://127.0.0.1:2024`，页面 `http://127.0.0.1:3000`。如需改端口，向 `scripts/start-app.ps1` 传入 `-BackendPort` 和 `-FrontendPort`；启动器统一提供本机连接配置与实例凭证。仅支持本机使用。
 
 模型密钥只放后端。这里的环境变量不是 DeepSeek 凭证。
 

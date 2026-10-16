@@ -1,2 +1,0 @@
-# 评测复用主依赖；保留旧安装命令入口。
--r requirements.txt

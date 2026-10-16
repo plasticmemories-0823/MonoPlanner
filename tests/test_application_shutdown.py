@@ -306,23 +306,3 @@ def test_environment_prepare_is_fenced_but_cancel_remains_allowed(application, m
         jobs.assert_not_called()
         result = asyncio.run(server.project_environment(request('cancel')))
         assert result.status_code == 200 and cancelled == ['sample-project']
-
-
-def test_reconcile_cannot_reset_closed_service(application, monkeypatch):
-    from agent.application import api
-    from agent.server.app import service_reconcile
-
-    store, _, scheduler = application
-    monkeypatch.setenv('MONOPLANER_STATE_DIR', str(store.root))
-    monkeypatch.setattr(api, '_service', scheduler)
-    scheduler.shutdown.start()
-    wait_complete(scheduler.shutdown)
-
-    async def receive():
-        return {'type': 'http.request', 'body': b'{}', 'more_body': False}
-
-    request = Request({'type': 'http', 'method': 'POST', 'path': '/service/reconcile',
-                       'headers': []}, receive)
-    assert asyncio.run(service_reconcile(request)).status_code == 200
-    assert api.get_service() is scheduler
-    assert scheduler.stop.is_set() and store.closing.is_set()

@@ -69,34 +69,44 @@ class ConfiguredModel:
         return replace(self, purpose=purpose, timeout=timeout)
 
     def invoke(self, messages):
+        from agent.task.control import current
+
+        # 是否可取消由任务控制决定，与界面是否展示思考无关。
+        if current() is not None:
+            return self.invoke_with_progress(messages)
         bound = self.client.bind_tools(list(self.tools), strict=True) if self.tools else self.client
         return bound.invoke(messages, **self.request_options)
 
-    def invoke_with_progress(self, messages, on_reasoning):
+    def invoke_with_progress(self, messages, on_reasoning=None):
         """以流方式处理单次请求；完成前仅公开思考内容。"""
         from langchain_core.messages import message_chunk_to_message
         from agent.model.payload import retain_provider_calls
 
-        bound = self.client.bind_tools(list(self.tools), strict=True) if self.tools else self.client
         from agent.task.control import current
 
         signal = current()
         if signal:
+            signal.check()
+        bound = self.client.bind_tools(list(self.tools), strict=True) if self.tools else self.client
+        if signal:
             from agent.model.errors import ModelInterrupted
             from agent.model.streaming import run
 
-            if signal.kind:
-                raise ModelInterrupted(signal.kind, sent=False)
+            dispatched = False
 
             async def streamed():
                 import asyncio
 
+                nonlocal dispatched
+                # 从同步线程排入异步循环后，暂停可能已到达。
+                signal.check()
                 complete = None
                 stream = bound.astream(messages, stream_usage=True, **self.request_options)
+                dispatched = True
                 try:
                     async for chunk in stream:
                         thought = chunk.additional_kwargs.get('reasoning_content')
-                        if isinstance(thought, str) and thought:
+                        if on_reasoning is not None and isinstance(thought, str) and thought:
                             # 本地展示记录在网络循环之外写入。
                             # 确认取消前，先完成正在进行的写入。
                             update = asyncio.create_task(asyncio.to_thread(on_reasoning, thought))
@@ -110,12 +120,17 @@ class ConfiguredModel:
                     await stream.aclose()
                 return complete
 
-            complete = run(streamed(), signal)
+            try:
+                complete = run(streamed(), signal)
+            except ModelInterrupted as exc:
+                # 协程尚未启动就被取消时，SDK 没有收到请求。
+                exc.sent = dispatched
+                raise
         else:
             complete = None
             for chunk in bound.stream(messages, stream_usage=True, **self.request_options):
                 thought = chunk.additional_kwargs.get('reasoning_content')
-                if isinstance(thought, str) and thought:
+                if on_reasoning is not None and isinstance(thought, str) and thought:
                     on_reasoning(thought)
                 complete = chunk if complete is None else complete + chunk
         if complete is None or not complete.response_metadata.get('finish_reason'):

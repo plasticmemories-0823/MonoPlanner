@@ -535,7 +535,6 @@ def _argument_parser():
     parser.add_argument("--images", required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--instance-id", action="append")
-    parser.add_argument("--workflow", choices=("task",), default="task", help=argparse.SUPPRESS)
     parser.add_argument("--max-steps", type=int, default=60)
     parser.add_argument("--max-rounds", type=int, default=3)
     parser.add_argument(

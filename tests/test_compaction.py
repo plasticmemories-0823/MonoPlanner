@@ -545,7 +545,9 @@ class DurableCompactionTests(unittest.TestCase):
     def test_explicit_overflow_compresses_and_retries_only_once(self):
         self.sdk.plans = iter([{'kind': 'blocked', 'note': 'fixture complete'}])
         self.sdk.failures = 1
-        result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
+        # 缩小假轨迹的保留窗口，但仍保留最近原文，不能靠保留量归零触发摘要。
+        with patch.dict(compaction.CONFIG, {'retain_ratio': 0.00005}):
+            result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.assertEqual(result['status'], 'task_blocked', result)
         self.assertEqual(result['compactions'][0]['trigger'], 'context-overflow')
         self.assertEqual(len(self.sdk.calls), 5)  # 两次已完成调用、拒绝记录、摘要和继续执行。

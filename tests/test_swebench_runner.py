@@ -31,18 +31,6 @@ class FakeModel:
 
 
 class ManifestTests(unittest.TestCase):
-    def test_default_and_explicit_task_use_one_planner(self):
-        with tempfile.TemporaryDirectory() as name:
-            for extra in ([], ["--workflow", "task"]):
-                args = runner.parse_args(
-                    ["--tasks", "tasks.json", "--images", "images.json", "--run-dir", name, *extra]
-                )
-                self.assertEqual(args.workflow, "task")
-                from agent.task.runner import TaskRunner
-
-                selected = runner.create_task_controller(object(), object(), Path(name), args)
-                self.assertIsInstance(selected, TaskRunner)
-
     def test_manifest_selection_errors_stop_before_model_or_archive(self):
         task = {
             "instance_id": "example__repo-1",

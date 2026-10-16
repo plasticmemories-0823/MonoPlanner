@@ -124,6 +124,7 @@ def code_key(root=None):
         'agent/task/instructions.py',
         'agent/model/context.py',
         'agent/model/compaction.py',
+        'agent/model/precompaction.py',
         'agent/model/client.py',
         'agent/model/errors.py',
         'resources/context.json',
@@ -200,6 +201,9 @@ def restore(loop, stored, identity):
     from agent.acceptance import revisions
 
     revisions.validate(loop)
+    from agent.model import precompaction
+
+    precompaction.reconcile(loop)
     loop.history_store.stats['resumed'] += 1
 
     # ========================================================================
@@ -238,7 +242,10 @@ def restore(loop, stored, identity):
             reason='Interrupted execution; reconcile before repeating effects',
         )
         return loop.result()
-    if (stored.get('compaction_pending') or {}).get('stage') == 'committing':
+    if any(
+        (stored.get(name) or {}).get('stage') == 'committing'
+        for name in ('compaction_pending', 'precompaction_pending')
+    ):
         stored.update(
             status='compaction_commit_unknown',
             reason='Interrupted compaction commit; reconcile before continuing',
@@ -364,20 +371,29 @@ def run(loop, history, text, budget, verify_command, acceptance):
             return loop._run_new(history, text, budget, verify_command, acceptance)
         finally:
             from agent.source.lifecycle import close
+            from agent.model import precompaction
 
-            close(loop)
+            try:
+                precompaction.close(loop, settle=False)
+            finally:
+                close(loop)
     try:
         with loop.history_store.lease():
-            stored = loop.history_store.load()
-            return (
-                restore(loop, stored, loop.identity)
-                if stored
-                else loop._run_new(history, text, budget, verify_command, acceptance)
-            )
-    finally:
-        from agent.source.lifecycle import close
+            try:
+                stored = loop.history_store.load()
+                return (
+                    restore(loop, stored, loop.identity)
+                    if stored
+                    else loop._run_new(history, text, budget, verify_command, acceptance)
+                )
+            finally:
+                from agent.source.lifecycle import close
+                from agent.model import precompaction
 
-        try:
-            close(loop)
-        finally:
-            loop.history_store.close()
+                # 租约释放前先取消并等待后台连接，避免新恢复者接管仍在运行的请求。
+                try:
+                    precompaction.close(loop, settle=False)
+                finally:
+                    close(loop)
+    finally:
+        loop.history_store.close()

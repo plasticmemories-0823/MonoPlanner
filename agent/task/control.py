@@ -31,6 +31,14 @@ class Signal:
         kinds = [kind for kind, _ in self.pending.values()]
         self.kind = 'pause' if 'pause' in kinds else kinds[-1] if kinds else None
 
+    def check(self, *, pause_only=False):
+        """在派发边界检查中断；尚未进入模型请求，不产生未知用量。"""
+        from agent.model.errors import ModelInterrupted
+
+        with self.lock:
+            if self.kind and (not pause_only or self.kind == 'pause'):
+                raise ModelInterrupted(self.kind, sent=False)
+
     def consume_input(self, identity):
         with self.lock:
             for sequence, (_, saved) in list(self.pending.items()):
@@ -54,6 +62,22 @@ class Signal:
 
 def current():
     return _current.get()
+
+
+@contextmanager
+def using(signal):
+    """为后台请求绑定独立中断信号，不新增会话执行所有者。"""
+    token = _current.set(signal)
+    try:
+        yield signal
+    finally:
+        _current.reset(token)
+
+
+def check_interrupted(*, pause_only=False):
+    signal = current()
+    if signal:
+        signal.check(pause_only=pause_only)
 
 
 def active_count(root):

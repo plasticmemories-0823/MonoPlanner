@@ -108,14 +108,6 @@ async def service_shutdown(request: Request):
     return JSONResponse(shutdown.status(), headers={'Cache-Control': 'no-store'})
 
 
-async def service_reconcile(request: Request):
-    # 应用启动时核验遗留命令；不再修改另一套框架的 run 状态。
-    if await request.json() != {}:
-        return JSONResponse({'error': 'Service recovery accepts no arguments'}, status_code=400)
-    return JSONResponse({'reconciled': 0, 'scheduler': 'application'},
-                        headers={'Cache-Control': 'no-store'})
-
-
 async def resources(request: Request):
     from agent.storage.resources import resource_catalog, delete_owned_docker_resource, release_project
     try:
@@ -252,7 +244,6 @@ app = Starlette(
         Route('/service', service, methods=['GET']),
         Route('/service/status', service_status, methods=['GET']),
         Route('/service/shutdown', service_shutdown, methods=['POST']),
-        Route('/service/reconcile', service_reconcile, methods=['POST']),
         Route('/execution/images', execution_images, methods=['GET']),
         Route('/workspace/execution', project_execution, methods=['GET', 'POST']),
         Route('/workspace/environment', project_environment, methods=['GET', 'POST']),

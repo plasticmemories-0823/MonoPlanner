@@ -30,12 +30,10 @@ export class ThreadHistoryStore {
     return ++this.nextRefresh;
   }
 
-  applyRefresh(ticket: number, incoming: ManagedThread[], visibility: Record<string, string> = {}) {
+  applyRefresh(ticket: number, incoming: ManagedThread[]) {
     if (ticket < this.appliedRefresh) return this.rows;
     this.appliedRefresh = ticket;
     const old = new Map(this.rows.map((row) => [row.thread_id, row]));
-    for (const [id, value] of Object.entries(visibility))
-      if (value === "purged") this.purged.add(id);
     const found = new Set(incoming.map((row) => row.thread_id));
     const rows: ManagedThread[] = incoming
       .filter((row) => !this.purged.has(row.thread_id))

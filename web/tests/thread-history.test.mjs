@@ -87,9 +87,6 @@ test("purged thread cannot return from stale search, activity or an upsert", () 
   store.applyTitle("1", title(10));
   store.upsert(thread("1"));
   assert.equal(store.rows.length, 0);
-  store.upsert(thread("2"));
-  store.applyRefresh(store.startRefresh(), [thread("2")], { 2: "purged" });
-  assert.equal(store.rows.length, 0);
 });
 
 test("repeated activity titles do not produce continuous React updates", () => {

@@ -24,9 +24,9 @@ from agent.execution.executor import OperationExecutor
 from agent.storage.records import digest, save
 from agent.task.contracts import WorkRequest
 from agent.task.instructions import TASK_RULES
-from agent.task import dialogue, operations, repair
+from agent.task import control, dialogue, operations, repair
 from agent.model.context import admit, CONTEXT_WINDOW_TOKENS
-from agent.model import compaction
+from agent.model import compaction, precompaction
 from agent.source import lifecycle as source_runtime
 from agent.acceptance import revisions
 
@@ -137,6 +137,7 @@ class TaskRunner:
         return compaction.messages(self)
 
     def call_planner(self):
+        control.check_interrupted(pause_only=True)
         self.budget.check_request(0)
         if self.state.get("repair_draft"):
             repair.read(self, self.state["repair_draft"])
@@ -148,7 +149,7 @@ class TaskRunner:
         )
         cap = getattr(selected, "max_output_tokens", 256000)
         cap = cap if type(cap) is int else 256000
-        compaction.prepare(self, cap)
+        precompaction.prepare(self, cap)
         for attempt in range(compaction.CONFIG['max_overflow_retries'] + 1):
             messages = self.planner_messages()
             admit(self.state, messages, self.tools, getattr(selected, "context_envelope", {}))
@@ -160,7 +161,7 @@ class TaskRunner:
                     or attempt == compaction.CONFIG['max_overflow_retries']
                 ):
                     raise
-                compaction.prepare(self, cap, force=True)
+                precompaction.prepare(self, cap, force=True)
                 continue
             return self.decode_plan(raw)
 
@@ -217,6 +218,8 @@ class TaskRunner:
             )
             live = LiveReasoning(self.root, ticket.call_id, anchor)
         try:
+            # 请求原件与预算保存期间也可能收到暂停，发送前再次核验。
+            control.check_interrupted()
             response = (
                 selected.invoke_with_progress(messages, live.append)
                 if live
@@ -329,6 +332,8 @@ class TaskRunner:
     # 回复解码与工作计划校验
     # ========================================================================
     def decode_plan(self, raw):
+        # 完整响应已归档；暂停后不再校验或派发纠错请求。
+        control.check_interrupted(pause_only=True)
         self.rejected_input = None
         self.reviewing = False
         from agent.task.output_limit import guard
@@ -640,22 +645,24 @@ class TaskRunner:
                 if self.yield_boundary:
                     break
         except ModelInterrupted as exc:
-            self.on_model_interrupted(exc.kind)
+            self.on_model_interrupted(exc.kind, sent=exc.sent)
         except ModelRequestNotSent as exc:
             self.state.update(status=exc.status, reason=exc.reason)
         except Exception as exc:
             self.state.update(status="runtime_error", reason=f"{type(exc).__name__}: {exc}")
         return self.result()
 
-    def on_model_interrupted(self, kind):
-        self.state['history'].append(
-            message_to_dict(
-                HumanMessage(
-                    content='The user interrupted the previous model request. Its partial reply was not submitted or executed. '
-                    'Use completed records and the latest user requirements; do not replay completed operations.'
+    def on_model_interrupted(self, kind, *, sent=True):
+        # 纯边界暂停没有半截模型回复，不能改动已保存检查点的历史前缀。
+        if sent:
+            self.state['history'].append(
+                message_to_dict(
+                    HumanMessage(
+                        content='The user interrupted the previous model request. Its partial reply was not submitted or executed. '
+                        'Use completed records and the latest user requirements; do not replay completed operations.'
+                    )
                 )
             )
-        )
         self.state.pop('dispatch', None)
         self.state.pop('turn_status', None)
         self.state.update(
@@ -667,6 +674,8 @@ class TaskRunner:
         self.persist('model_wait_interrupted', {'kind': kind})
 
     def advance(self):
+        # 补充消息仍在原有合法边界接入，不能打断本地拒收记录配对。
+        control.check_interrupted(pause_only=True)
         if self.state.get('rejection_pending'):
             repair.finish_rejection(self)
             return
@@ -729,6 +738,10 @@ class TaskRunner:
     # 结果汇总与验证证据
     # ========================================================================
     def result(self):
+        try:
+            precompaction.close(self)
+        except ModelRequestNotSent as exc:
+            self.state.update(status=exc.status, reason=exc.reason)
         source_runtime.close(self)
         self.persist("task_returned", {"status": self.state["status"]})
         report = f"{self.state['status']}: {self.state.get('reason', '')}"

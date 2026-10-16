@@ -549,13 +549,13 @@ class ConversationRunner(TaskRunner):
         self.state['chat_history'] = list(turn['messages'])
         return turn
 
-    def on_model_interrupted(self, kind):
+    def on_model_interrupted(self, kind, *, sent=True):
         turn = self.state.get('conversation_turn')
         if turn:
             turn = self.complete_turn()
             self.state['history'].extend(turn['messages'][turn['prefix'] :])
             self.state.update(response_pending=turn.get('work_response'), conversation_turn=None)
-        super().on_model_interrupted(kind)
+        super().on_model_interrupted(kind, sent=sent)
         if kind == 'message' and not self.state.get('baseline') and not self.state.get('pending'):
             # 首条回复在工作开始前被取消；应回答已保存的新消息，
             # 不能悄悄重启旧请求。
