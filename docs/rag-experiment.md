@@ -1,6 +1,6 @@
-# RAG 实验版操作与验证边界
+# RAG 操作与验证边界
 
-本文件对应 `E:\AI\LangGraph\MonoPlanner-rag-experiment`。正式版目录保持原样。
+本文件对应正式开发目录 `E:\AI\LangGraph\MonoPlanner`。
 容器资料的只读授权、提示分工、版本及缓存规则见 [容器资料检索](container-rag-sources.md)。
 Bench 仍暂停。以下操作入口不会下载模型，也不会生成付费评测回答。
 
