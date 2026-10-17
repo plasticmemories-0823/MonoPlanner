@@ -135,4 +135,3 @@ class RetrievalResult:
     route_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     exact_hit: bool = False
     rerank_scores: tuple[float, ...] = ()
-
