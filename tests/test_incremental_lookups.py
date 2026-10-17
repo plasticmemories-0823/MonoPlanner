@@ -226,7 +226,7 @@ class IncrementalLookupTests(unittest.TestCase):
         from agent.task.contracts import Operation
         from unittest.mock import patch
 
-        with patch('agent.source.index.os.walk', side_effect=AssertionError('no global scan')):
+        with patch('os.walk', side_effect=AssertionError('no global scan')):
             result = mapped.observe(
                 reader.search(Operation(id='locate', op='search', query='needle'))
             )

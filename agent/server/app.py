@@ -1,7 +1,7 @@
 """独立本机产品服务：应用调度与工作内核分离。"""
 
 from starlette.middleware import Middleware
-from agent.server.access import InstanceAccess, service_headers
+from agent.server.access import InstanceAccess
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse

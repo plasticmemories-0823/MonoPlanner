@@ -4,7 +4,11 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 import time
 
-from agent.source.index import _parse, _module, MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES
+from agent.source.syntax import _parse, _module, MAX_FILE_BYTES
+
+
+MAX_FILES = 3000
+MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
 
 def build_preparation(view, previous, cancel, max_seconds=8.0):

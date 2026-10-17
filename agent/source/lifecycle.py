@@ -11,15 +11,14 @@ def collect(loop):
         return
     try:
         ready = prep.collect(loop.evidence.current, loop.history_store)
+        if ready is not None and ready is not loop.executor.prepared:
+            view = loop.evidence.view()
+            if ready['version'] != view.version or any(
+                view.files.get(name) != entry['digest']
+                for name, entry in ready['entries'].items()
+            ):
+                raise ValueError('Prepared navigation does not match the recorded source')
         loop.executor.prepared = ready
-        if ready is not None and (
-            loop.executor.navigator is None or loop.executor.navigator.version != ready['version']
-        ):
-            from agent.source.index import RepositoryNavigator
-
-            loop.executor.navigator = RepositoryNavigator.from_prepared(
-                loop.evidence.view(), ready, loop.root / 'source-records' / 'navigation'
-            )
     except Exception as exc:
         loop.preparation_errors.append(type(exc).__name__)
         loop.executor.prepared = None

@@ -33,7 +33,7 @@ from agent.execution.managed_plan import (
     _digest,
     _link,
 )
-from agent.storage.preferences import atomic_write, state_root
+from agent.storage.preferences import atomic_write
 from agent.source.scope import project_scope as resolve_scope
 
 MAX_LOG = 16 * 1024 * 1024

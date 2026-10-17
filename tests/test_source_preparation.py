@@ -15,7 +15,7 @@ from agent.model.payload import wire_input
 from agent.source.snapshots import SourceSnapshot
 from agent.source.view import SourceView
 from agent.source.versions import SourceVersions
-from agent.source.index import RepositoryNavigator
+from agent.source.exploration import ExplorationMap
 from agent.execution.executor import OperationExecutor
 from agent.source.preparation import Preparation, build_preparation
 from agent.task.runner import TaskRunner
@@ -121,13 +121,17 @@ class SourceTests(unittest.TestCase):
         (self.repo / 'second.py').write_text('def stable(): return 1\n')
         ev = self.evidence()
         prepared = build_preparation(ev.view(), {}, threading.Event())
-        nav = RepositoryNavigator.from_prepared(ev.view(), prepared, self.root / 'map')
+        reader = OperationExecutor(self.env, ev, self.root / 'records', versioned_reads=True)
+        reader.prepared = prepared
+        mapping = ExplorationMap(reader, {})
+        mapping.sync()
         (self.repo / 'sample.py').write_text('def replacement(): pass')
-        with patch('agent.source.index.os.walk', side_effect=AssertionError('no live walk')):
-            nav.refresh()
-        self.assertEqual(nav.entries['sample.py']['symbols'][0]['name'], 'value')
-        self.assertNotIn('replacement', str(nav.entries))
-        self.assertEqual(nav.version, ev.current)
+        with patch.object(reader, 'source_bytes', side_effect=AssertionError('reuse prepared bytes')):
+            entry = mapping.entry('sample.py', ev.view().files['sample.py'])
+        self.assertIs(entry, prepared['entries']['sample.py'])
+        self.assertEqual(entry['symbols'][0]['name'], 'value')
+        self.assertNotIn('replacement', str(entry))
+        self.assertEqual(mapping.version, ev.current)
         old_cache = prepared['parse_cache']
         ev.record('new_version')
         next_data = build_preparation(ev.view(), old_cache, threading.Event())

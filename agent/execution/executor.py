@@ -20,7 +20,6 @@ class OperationExecutor:
         self.prepared = None
         self.prepared_probe = None
         self.prepared_line_hits = 0
-        self.navigator = None
         self.visible_reads = {}
 
     @contextmanager

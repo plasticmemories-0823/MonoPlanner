@@ -1,6 +1,7 @@
 """任务范围只包含选定项目；其他独立项目既不读取也不成为安装输入。"""
 
 from pathlib import Path
+from threading import Event
 import subprocess
 
 import pytest
@@ -9,7 +10,7 @@ from agent.execution.installation_materials import collect, project_files
 from agent.execution.local import LocalEnvironment
 from agent.execution.managed_plan import inspect_project, PreparationError
 from agent.execution.runtime_inventory import runtime_inventory
-from agent.source.index import RepositoryNavigator
+from agent.source.preparation import build_preparation
 from agent.source.scope import ProjectScope, ProjectScopeError
 from agent.source.snapshots import SourceSnapshot, SnapshotError
 from agent.source.versions import SourceVersions
@@ -159,7 +160,7 @@ def test_explicit_dependency_into_excluded_project_fails_instead_of_omitting_it(
         inspect_project(root)
 
 
-def test_runtime_inventory_and_navigation_do_not_read_independent_package(tmp_path):
+def test_runtime_inventory_and_preparation_do_not_read_independent_package(tmp_path):
     root = tmp_path / 'project'
     write(root, 'own/__init__.py', 'def ours(): pass\n')
     write(root, 'other/.git', 'gitdir: elsewhere')
@@ -167,9 +168,11 @@ def test_runtime_inventory_and_navigation_do_not_read_independent_package(tmp_pa
     inventory = runtime_inventory(root)
     assert inventory['packages'] == ['own']
     assert set(inventory['files']) == {'own/__init__.py'}
-    navigator = RepositoryNavigator(root, tmp_path / 'navigation')
-    navigator.refresh()
-    assert set(navigator.entries) == {'own/__init__.py'}
+    baseline = SourceSnapshot.capture(root, tmp_path / 'baseline')
+    environment = LocalEnvironment(root, artifact_root=tmp_path / 'artifacts')
+    versions = SourceVersions(environment, tmp_path / 'versions', baseline)
+    prepared = build_preparation(versions.view(), {}, Event())
+    assert set(prepared['entries']) == {'own/__init__.py'}
 
 
 def test_routine_validation_does_not_rediscover_entire_scope(tmp_path, monkeypatch):

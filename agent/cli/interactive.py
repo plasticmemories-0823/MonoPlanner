@@ -9,9 +9,7 @@ from agent.task.budget import StepBudget
 from agent.settings import load_settings
 from types import SimpleNamespace
 from pathlib import Path
-import uuid
 from agent.execution.projects import workspace_path
-from agent.storage.preferences import state_root
 from agent.cli.workspace import load_saved_repo, save_repo
 
 

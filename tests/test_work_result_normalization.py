@@ -99,7 +99,7 @@ class WorkResultNormalizationTests(unittest.TestCase):
         reader = SimpleNamespace(
             inventory=lambda: digests,
             evidence=SimpleNamespace(current='a' * 64),
-            navigator=None,
+            prepared=None,
             source_bytes=lambda name: files[name],
         )
         data = {'path': 'consumer.py', 'sha256': digests['consumer.py'],

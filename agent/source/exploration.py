@@ -1,7 +1,7 @@
 """依据真实查询结果扩展源码映射，不调用额外模型或实时扫描。"""
 
 import json
-from agent.source.index import _parse, _module, MAX_FILE_BYTES
+from agent.source.syntax import _parse, _module, MAX_FILE_BYTES
 from agent.source.paging import merged, read_pages
 
 
@@ -30,9 +30,10 @@ class ExplorationMap:
         cached = self.parsed.get(name)
         if cached and cached['digest'] == sha:
             return cached
-        navigator = self.executor.navigator
+        prepared = self.executor.prepared
         cached = (
-            navigator.entries.get(name) if navigator and navigator.version == self.version else None
+            prepared['entries'].get(name)
+            if prepared and prepared['version'] == self.version else None
         )
         if cached and cached['digest'] == sha:
             self.parsed[name] = cached

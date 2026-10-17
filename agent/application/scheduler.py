@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock, Thread
 import logging
 import sqlite3
-import time
 import uuid
 
 from agent.application.chat import Chatbot

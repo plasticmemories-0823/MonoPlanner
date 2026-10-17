@@ -174,10 +174,7 @@ class StepBudget:
                 )
 
     def reserve_request(self, reservation=0, purpose="work") -> RequestReservation:
-        """原子预留一次调用及其已知 Token 额度。
-
-        执行器先以零 Token 预留调用，将唯一请求 ID 放入输入，
-        再在发送前调用 reserve_tokens。两次检查都是原子的，任一拒绝都不会发送请求。"""
+        """发送前原子预留一次调用及其已知 Token 额度。"""
         if reservation < 0:
             raise ValueError("reservation 不能小于 0")
         with _BUDGET_LOCK:
@@ -255,17 +252,6 @@ class StepBudget:
                 'status': outcome, 'cost_micros': None if outcome == 'unknown' else cost,
                 'reserved_cost_micros': reserved,
             }
-
-    def reserve_tokens(self, ticket: RequestReservation, reservation: int):
-        """允许调用方发送 HTTP 请求前，先计入进行中的请求额度。"""
-        if reservation < 0:
-            raise ValueError("reservation 不能小于 0")
-        with _BUDGET_LOCK:
-            self._check_ticket(ticket)
-            change = reservation - ticket.reserved_tokens
-            self.check_request(change, ticket.purpose, ticket.reserved_tokens)
-            self.inflight_reserved_tokens += change
-            ticket.reserved_tokens = reservation
 
     def settle_request(self, ticket: RequestReservation, response):
         with _BUDGET_LOCK:

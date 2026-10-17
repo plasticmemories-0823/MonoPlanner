@@ -157,7 +157,6 @@ def code_key(root=None):
         'agent/source/lifecycle.py',
         'agent/source/view.py',
         'agent/source/versions.py',
-        'agent/source/index.py',
         'agent/storage/records.py',
         'agent/acceptance/final.py',
         'resources/prompts/task.txt',

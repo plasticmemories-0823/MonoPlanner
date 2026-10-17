@@ -10,13 +10,6 @@ MAX_BODY = 8 * 1024 * 1024
 LOCAL_HOSTS = {'127.0.0.1', 'localhost', 'monoplanner.localhost'}
 
 
-def service_headers():
-    token = os.getenv('MONOPLANER_SERVICE_TOKEN', '')
-    if len(token) < 32:
-        raise RuntimeError('Start MonoPlanner through the local launcher.')
-    return {'X-MonoPlanner-Service': token}
-
-
 def local_address(value, port, *, origin=False):
     try:
         parsed = urlsplit(value if origin else 'http://' + value)

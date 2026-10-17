@@ -1,6 +1,5 @@
 """独立 Chatbot 图；工作请求和进度请求不会写入它的对话历史。"""
 
-from pathlib import Path
 from types import SimpleNamespace
 import json
 import logging

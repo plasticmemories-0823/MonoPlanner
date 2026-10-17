@@ -3,7 +3,7 @@
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
-from typing import Callable, Mapping, Protocol, Sequence
+from typing import Callable, Mapping
 
 
 TokenCount = Callable[[str], int]
@@ -148,14 +148,6 @@ class Chunk:
         """语义编码只保留有意义的来源头；版本与哈希在交付消息中完整保留。"""
         header = canonical({"path": self.path, "kind": self.kind, "symbol": self.symbol})
         return header + "\n" + self.text
-
-
-class VectorProvider(Protocol):
-    def search(self, query: Query, index, k: int) -> Sequence[tuple[str, float]]: ...
-
-
-class RerankProvider(Protocol):
-    def score(self, query: str, chunks: Sequence[Chunk]) -> Sequence[float]: ...
 
 
 @dataclass(frozen=True)

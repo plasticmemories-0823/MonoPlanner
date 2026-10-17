@@ -4,6 +4,9 @@ import ast
 from pathlib import PurePosixPath
 
 
+MAX_FILE_BYTES = 512 * 1024
+
+
 def _module(path):
     parts = list(PurePosixPath(path).with_suffix("").parts)
     if parts and parts[0] == "src":

@@ -12,7 +12,7 @@ import subprocess
 from threading import RLock
 
 from agent.execution.docker import runtime_profile, docker_executable
-from agent.storage.preferences import atomic_write, state_root
+from agent.storage.preferences import atomic_write
 
 
 class EnvironmentRequired(ValueError):
