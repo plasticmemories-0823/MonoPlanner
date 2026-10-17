@@ -10,7 +10,7 @@ import unittest
 from agent.rag.index import Index
 from agent.rag.retrieval import Retriever
 from agent.rag.types import Document, Query, RagConfig, Scope
-from tests.test_rag_retrieval import tokens
+from tests.test_rag_retrieval import result_text, tokens
 
 
 class UnifiedSearchTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class UnifiedSearchTests(unittest.TestCase):
         result = self.retrieve(text)
         self.assertEqual(result['query'], text)
         self.assertEqual(len(result['hits']), 1)
-        self.assertIn(text, result['hits'][0]['text'])
+        self.assertIn(text, result_text(result, result['hits'][0]))
 
     def test_no_missing_late_matches_past_bm25_top_k_and_duplicate_line_occurrences(self):
         self.add('one', 'needle ' * 230 + '\nlate needle')
@@ -79,8 +79,8 @@ class UnifiedSearchTests(unittest.TestCase):
         result = self.retrieve(query)
         self.assertEqual(len(result['hits']), 1)
         hit = result['hits'][0]
-        self.assertIn(query, hit['text'])
-        self.assertEqual(text[hit['start']:hit['end']], hit['text'])
+        self.assertIn(query, result_text(result, hit))
+        self.assertEqual(text[hit['start']:hit['end']], result_text(result, hit))
         for item in result['results']:
             self.assertEqual(item['text'], text[item['start']:item['end']])
 
@@ -148,7 +148,7 @@ class UnifiedSearchTests(unittest.TestCase):
         self.assertEqual(len(blank['hits']), 2)
         result = self.retrieve('needle')
         hit = result['hits'][0]
-        self.assertIn('needle', hit['text'])
+        self.assertIn('needle', result_text(result, hit))
         self.assertGreater(hit['start'], 4500)
         self.assertEqual(hit['match_start'], 5002)
         self.assertEqual(hit['line'], 1)
@@ -200,7 +200,7 @@ class UnifiedSearchTests(unittest.TestCase):
         self.assertEqual(self.index.stats()['chunks'], 0)
         result = self.retrieve('needle')
         self.assertEqual(len(result['hits']), 1)
-        self.assertIn('needle', result['hits'][0]['text'])
+        self.assertIn('needle', result_text(result, result['hits'][0]))
         self.assertEqual(result['hits'][0]['match_start'], text.index('needle'))
         self.assertTrue(result['scan_complete'])
         self.assertTrue(result['complete'])
@@ -208,14 +208,16 @@ class UnifiedSearchTests(unittest.TestCase):
             self.assertEqual(item['text'], text[item['start']:item['end']])
         self.assertEqual(self.index.stats()['chunks'], 0)
 
-    def test_metadata_only_small_source_retains_structural_parent_expansion(self):
+    def test_metadata_only_small_source_returns_hit_without_parent_expansion(self):
         text = 'def find():\n' + '    # preserved context\n' * 200 + '    return "needle"\n'
         document = Document('code', 'v', text, kind='code', path='find.py')
         self.documents['code'] = document
         self.index.upsert_documents([document], exact=True)
         result = self.retrieve('needle')
         self.assertEqual(len(result['hits']), 1)
-        self.assertEqual(result['results'][0]['text'], text)
+        self.assertEqual(result_text(result, result['hits'][0]), '    return "needle"')
+        self.assertNotIn('preserved context', json.dumps(result))
+        self.assertEqual(self.documents['code'].text, text)
         self.assertEqual(self.index.stats()['chunks'], 0)
 
     def test_many_occurrences_reuse_one_current_original_while_packing(self):
@@ -231,14 +233,14 @@ class UnifiedSearchTests(unittest.TestCase):
         self.assertLessEqual(tokens(result.message), 8192)
         self.assertTrue(json.loads(result.message)['next_cursor'])
 
-    def test_structural_chunk_metadata_failure_does_not_discard_literal_match(self):
+    def test_large_identifier_metadata_does_not_interfere_with_exact_match(self):
         text = 'def ' + 'f' * 2000 + '():\n    return 1\n\nneedle\n'
         document = Document('generated', 'v', text, kind='code', path='generated.py')
         self.documents['generated'] = document
         self.index.upsert_documents([document], exact=True)
         result = self.retrieve('needle')
         self.assertEqual(len(result['hits']), 1)
-        self.assertIn('needle', result['hits'][0]['text'])
+        self.assertIn('needle', result_text(result, result['hits'][0]))
         self.assertEqual(result['reasons'], [])
         self.assertTrue(result['scan_complete'])
 

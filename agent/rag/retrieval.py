@@ -8,13 +8,15 @@ from itertools import islice
 import math
 
 from agent.model.errors import ModelInterrupted
-from agent.rag.chunks import chunk_document
 from agent.rag.index import Index
 from agent.rag.types import (
-    CANDIDATE_MEMORY_BYTES, Document, Query, RetrievalResult, SourceReadBudgetExceeded,
+    CANDIDATE_MEMORY_BYTES, Query, RetrievalResult, SourceReadBudgetExceeded,
     TokenCount, canonical, guard_source_read,
 )
 from agent.task.control import check_interrupted
+
+
+FORMAT = "monoplanner-retrieval-excerpts-v2"
 
 
 class Retriever:
@@ -65,7 +67,7 @@ class Retriever:
 
     def _binding(self, query, snapshot):
         payload = {
-            "scope": self.index.scope.key,
+            "format": FORMAT, "scope": self.index.scope.key,
             "query": query.original_text if query.original_text is not None else query.text,
             "effective_query": query.text, "mode": query.mode,
             "source_versions": dict(query.source_versions),
@@ -159,7 +161,7 @@ class Retriever:
                 ranked.append((header, count, score))
         ranked.sort(key=lambda item: (-item[2], item[0].path, item[0].source_id))
         records, skipped, records_bytes, page_full = [], 0, 0, False
-        text, local_chunks, document = None, None, None
+        text = None
         for header, count, score in ranked:
             if skipped + count <= offset:
                 skipped += count
@@ -167,7 +169,7 @@ class Retriever:
             if len(records) == query.limit or page_full:
                 break
             try:
-                text, local_chunks, document = None, None, None
+                text = None
                 text = self._original(header, exact=True)
                 for position in self._positions(text, query.text):
                     if skipped < offset:
@@ -177,52 +179,17 @@ class Retriever:
                     preview_start = max(text.rfind("\n", 0, position) + 1, position - 96)
                     next_line = text.find("\n", end)
                     preview_end = min(len(text) if next_line < 0 else next_line, end + 96)
-                    chunk = self.index.matching_chunk(query, header.source_id, position, end)
-                    if chunk is None:
-                        # 精确索引仅存来源头。小型命中原件按需寻找结构，大原件直接引用窗口。
-                        if local_chunks is None:
-                            local_chunks = []
-                            if len(text.encode("utf-8")) <= min(
-                                2_000_000, self.index.config.max_document_bytes
-                            ):
-                                document = Document(
-                                    header.source_id, header.version, text, kind=header.kind,
-                                    path=header.path, run_id=header.run_id, timestamp=header.timestamp,
-                                )
-                                try:
-                                    local_chunks = chunk_document(
-                                        document, self.index.config, self.index.token_count
-                                    )
-                                except ModelInterrupted:
-                                    raise
-                                except ValueError:
-                                    # Embedding 元数据或分片约束不决定原件字面命中是否存在。
-                                    local_chunks = []
-                                finally:
-                                    document = None
-                        candidates = [item for item in local_chunks
-                                      if item.start <= position < item.end]
-                        chunk = min(candidates, key=lambda item: (
-                            item.end < end, item.end - item.start, item.id
-                        )) if candidates else replace(
-                            header, start=preview_start, end=preview_end,
-                            parent_start=preview_start, parent_end=preview_end,
-                            text=text[preview_start:preview_end],
-                            line_start=text.count("\n", 0, preview_start) + 1,
-                            line_end=text.count("\n", 0, max(preview_start, preview_end - 1)) + 1,
-                        )
-                    if chunk.end < end:
-                        same_parent = (chunk.parent_start <= preview_start
-                                       and preview_end <= chunk.parent_end)
-                        chunk = replace(
-                            chunk, start=preview_start, end=preview_end,
-                            text=text[preview_start:preview_end],
-                            parent_start=chunk.parent_start if same_parent else preview_start,
-                            parent_end=chunk.parent_end if same_parent else preview_end,
-                            symbol=chunk.symbol if same_parent else "",
-                            line_start=text.count("\n", 0, preview_start) + 1,
-                            line_end=text.count("\n", 0, max(preview_start, preview_end - 1)) + 1,
-                        )
+                    # 精确命中只引用含完整查询的原文窗口；不自动推测或展开所属父结构。
+                    identity = (f"{header.source_id}\0{header.version}\0{header.source_sha256}"
+                                f"\0{preview_start}:{preview_end}")
+                    chunk = replace(
+                        header, id=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+                        start=preview_start, end=preview_end,
+                        parent_start=preview_start, parent_end=preview_end,
+                        text=text[preview_start:preview_end], symbol="",
+                        line_start=text.count("\n", 0, preview_start) + 1,
+                        line_end=text.count("\n", 0, max(preview_start, preview_end - 1)) + 1,
+                    )
                     hit = {"source_id": header.source_id, "path": header.path,
                            "line": text.count("\n", 0, position) + 1,
                            "text": text[preview_start:preview_end],
@@ -250,7 +217,7 @@ class Retriever:
                 else:
                     reasons.append(f"source_unavailable:{type(error).__name__}")
                 break
-        text, local_chunks, document = None, None, None
+        text = None
         return self._pack(query, records, reasons, binding, offset, total,
                           {"exact": tuple(dict.fromkeys(chunk.id for chunk, _ in records))}, (),
                           scan_complete=not reasons, unavailable=unavailable)
@@ -312,16 +279,10 @@ class Retriever:
               rerank_scores, *, scan_complete, unavailable=None):
         unavailable = list(unavailable or ())
         config = self.index.config
-        selected, hits, continuation = [], [], []
+        selected, hits = [], []
         cached_key, cached_text = None, None
 
-        def marker(chunk, reason):
-            return {"source_id": chunk.source_id, "version": chunk.version,
-                    "source_sha256": chunk.source_sha256, "path": chunk.path,
-                    "range_unit": "unicode_codepoints", "read_line_offset": chunk.line_start - 1,
-                    "start": chunk.parent_start, "end": chunk.parent_end, "reason": reason}
-
-        def make_result(items, delivered_hits, pending):
+        def make_result(items, delivered_hits):
             evidence = "\n".join(item.text for item in items)
             paths = {item.path.replace("\\", "/") for item in items if item.path}
             symbols = {item.symbol for item in items if item.symbol}
@@ -331,13 +292,29 @@ class Retriever:
             kinds = tuple(kind for kind in query.required_kinds if kind not in {item.kind for item in items})
             diagnostics = tuple(dict.fromkeys(reasons))
             more = offset + len(delivered_hits) < total
-            complete = not (diagnostics or pending or more)
+            complete = not (diagnostics or more)
+            # 正文只交付一次；命中坐标引用合并后的同版本片段，供续读和引用核验。
+            compact_hits = []
+            for hit in delivered_hits:
+                source = (hit["source_id"], hit["version"], hit["source_sha256"])
+                excerpt = next(item for item in items
+                               if (item.source_id, item.version, item.source_sha256) == source
+                               and item.start <= hit["start"] < hit["end"] <= item.end)
+                compact_hits.append({**{key: value for key, value in hit.items() if key != "text"},
+                                     "result_id": excerpt.id})
+            excerpts = [
+                {key: value for key, value in item.payload().items()
+                 if key not in {"parent_start", "parent_end"}
+                 and (key not in {"symbol", "run_id", "timestamp"} or value)}
+                for item in items
+            ]
             payload = {
                 "query": query.original_text if query.original_text is not None else query.text,
-                "effective_query": query.text, "mode": query.mode, "hits": delivered_hits,
+                "format": FORMAT, "effective_query": query.text, "mode": query.mode,
+                "hits": compact_hits,
                 "next_cursor": self._cursor(binding, offset + len(delivered_hits)) if more else "",
                 "scan_complete": scan_complete, "complete": complete,
-                "truncated": bool(more or pending or any(
+                "truncated": bool(more or any(
                     hit.get("truncated", False) for hit in delivered_hits
                 )), "total_matches": total,
                 "ranking": "literal_bm25_k1_1.2_b_0.75" if query.mode == "exact" else "vector_rerank",
@@ -346,16 +323,18 @@ class Retriever:
                 "unavailable_source_count": len(unavailable),
                 "exact_current_version_hit": query.mode == "exact" and bool(delivered_hits),
                 "missing_entities": entities, "missing_kinds": kinds,
-                "results": [item.payload() for item in items], "continuation": pending,
+                "results": excerpts, "continuation": [],
                 "notice": (
-                    "Retrieved evidence is not proof of a conclusion. "
+                    "Search excerpts, not complete files or parent structures. "
+                    "Each hit references its result_id; read the original path and line range "
+                    "for surrounding context. Retrieved evidence is not proof of a conclusion. "
                     "Semantic retrieval is not a complete corpus scan."
                 ),
             }
             return canonical(payload), diagnostics, entities, kinds
 
-        def fits(items, delivered_hits, pending):
-            message = make_result(items, delivered_hits, pending)[0]
+        def fits(items, delivered_hits):
+            message = make_result(items, delivered_hits)[0]
             return self.token_count(message) <= config.message_token_limit
 
         for chunk, hit in records:
@@ -396,40 +375,23 @@ class Retriever:
                 "line_end": text.count("\n", 0, match_end) + 1,
                 "truncated": hit["start"] > first_line_start or hit["end"] < last_line_end,
             }
-            candidate, extra = chunk, []
-            structured = bool(chunk.symbol) or chunk.kind in {
-                "markdown", "documentation", "document", "log", "test_log",
-                "compile_error", "tool_result", "json",
-            }
-            if structured and (chunk.parent_start, chunk.parent_end) != (chunk.start, chunk.end):
-                candidate = replace(
-                    chunk, start=chunk.parent_start, end=chunk.parent_end,
-                    text=text[chunk.parent_start:chunk.parent_end],
-                    line_start=text.count("\n", 0, chunk.parent_start) + 1,
-                    line_end=text.count("\n", 0, max(chunk.parent_start, chunk.parent_end - 1)) + 1,
-                )
-            merged = self._merge(selected, candidate, {})
-            if candidate != chunk and not fits(merged, hits + [hit], continuation):
-                candidate = chunk
-                extra = [marker(chunk, "parent_exceeds_message_budget")]
-                merged = self._merge(selected, candidate, {})
-            pending = list({canonical(item): item for item in [*continuation, *extra]}.values())
-            if not fits(merged, hits + [hit], pending):
+            merged = self._merge(selected, chunk)
+            if not fits(merged, hits + [hit]):
                 break
-            selected, hits, continuation = merged, hits + [hit], pending
+            selected, hits = merged, hits + [hit]
 
-        message, diagnostics, entities, kinds = make_result(selected, hits, continuation)
+        message, diagnostics, entities, kinds = make_result(selected, hits)
         if records and not hits and not reasons:
             raise ValueError("The original match and required metadata cannot fit the message token limit.")
         if self.token_count(message) > config.message_token_limit:
             raise ValueError("Required retrieval metadata cannot fit the message token limit.")
-        incomplete = bool(diagnostics or continuation or offset + len(hits) < total)
+        incomplete = bool(diagnostics or offset + len(hits) < total)
         return RetrievalResult(message, tuple(selected), incomplete, diagnostics, entities, kinds,
-                               tuple(continuation), route_ids,
+                               (), route_ids,
                                query.mode == "exact" and bool(hits), rerank_scores)
 
     @staticmethod
-    def _merge(selected, candidate, sources):
+    def _merge(selected, candidate):
         result = []
         insertion = len(selected)
         remaining = list(selected)

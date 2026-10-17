@@ -607,7 +607,6 @@ def _retrieve(owner, sources, arguments, *, root, cache_root, repo, task_id, req
             return _index_unavailable(error, arguments)
         if semantic and not arguments['cursor']:
             ledger = RewriteLedger(Path(root) / 'rag' / 'rewrites.sqlite3')
-            routes = result.route_ids
             complete = not result.incomplete and not sources.reasons
             margin = (result.rerank_scores[0] - result.rerank_scores[1]
                       if len(result.rerank_scores) >= 2 else None)

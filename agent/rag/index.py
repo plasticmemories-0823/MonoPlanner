@@ -260,25 +260,6 @@ class Index:
         return [chunk for row in rows if row[0] is not None
                 and _allowed(chunk := Chunk(**json.loads(row[0])), query)]
 
-    def matching_chunk(self, query: Query, source_id: str, start: int, end: int):
-        """字面命中确认后才找引用块；跨块命中由调用方从原件构造范围。"""
-        with self._connection() as connection:
-            row = connection.execute(
-                "SELECT payload FROM chunks WHERE scope=? AND source_id=? AND version=? "
-                "AND CAST(json_extract(payload,'$.start') AS INTEGER)<=? "
-                "AND CAST(json_extract(payload,'$.end') AS INTEGER)>? "
-                "ORDER BY (CAST(json_extract(payload,'$.end') AS INTEGER)>=?) DESC, "
-                "CAST(json_extract(payload,'$.end') AS INTEGER) "
-                "- CAST(json_extract(payload,'$.start') AS INTEGER),id LIMIT 1",
-                (self.scope.key, source_id, query.source_versions[source_id], start, start, end),
-            ).fetchone()
-        if row is None:
-            return None
-        chunk = Chunk(**json.loads(row[0]))
-        if not _allowed(chunk, query):
-            raise ValueError("The original match is outside the authorized source scope.")
-        return chunk
-
     def vector_cache(self, model_id, chunks):
         result = {}
         estimated = 0

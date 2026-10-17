@@ -22,6 +22,16 @@ def tokens(value):
     return math.ceil(len(value.encode("utf-8")) / 4) + 2
 
 
+def result_text(body, hit):
+    """按命中引用找到唯一原文副本，再取该命中的展示区间。"""
+    item = next(item for item in body["results"] if item["id"] == hit["result_id"])
+    assert (item["source_id"], item["version"], item["source_sha256"]) == (
+        hit["source_id"], hit["version"], hit["source_sha256"],
+    )
+    assert item["start"] <= hit["start"] < hit["end"] <= item["end"]
+    return item["text"][hit["start"] - item["start"]:hit["end"] - item["start"]]
+
+
 class ChunkTests(unittest.TestCase):
     def test_python_preserves_functions_and_chinese_crlf_exactly(self):
         text = '# 中文\r\n@cache\r\ndef load():\r\n    return "原文"\r\n\r\ndef save():\r\n    pass\r\n'
@@ -283,16 +293,17 @@ class RetrievalTests(unittest.TestCase):
         result = self.retrieve(self.query(required_entities=(document.sha256, "auth/login")))
         self.assertEqual(result.missing_entities, (document.sha256, "auth/login"))
 
-    def test_required_symbol_uses_exact_parent_identity_when_body_is_partial(self):
+    def test_required_entities_do_not_infer_unseen_parent_symbols(self):
         text = "def authenticate():\n" + "    # unrelated filler\n" * 1800
         text += "    # unique_failure_marker\n    return False\n"
         self.add(Document("source:a", "v", text, "code", "auth/login.py"))
         result = self.retrieve(self.query(
             "unique_failure_marker", required_entities=("authenticate", "authentic")
         ))
-        self.assertTrue(result.continuation)
+        self.assertFalse(result.continuation)
+        self.assertFalse(result.incomplete)
         self.assertNotIn("def authenticate", "".join(item.text for item in result.chunks))
-        self.assertEqual(result.missing_entities, ("authentic",))
+        self.assertEqual(result.missing_entities, ("authenticate", "authentic"))
 
     def test_vector_ids_rechecked_and_reranker_orders_authorized_candidates(self):
         self.add(Document("a", "v", "failure alpha"))
@@ -338,36 +349,41 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(result.chunks, ())
         self.assertIn("source_unavailable:PermissionError", result.reasons)
 
-    def test_parent_expansion_merges_ranges_and_respects_whole_message_budget(self):
+    def test_exact_function_hit_does_not_expand_parent_despite_available_budget(self):
         text = "def function():\n" + "    # failure evidence\n" * 400 + "    pass\n"
         self.add(Document("a", "v", text, "code", "a.py"))
         result = self.retrieve(self.query("function"))
         self.assertEqual(len(result.chunks), 1)
-        self.assertEqual(result.chunks[0].text, text)
+        self.assertEqual(result.chunks[0].text, "def function():")
         self.assertLessEqual(tokens(result.message), 8192)
-        self.assertEqual(json.loads(result.message)["results"][0]["text"], text)
+        body = json.loads(result.message)
+        self.assertEqual(result_text(body, body["hits"][0]), "def function():")
+        self.assertNotIn("failure evidence", result.message)
 
-    def test_over_budget_parent_retains_hit_and_continuation_not_hidden_truncation(self):
+    def test_large_parent_stays_readable_without_being_implicitly_returned(self):
         text = "def function():\n" + "    # failure evidence\n" * 1800 + "    pass\n"
         self.add(Document("a", "v", text, "code", "a.py"))
         result = self.retrieve(self.query("function"))
         self.assertLessEqual(tokens(result.message), 8192)
-        self.assertTrue(result.continuation)
-        self.assertTrue(result.incomplete)
+        self.assertFalse(result.continuation)
+        self.assertFalse(result.incomplete)
         for chunk in result.chunks:
             self.assertEqual(chunk.text, text[chunk.start:chunk.end])
-        self.assertTrue(any(item["reason"] == "parent_exceeds_message_budget" for item in result.continuation))
-        for marker in result.continuation:
-            self.assertEqual(marker["range_unit"], "unicode_codepoints")
-            self.assertEqual(marker["path"], "a.py")
-            self.assertGreaterEqual(marker["read_line_offset"], 0)
+        body = json.loads(result.message)
+        self.assertEqual(body["total_matches"], 1)
+        hit = body["hits"][0]
+        self.assertEqual((hit["path"], hit["line"], hit["version"]), ("a.py", 1, "v"))
+        self.assertEqual(hit["source_sha256"], hashlib.sha256(text.encode()).hexdigest())
+        self.assertEqual(result_text(body, hit), "def function():")
+        self.assertIn("read the original path and line range", body["notice"])
+        self.assertEqual(self.documents[("a", "v")], text)
 
     def test_markdown_match_does_not_expand_a_whole_heading_section(self):
         text = "# Heading\n\nmatched failure paragraph\n\nUnrelated deployment details.\n"
         self.add(Document("doc", "v", text, "document", "readme.md"))
         result = self.retrieve(self.query("failure"))
         self.assertEqual(len(result.chunks), 1)
-        self.assertEqual(result.chunks[0].text, "matched failure paragraph\n\n")
+        self.assertEqual(result.chunks[0].text, "matched failure paragraph")
         self.assertNotIn("Unrelated deployment", result.message)
 
     def test_overlap_bridging_multiple_ranges_produces_one_exact_union(self):
@@ -375,7 +391,7 @@ class RetrievalTests(unittest.TestCase):
         base = chunk_document(document, RagConfig(), tokens)[0]
         def part(start, end):
             return replace(base, start=start, end=end, text=document.text[start:end])
-        result = Retriever._merge([part(0, 10), part(20, 30)], part(5, 25), {})
+        result = Retriever._merge([part(0, 10), part(20, 30)], part(5, 25))
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].text, document.text[:30])
 
