@@ -49,6 +49,19 @@ def code_key(root=None):
         'agent/model/payload.py',
         'agent/model/tool_payloads.py',
         'agent/model/tool_results.py',
+        'agent/rag/__init__.py',
+        'agent/rag/types.py',
+        'agent/rag/chunks.py',
+        'agent/rag/index.py',
+        'agent/rag/retrieval.py',
+        'agent/rag/integration.py',
+        'agent/rag/models.py',
+        'agent/rag/model_worker.py',
+        'agent/rag/rewrite.py',
+        'agent/rag/tuning/__init__.py',
+        'agent/rag/tuning/policy.py',
+        'agent/rag/tuning/controller.py',
+        'agent/rag/tuning/laya.py',
         'agent/server/__init__.py',
         'agent/task/control.py',
         'agent/storage/requests.py',
@@ -215,6 +228,26 @@ def restore(loop, stored, identity):
     if stored.get('assistant_running'):
         stored.update(
             status='execution_unknown', reason='Interrupted assistant operation; no automatic retry'
+        )
+        return loop.result()
+    if stored.get('rag_running') or stored.get('rag_request_pending'):
+        pending = stored.get('rag_request_pending')
+        if pending:
+            reserved = pending['reservation']
+            loop.budget.unknown_usage_steps += 1
+            loop.budget.unknown_reserved_tokens += reserved
+            loop.budget.inflight_reserved_tokens = max(
+                0, loop.budget.inflight_reserved_tokens - reserved
+            )
+            stored['rag_unknown_request'] = pending
+            stored['rag_request_pending'] = None
+            stored['budget'] = {
+                field.name: getattr(loop.budget, field.name) for field in fields(loop.budget)
+            }
+            loop.persist('rag_request_unknown', {'call': pending['call']})
+        stored.update(
+            status='execution_unknown',
+            reason='Interrupted retrieval or rewrite; no automatic resend',
         )
         return loop.result()
     if stored.get('web_running') or stored.get('web_request_pending'):

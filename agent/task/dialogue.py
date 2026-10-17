@@ -15,6 +15,11 @@ class WebReply:
     calls: list
 
 
+@dataclass(frozen=True)
+class RetrievalReply:
+    calls: list
+
+
 PROGRESS = {
     'model_request_started': ('model', '正在等待模型回复'),
     'model_response_received': ('model_finished', '模型回复已保存'),
@@ -23,6 +28,8 @@ PROGRESS = {
     'step_finished': ('operation_finished', '操作结果已保存'),
     'assistant_started': ('executing', '正在查询资料或运行已有任务'),
     'assistant_finished': ('operation_finished', '操作结果已保存'),
+    'rag_started': ('executing', '正在检索项目证据'),
+    'rag_completed': ('operation_finished', '检索证据已保存'),
     'acceptance_trial_started': ('acceptance', '正在原始源码上试跑验收'),
     'final_acceptance_started': ('acceptance', '正在运行实际验收'),
     'final_acceptance_finished': ('acceptance_finished', '实际验收结果已保存'),
@@ -99,6 +106,7 @@ def apply_controls(loop):
             loop.state.setdefault('user_updates', []).append(
                 {'id': control['id'], 'text': control['text']}
             )
+            loop.state['rag_request_id'] = control['id']
             loop.state.setdefault('public_events', []).append(
                 {'id': control['id'], 'type': 'human', 'content': control['text']}
             )

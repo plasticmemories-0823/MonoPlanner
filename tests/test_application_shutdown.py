@@ -306,3 +306,25 @@ def test_environment_prepare_is_fenced_but_cancel_remains_allowed(application, m
         jobs.assert_not_called()
         result = asyncio.run(server.project_environment(request('cancel')))
         assert result.status_code == 200 and cancelled == ['sample-project']
+
+
+def test_shutdown_tracks_background_index_after_chat_has_returned(application):
+    from test_rag_models import BlockingEmbedding, start_background
+    from agent.rag.models import pending_jobs, background_scope, ModelUnavailable
+
+    store, conversation, scheduler = application
+    model = BlockingEmbedding()
+    start_background(store.root, 'owned-task', model)
+    try:
+        scheduler.shutdown.start()
+        state = scheduler.shutdown.status()
+        assert not state['complete']
+        assert 'rag-index:owned-task' in state['pending_operations']
+        with pytest.raises(ModelUnavailable, match='closed'):
+            with background_scope(store.root, 'another-task'):
+                pytest.fail('Closing root admitted a new index build')
+        model.release.set()
+        assert wait_complete(scheduler.shutdown)['termination_confirmed']
+        assert not pending_jobs(store.root)
+    finally:
+        model.release.set()

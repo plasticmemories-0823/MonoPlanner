@@ -88,6 +88,9 @@ class Scheduler:
                 interrupt(self.store.root, owner, 'pause', fault['id'])
             except Exception:
                 logging.getLogger(__name__).exception('Storage-fault cancellation was not confirmed')
+        from agent.rag.models import cancel_jobs
+
+        cancel_jobs(self.store.root, close=True)
         self.wake.set()
         return fault
 
@@ -193,10 +196,13 @@ class Scheduler:
         self._release_if_idle()
 
     def _release_if_idle(self):
+        from agent.rag.models import pending_jobs
+
+        rag_pending = pending_jobs(self.store.root)
         with self.lock:
             if (self.shutdown.finished.is_set() and self.shutdown.controls_idle()) and not (
                 self.starting or self.chats or self.works or self.titles or self.reporting
-                or self.controls_inflight
+                or self.controls_inflight or rag_pending
             ):
                 if self.lease:
                     self.lease.close()
@@ -215,6 +221,9 @@ class Scheduler:
             interrupt(self.store.root, 'chat:' + target[0], 'pause', target[1])
             if target[2]:
                 interrupt(self.store.root, target[2], 'pause', target[1])
+                from agent.rag.models import cancel_jobs
+
+                cancel_jobs(self.store.root, [target[2]])
         if self.storage_error():
             if target:
                 return self._emergency_pause(target)
@@ -255,6 +264,13 @@ class Scheduler:
     def _control(self, conversation, task, command, callback, persist=True):
         try:
             result = callback(task, command['id'])
+            if command['kind'] == 'pause':
+                from agent.rag.models import cancel_jobs
+
+                rag = cancel_jobs(self.store.root, [task], timeout=2)
+                result = dict(result) if isinstance(result, dict) else {}
+                result['termination'] = [*result.get('termination', []),
+                                         {'resource': 'rag-index', 'stopped': rag['stopped']}]
             if not persist:
                 return
             termination = result.get('termination', []) if isinstance(result, dict) else []

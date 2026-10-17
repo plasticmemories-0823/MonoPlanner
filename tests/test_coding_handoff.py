@@ -1,5 +1,6 @@
 """验证恢复后的资料交接和单一执行方持续工作；不调用模型服务。"""
 
+import ast
 import json
 import subprocess
 import unittest
@@ -47,8 +48,17 @@ class CodingHandoffTests(unittest.TestCase):
         )
         self.assertEqual(
             [t.name for t in CODING_TOOLS],
-            [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch'],
+            [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch', 'retrieve_evidence'],
         )
+        # 新增独立检索入口不改变原四工具的名称、描述、参数声明或函数体。
+        baseline = ast.parse(subprocess.check_output(
+            ['git', 'show', 'HEAD:agent/model/tools.py'], cwd=PROJECT_ROOT
+        ).decode('utf-8-sig'))
+        current = ast.parse((PROJECT_ROOT / 'agent/model/tools.py').read_text('utf-8-sig'))
+        definitions = lambda tree: {node.name: ast.dump(node) for node in tree.body
+                                    if isinstance(node, ast.FunctionDef)}
+        for tool in WORK_TOOLS:
+            self.assertEqual(definitions(baseline)[tool.name], definitions(current)[tool.name])
         self.assertNotIn('submit_plan', [t.name for t in CHAT_TOOLS])
 
 

@@ -48,7 +48,7 @@ def task_paths(store, tasks, check_state):
             state = checked(target, *row)['state'] if row else {}
             if (any(state.get(key) for key in ('request_pending', 'running_step',
                     'verification_running', 'acceptance_running', 'assistant_running',
-                    'web_running', 'web_request_pending'))
+                    'web_running', 'web_request_pending', 'rag_running', 'rag_request_pending'))
                     or (state.get('compaction_pending') or {}).get('stage') == 'committing'):
                 raise Conflict('任务仍有进行中或结果不明的操作，不能删除。')
     return paths
@@ -118,6 +118,10 @@ def cleanup(store, conversation, tasks, retain_environment=False):
                         or linked(path) or linked(parent)):
                     raise ValueError('预览路径超出保存范围，未进行删除。')
                 previews.append(path)
+    from agent.rag.models import cancel_jobs
+
+    if not cancel_jobs(store.root, tasks, close=True, timeout=2)['stopped']:
+        raise Conflict('Background retrieval has not stopped; task records were preserved.')
     for task in tasks:
         result = release_task_resources('task:' + task, completed=True, root=store.root,
                                         docker=delete_owned_docker_resource)

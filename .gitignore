@@ -41,3 +41,7 @@ htmlcov/
 /launcher/runtime/
 /dist/
 /.next/
+# Experimental local dependencies and build output (not source).
+/.rag-deps/
+/.rag-models/
+/MonoPlanner.exe

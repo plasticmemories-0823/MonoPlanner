@@ -1,5 +1,7 @@
 # MonoPlanner 1.0
 
+> 本分支是独立RAG实验版；功能、模型配置及验证限制见 [实验说明](docs/rag-experiment.md)。正式目录及发布包保持不变。
+
 MonoPlanner 是面向 Windows 本机使用的 AI 助手，可讨论需求、查询授权资料、运行项目已有任务，并在 Docker 中修改和验证代码。目前支持 DeepSeek Flash。
 
 ![MonoPlanner 工作界面](docs/assets/workspace.png)

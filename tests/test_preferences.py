@@ -156,5 +156,6 @@ class PreferencesTests(unittest.TestCase):
                 'open_file',
                 'launch_application',
                 'request_file_operation',
+                'retrieve_evidence',
             ],
         )

@@ -23,7 +23,11 @@ class GeneralAssistantTests(unittest.TestCase):
 
 
     def test_fixed_tools_and_aggregate_parameter_feedback(self):
-        self.assertEqual(len(CHAT_TOOLS), 11)
+        self.assertEqual(tuple(tool.name for tool in CHAT_TOOLS), (
+            'start_work', 'web_search', 'web_fetch', 'list_files', 'read_file', 'search_files',
+            'run_existing', 'list_applications', 'open_file', 'launch_application',
+            'request_file_operation', 'retrieve_evidence',
+        ))
         for schema in ASSISTANT_SCHEMA.values():
             self.assertFalse(schema['additionalProperties'])
             self.assertEqual(set(schema['required']), set(schema['properties']))

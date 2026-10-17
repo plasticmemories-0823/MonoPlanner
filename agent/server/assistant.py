@@ -43,6 +43,9 @@ def validate(name, args):
 
 def invoke(loop, call, folder, history):
     name, args = call['name'], call['args']
+    if name == 'retrieve_evidence':
+        # 此入口没有当前任务的版本及请求身份，不能把额外授权目录冒充 RAG 资料源。
+        raise ValueError('retrieve_evidence requires the bound project retrieval service.')
     if name in WEB_NAMES:
         if not loop.runtime_settings.get('online'):
             raise ValueError('Networking is disabled for this task')

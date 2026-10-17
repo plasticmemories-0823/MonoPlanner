@@ -189,10 +189,13 @@ class Chatbot:
                 'approve work. Never claim success unless status is verified_success. '
                 'Do not quote private reasoning, test code, credentials or internal paths.'
             )
+        from agent.rag.integration import RAG_GUIDANCE
+
         return (
             (PROJECT_ROOT / 'resources/prompts/frontdesk.txt').read_text('utf-8')
             + '\nSelected workspace: ' + (value['repo'] or '(none)')
             + '\nWeb tools enabled: ' + str(value['runtime_settings'].get('online', False))
+            + RAG_GUIDANCE
         )
 
     def _respond(self, state):
@@ -285,6 +288,10 @@ class Chatbot:
                                    usage=response.usage_metadata,
                                    seconds=time.monotonic() - started)
             if not progress:
+                from agent.rag.integration import audit_chat_citations
+
+                audit_chat_citations(self, conversation, raw, messages, call)
+            if not progress:
                 # 最后一段追加一次；不反复覆盖整个累积思考正文。
                 display('completed', ''.join(fragments) if fragments else (
                         response.additional_kwargs.get('reasoning_content', '')
@@ -332,8 +339,13 @@ class Chatbot:
             self._archive_tool_result(conversation, operation, call, result)
             visible = normalize_result(call['name'], result,
                                        project=self.store.get(conversation)['repo'])
-            message = message_to_dict(ToolMessage(content=encode(visible), name=call['name'],
-                                                  tool_call_id=call['id']))
+            if call['name'] == 'retrieve_evidence':
+                from agent.rag.integration import delivery
+
+                message = delivery(visible, call)
+            else:
+                message = message_to_dict(ToolMessage(content=encode(visible), name=call['name'],
+                                                      tool_call_id=call['id']))
             self.store.model_message(conversation, lane,
                                       state['call_id'] + ':tool:' + str(index), message)
             if finished:
@@ -381,6 +393,14 @@ class Chatbot:
                             or not 1 <= args['limit'] <= 50):
                         raise ValueError('Expected after>=0 and limit 1..50')
                     result = self.work_facts(conversation, args['after'], args['limit'])
+                elif name == 'retrieve_evidence':
+                    from agent.rag.integration import retrieve_chat
+
+                    self.store.record_event(conversation, 'chat_tool_started', {
+                        'name': name, 'id': state['call_id'] + '-' + str(index),
+                    })
+                    finished = True
+                    result = retrieve_chat(self, conversation, state['command']['id'], args)
                 elif name == 'start_work':
                     if (set(args) != {'project_path', 'create'} or len(calls) != 1
                             or not isinstance(args['project_path'], str)

@@ -819,7 +819,8 @@ def test_new_title_late_result_cannot_resurrect_a_purged_conversation(setup):
         assert db.execute('SELECT COUNT(*) FROM app_calls').fetchone()[0] == 0
 
 
-def test_new_purge_checks_private_unknown_operations_and_keeps_user_workspace(setup, monkeypatch):
+@pytest.mark.parametrize('pending', ['request_pending', 'rag_running', 'rag_request_pending'])
+def test_new_purge_checks_private_unknown_operations_and_keeps_user_workspace(setup, monkeypatch, pending):
     store, conversation, repo = setup
     from agent.storage.history import LocalHistory
 
@@ -830,7 +831,7 @@ def test_new_purge_checks_private_unknown_operations_and_keeps_user_workspace(se
     store.work_state(task, 'paused')
     history = LocalHistory(store.root / 'tasks' / task)
     with history.lease():
-        history.record({'history': [], 'request_pending': {'call': 1}}, 'unknown', {})
+        history.record({'history': [], pending: {'call': 1}}, 'unknown', {})
     history.close()
     (repo / 'keep.txt').write_text('user project')
     store.chat_state(conversation, 'chat_complete')
@@ -1041,3 +1042,49 @@ def test_project_context_reads_can_be_batched_without_losing_tool_results(setup)
     assert set(results) == {'location', 'status'}
     assert results['location']['workspace'] == str(repo)
     assert results['location']['current_project'] is None and results['status'] is None
+
+
+def test_purge_stops_background_index_before_removing_task_cache(setup, monkeypatch):
+    from test_rag_models import BlockingEmbedding, start_background
+    from agent.rag import models
+    from agent.application import purge
+
+    store, conversation, repo = setup
+    item = command()
+    store.submit(conversation, item)
+    task = store.create_work(conversation, item['id'])['task_id']
+    store.command_state(conversation, item['id'], 'applied')
+    store.work_state(task, 'paused')
+    store.chat_state(conversation, 'chat_complete')
+    store.visibility(conversation, 'deleted')
+    model = BlockingEmbedding()
+    path = start_background(store.root, task, model)
+    scheduler = Scheduler(store)
+    remove = purge.remove_directory
+
+    def checked_remove(target):
+        assert not models.pending_jobs(store.root)
+        with pytest.raises(models.ModelUnavailable, match='closed'):
+            with models.background_scope(store.root, task):
+                pytest.fail('Purged task can still dispatch a background build')
+        return remove(target)
+
+    monkeypatch.setattr(purge, 'remove_directory', checked_remove)
+    cancel = models.cancel_jobs
+    stops = []
+    def release_on_cancel(root, task_ids=None, **kwargs):
+        result = cancel(root, task_ids, **{**kwargs, 'timeout': 0})
+        if kwargs.get('close') and task_ids == [task]:
+            stops.append(result['stopped'])
+            model.release.set()
+        return cancel(root, task_ids, **kwargs)
+    monkeypatch.setattr(models, 'cancel_jobs', release_on_cancel)
+    try:
+        assert scheduler.purge(conversation)['deleted']
+        assert stops == [False]
+        assert not path.parents[2].exists()
+        assert repo.exists()
+    finally:
+        model.release.set()
+        models.cancel_jobs(store.root, [task], close=True, timeout=2)
+        scheduler.close()

@@ -32,6 +32,7 @@ class TaskDispatch:
             "finish_rejection": self.finish_rejection,
             "execute_plan": self.execute_plan,
             "resume_web": self.resume_web,
+            "retrieve_evidence": self.retrieve_evidence,
             "release_candidate": self.release_candidate,
             "request_plan": self.request_plan,
             "route_response": self.route_response,
@@ -102,6 +103,7 @@ class TaskDispatch:
         for field, action in (
             ("pending", "execute_plan"),
             ("web_pending", "resume_web"),
+            ("rag_pending", "retrieve_evidence"),
             ("acceptance_release", "release_candidate"),
         ):
             if owner.state.get(field):
@@ -118,6 +120,12 @@ class TaskDispatch:
         from agent.execution.web import execute_calls
 
         execute_calls(self.owner, self.owner.state["web_pending"]["response"])
+
+    def retrieve_evidence(self, state):
+        from agent.rag.integration import execute_work_retrieval
+
+        response = None if self.owner.state.get('rag_pending') else state['response']
+        execute_work_retrieval(self.owner, response)
 
     def release_candidate(self, state):
         release = self.owner.state["acceptance_release"]
@@ -141,6 +149,8 @@ class TaskDispatch:
             action = "reply_text"
         elif isinstance(plan, dialogue.WebReply):
             action = "reply_web"
+        elif isinstance(plan, dialogue.RetrievalReply):
+            action = "retrieve_evidence"
         elif isinstance(plan, revisions.Review):
             action = "review_acceptance"
         elif plan.kind == "blocked":

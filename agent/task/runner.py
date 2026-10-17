@@ -54,6 +54,7 @@ class TaskRunner:
         control_source=None,
         runtime_settings=None,
         work_rules_factory=None,
+        user_request_id=None,
     ):
         self.interactive, self.yield_boundary = interactive, yield_boundary
         self.event_sink, self.control_source = event_sink, control_source
@@ -74,6 +75,7 @@ class TaskRunner:
         self.preparation, self.preparation_errors = None, []
         self.runtime_settings = dict(runtime_settings or {})
         self.work_rules_factory = work_rules_factory
+        self.user_request_id = user_request_id
         from agent.model.tools import CODING_TOOLS
 
         self.tools = CODING_TOOLS
@@ -169,38 +171,43 @@ class TaskRunner:
     # 模型请求的预算、记录与异常结算
     # ========================================================================
     def request_model(self, messages, purpose):
+        retrieval_rewrite = purpose == 'rag_rewrite'
+        request_tools = () if retrieval_rewrite else self.tools
+        pending_field = 'rag_request_pending' if retrieval_rewrite else 'request_pending'
         selected = configure_call(
-            self.model.bind_tools(self.tools),
+            self.model.bind_tools(request_tools),
             purpose,
             timeout=min(90, self.budget.remaining_time() or 90),
         )
         cap = getattr(selected, "max_output_tokens", 256000)
         cap = cap if type(cap) is int else 256000
-        if purpose != 'compaction' and self.state.get('baseline') and self.environment is not None:
+        if (purpose != 'compaction' and not retrieval_rewrite
+                and self.state.get('baseline') and self.environment is not None):
             source_runtime.begin(self)
 
         # ========================================================================
         # 发送前预留额度并保存请求原件
         # ========================================================================
         ticket = self.budget.reserve_request(
-            request_reservation(messages, self.tools, cap), purpose=purpose
+            request_reservation(messages, request_tools, cap), purpose=purpose
         )
         folder = self.root / "requests" / ("call-%04d" % ticket.call_id)
         from agent.storage.requests import save_request
 
         save_request(self.root, folder, messages_to_dict(messages), purpose, self.history_store)
-        self.state["request_pending"] = {
+        self.state[pending_field] = {
             "call": ticket.call_id,
             "reservation": ticket.reserved_tokens,
             "purpose": purpose,
         }
-        self.state['context_usage'] = {
-            'used_tokens': estimate_input_tokens(messages, self.tools),
-            'window_tokens': CONTEXT_WINDOW_TOKENS,
-            'estimated': True,
-            'call': ticket.call_id,
-        }
-        self.persist("model_request_started", self.state["request_pending"])
+        if not retrieval_rewrite:
+            self.state['context_usage'] = {
+                'used_tokens': estimate_input_tokens(messages, self.tools),
+                'window_tokens': CONTEXT_WINDOW_TOKENS,
+                'estimated': True,
+                'call': ticket.call_id,
+            }
+        self.persist("model_request_started", self.state[pending_field])
 
         # ========================================================================
         # 记录实际调用时长，按需展示思考片段
@@ -209,7 +216,8 @@ class TaskRunner:
         live = None
         received = False
         ending = 'unknown'
-        if self.event_sink and callable(getattr(type(selected), 'invoke_with_progress', None)):
+        if (not retrieval_rewrite and self.event_sink
+                and callable(getattr(type(selected), 'invoke_with_progress', None))):
             from agent.storage.live_reasoning import LiveReasoning
 
             public = self.state.get('public_events', [])
@@ -242,7 +250,7 @@ class TaskRunner:
                 )
             else:
                 self.budget.cancel_request(ticket)
-            self.state['request_pending'] = None
+            self.state[pending_field] = None
             if purpose == 'compaction':
                 # 尚未提交摘要，保留原始请求视图；
                 # 后续明确继续时可以重新开始生成摘要。
@@ -266,17 +274,22 @@ class TaskRunner:
             raise
         except ModelRequestNotSent:
             self.budget.cancel_request(ticket)
-            self.state["request_pending"] = None
+            self.state[pending_field] = None
             self.persist("model_request_not_sent")
             raise
         except ModelResponseNotSaved as exc:
             self.budget.settle_request(ticket, exc.response)
-            self.state["request_pending"] = None
+            self.state[pending_field] = None
             self.persist("model_recording_error")
             raise
         except Exception:
             self.budget.settle_request(ticket, None)
-            self.state["request_pending"] = None
+            self.state[pending_field] = None
+            if retrieval_rewrite:
+                self.state.setdefault('model_usage', []).append({
+                    'call': ticket.call_id, 'purpose': purpose, 'usage': None,
+                    'seconds': time.monotonic() - model_started,
+                })
             self.persist("model_request_error_unknown_usage")
             raise
         finally:
@@ -299,20 +312,30 @@ class TaskRunner:
             }
         )
         usage = response.usage_metadata
-        if usage and all(type(usage.get(k)) is int for k in ('input_tokens', 'output_tokens')):
+        if (not retrieval_rewrite and usage
+                and all(type(usage.get(k)) is int for k in ('input_tokens', 'output_tokens'))):
             self.state['context_usage'].update(
                 used_tokens=usage['input_tokens'] + usage['output_tokens'], estimated=False
             )
         raw = message_to_dict(response)
         save(folder / "response.json", raw)
-        self.state["request_pending"] = None
-        if purpose == 'compaction':
+        self.state[pending_field] = None
+        if retrieval_rewrite:
+            self.state['rag_rewrite_response'] = {
+                'call': ticket.call_id,
+                'record': (folder / 'response.json').relative_to(self.root).as_posix(),
+            }
+        elif purpose == 'compaction':
             self.state['compaction_pending'].update(
                 stage='response_saved', response=raw, call=ticket.call_id
             )
         else:
             self.state["response_pending"] = raw
         self.persist("model_response_received", {"call": ticket.call_id})
+        if not retrieval_rewrite and purpose != 'compaction':
+            from agent.rag.integration import audit_work_citations
+
+            audit_work_citations(self, raw, messages, folder)
         if live:
             ending = (
                 'interrupted'
@@ -320,11 +343,11 @@ class TaskRunner:
                 else 'completed'
             )
             live.finish(ending, response.additional_kwargs.get('reasoning_content', ''))
-        if purpose != 'compaction':
+        if purpose != 'compaction' and not retrieval_rewrite:
             from agent.task.output_limit import guard
 
             guard(self, raw)
-        if self.state.get('baseline') and self.environment is not None:
+        if not retrieval_rewrite and self.state.get('baseline') and self.environment is not None:
             source_runtime.collect(self)
         return raw
 
@@ -344,6 +367,9 @@ class TaskRunner:
         if finish in {"length", "content_filter", "aborted", "insufficient_system_resource"}:
             raise ValueError("Incomplete model response: " + str(finish))
         calls = response.tool_calls
+        if (len(calls) == 1 and not response.invalid_tool_calls
+                and calls[0]['name'] == 'retrieve_evidence'):
+            return dialogue.RetrievalReply(calls), raw
         if (
             calls
             and not response.invalid_tool_calls
@@ -628,6 +654,7 @@ class TaskRunner:
             "pending": None,
             "running_step": None,
             "request_pending": None,
+            "rag_request_id": self.user_request_id or ('task:' + self.root.name),
         }
         self.state.update(
             identity=self.identity,
@@ -635,6 +662,11 @@ class TaskRunner:
             code_key=self.code_key,
             rules=self.rules,
         )
+        from agent.rag.integration import RAG_GUIDANCE, bind_work
+
+        self.rules += RAG_GUIDANCE
+        self.state['rules'] = self.rules
+        bind_work(self)
         self.persist("task_started")
         return self._drive()
 

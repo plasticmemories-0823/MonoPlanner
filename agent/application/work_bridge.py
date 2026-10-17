@@ -29,7 +29,7 @@ _owners = {}
 _owners_lock = RLock()
 _ACTIVE_OPERATIONS = (
     "running_step", "verification_running", "acceptance_running", "assistant_running",
-    "web_running",
+    "web_running", "rag_running", "rag_request_pending",
 )
 
 
@@ -345,6 +345,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                 state_dir=directory, interactive=True, yield_boundary=False,
                 event_sink=lambda event: None, emit=emit, control_source=controls,
                 runtime_settings=settings, work_rules_factory=coding_rules,
+                user_request_id=data.get("input_id", data["task_id"]),
                 pause_after_steps=data.get("pause_after_steps"),
             )
             owner["runner"] = runner
