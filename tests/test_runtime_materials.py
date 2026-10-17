@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from agent.execution.local import LocalEnvironment
 from eval.swebench_runner import prepare_base_checkout, record_initial_workspace
@@ -164,23 +164,17 @@ class RuntimeMaterialsTests(unittest.TestCase):
             '',
         )
 
-    def test_chat_bootstrap_probe_and_acceptance_copy_keep_ignored_runtime_files(self):
-        from tests.legacy.runtime import ConversationRunner
+    def test_kernel_initialization_probe_and_acceptance_copy_keep_ignored_runtime_files(self):
+        from agent.task.runner import TaskRunner
+        from agent.task.budget import StepBudget
+        from tests.fixtures.models import BlockedModel
         from agent.execution.docker import DockerEnvironment
         from agent.execution.probe_batch import ProbeBatch
 
         environment = self.task_environment()
-        runner = object.__new__(ConversationRunner)
-        runner.environment, runner.root = environment, environment.binding_path.parent
-        runner.state = {
-            'history': [],
-            'request': 'Fix a normal code issue',
-            'public_conversation': [],
-        }
-        runner.rules, runner.runtime_settings, runner.history_store = 'chat rules', {}, None
-        runner.optimize_source = True
-        runner.activate, runner.initial_material, runner.persist = lambda: None, lambda: {}, Mock()
-        runner.bootstrap_work()
+        runner = TaskRunner(BlockedModel(), environment, state_dir=self.root / 'kernel-state')
+        result = runner.run([], 'Fix a normal code issue', StepBudget(max_steps=2))
+        self.assertEqual(result['status'], 'task_blocked')
         expected = set(runtime_inventory(self.repo)['files'])
         self.assertTrue(expected <= set(runner.baseline.files))
         manifest = json.loads(runner.baseline.manifest_path.read_text())

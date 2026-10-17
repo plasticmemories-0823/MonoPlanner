@@ -213,12 +213,20 @@ def finish_plan(self, outcome):
         if self.state.get("active_acceptance"):
             result["acceptance_trial_id"] = self.state["active_acceptance"]["id"]
     save(self.root / "plans" / pending["id"] / "result.json", result)
+    from agent.model.tool_payloads import project
+    from agent.model.tool_results import normalize_result
+
+    normalized = normalize_result(
+        "submit_plan", result, source_version=self.state.get("source"),
+        project=getattr(getattr(self, "environment", None), "repo_root", None),
+    )
+    delivered = project(self, normalized)
     self.state["history"].extend(
         [
             pending["response"],
             message_to_dict(
                 ToolMessage(
-                    content=json.dumps(result, ensure_ascii=False),
+                    content=json.dumps(delivered, ensure_ascii=False),
                     name=pending["response"]["data"]["tool_calls"][0]["name"],
                     tool_call_id=pending["response"]["data"]["tool_calls"][0]["id"],
                 )

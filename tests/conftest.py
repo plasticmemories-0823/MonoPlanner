@@ -13,7 +13,6 @@ def offline_conversation_service(tmp_path, monkeypatch):
     )
     if 'MONOPLANER_STATE_DIR' not in os.environ:
         monkeypatch.setenv('MONOPLANER_STATE_DIR', str(tmp_path / 'conversation-state'))
-    from tests.legacy import server_titles as titles
 
     class OfflineTitleModel:
         def invoke(self, messages):
@@ -28,7 +27,6 @@ def offline_conversation_service(tmp_path, monkeypatch):
                 },
             )
 
-    monkeypatch.setattr(titles, 'model_factory', OfflineTitleModel)
     from agent.application import titles as application_titles
 
     monkeypatch.setattr(application_titles, 'model_factory', OfflineTitleModel)

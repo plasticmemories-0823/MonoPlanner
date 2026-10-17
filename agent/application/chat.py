@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import json
 import logging
+import os
 import time
 import uuid
 
@@ -16,10 +17,13 @@ from typing_extensions import TypedDict
 
 from agent.model.client import create_model, configure_call
 from agent.model.tools import CHAT_TOOLS
+from agent.model.tool_results import normalize_result
 from agent.server.assistant import invoke as invoke_assistant
 from agent.settings import load_settings
 from agent.storage.permissions import Permissions
 from agent.storage.read_sources import ReadSources
+from agent.storage.resources import _safe_tree, preflight_space
+from agent.source.snapshots import _safe_file
 from agent.task.budget import StepBudget
 from agent.settings import PROJECT_ROOT
 from agent.application.store import Conflict, encode
@@ -322,11 +326,21 @@ class Chatbot:
 
         stopped = None
 
-        def save_result(index, call, result):
-            message = message_to_dict(ToolMessage(content=encode(result), name=call['name'],
+        def save_result(index, call, result, *, finished=False):
+            # 先保留单次操作原件，再整理尚未提交的模型视图；失败必须停止后续派发。
+            operation = state['call_id'] + '-' + str(index)
+            self._archive_tool_result(conversation, operation, call, result)
+            visible = normalize_result(call['name'], result,
+                                       project=self.store.get(conversation)['repo'])
+            message = message_to_dict(ToolMessage(content=encode(visible), name=call['name'],
                                                   tool_call_id=call['id']))
             self.store.model_message(conversation, lane,
                                       state['call_id'] + ':tool:' + str(index), message)
+            if finished:
+                self.store.record_event(conversation, 'chat_tool_finished', {
+                    'name': call['name'], 'id': operation,
+                    'status': result.get('status', 'completed'),
+                })
 
         for index, call in enumerate(calls):
             signal = current()
@@ -337,6 +351,7 @@ class Chatbot:
                                          'reason': 'Stopped before tool dispatch'})
                 continue
             name, args = call['name'], call['args']
+            finished = False
             try:
                 if mixed_write:
                     raise ValueError('Work handoff and external operations must be called alone')
@@ -393,14 +408,37 @@ class Chatbot:
                         raise ValueError('Unknown tool')
                     result = self.invoke_tool(conversation, call,
                                               state['call_id'] + '-' + str(index))
+                    finished = self.invoke_tool == self._invoke_tool
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 result = {'error': str(exc), 'actions_executed': False}
-            save_result(index, call, result)
+            save_result(index, call, result, finished=finished)
             waiting_approval = waiting_approval or (
                 isinstance(result, dict) and result.get('status') == 'awaiting_approval')
         if stopped:
             raise ModelInterrupted(stopped, sent=False)
         return {'done': handed_off or waiting_approval, 'waiting_approval': waiting_approval}
+
+    def _archive_tool_result(self, conversation, operation, call, result):
+        """只保存当前工具结果；既有原件必须逐字一致，不能被重试覆盖。"""
+        root = self.store.root
+        path = root / 'application-records' / conversation / operation / 'tool-result.json'
+        _safe_tree(path, root)
+        raw = encode({
+            'tool_call_id': call['id'], 'name': call['name'], 'result': result,
+        }).encode('utf-8')
+        if not path.exists():
+            preflight_space(path, len(raw))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _safe_tree(path, root)
+        try:
+            with path.open('xb') as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            previous = _safe_file(root, path.relative_to(root)).read_bytes()
+            if previous != raw:
+                raise Conflict('Saved tool result differs from this operation; original was not overwritten')
 
     def _invoke_tool(self, conversation, call, operation):
         value = self.store.get(conversation)
@@ -437,8 +475,4 @@ class Chatbot:
         history = [row[1] for row in self.store.model_history(conversation)]
         self.store.record_event(conversation, 'chat_tool_started',
                                 {'name': call['name'], 'id': operation})
-        result = invoke_assistant(context, call, folder, history)
-        self.store.record_event(conversation, 'chat_tool_finished',
-                                {'name': call['name'], 'id': operation,
-                                 'status': result.get('status', 'completed')})
-        return result
+        return invoke_assistant(context, call, folder, history)

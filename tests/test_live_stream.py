@@ -13,7 +13,6 @@ from agent.storage.live_reasoning import LiveReasoning
 from agent.storage.activity import read_activity
 from agent.storage.history import LocalHistory
 from support import read_record
-import test_web_graph as fixtures
 
 
 class StreamTests(unittest.TestCase):
@@ -152,50 +151,75 @@ class StreamTests(unittest.TestCase):
             self.assertEqual((task / 'history.sqlite3').read_bytes(), before)
 
 
-class GraphStreamTests(unittest.TestCase):
-    setUp = fixtures.ConversationTests.setUp
-    invoke = fixtures.ConversationTests.invoke
-
-    def model(self, interrupted=False):
-        test = self
-
-        class Streaming(fixtures.ScriptedModel):
-            def invoke_with_progress(self, messages, on_reasoning):
-                self.calls.append(messages)
-                on_reasoning('第一段思考')
-                task = next((test.root / 'runs/tasks').iterdir())
-                view = read_activity(
-                    test.root / 'runs', [{'id': task.name, 'input_id': 'user-one'}], {}
-                )
-                test.assertEqual(view['live'][0]['detail'], '第一段思考')
-                test.assertEqual(view['live'][0]['status'], 'running')
-                test.assertFalse((task / 'requests/call-0001/response.json').exists())
-                test.assertFalse((task / 'plans').exists())
-                if interrupted:
-                    raise RuntimeError('stream interrupted')
-                return next(self.replies)
-
-        return Streaming([fixtures.text_reply()])
-
-    def test_graph_exposes_fragment_before_reply_without_work(self):
-        model = self.model()
-        result = self.invoke(model)
-        self.assertEqual(result['status'], 'chat_complete')
-        self.assertEqual(len(model.calls), 1)
-        self.assertNotIn('第一段思考', repr(result))
-
-    def test_interrupted_graph_stream_remains_unknown_without_retry(self):
-        model = self.model(interrupted=True)
-        result = self.invoke(model)
-        self.assertEqual(result['status'], 'runtime_error')
-        self.assertEqual(len(model.calls), 1)
-        view = read_activity(
-            self.root / 'runs', [{'id': result['task_id'], 'input_id': 'user-one'}], {}
-        )
-        self.assertEqual(view['live'][0]['status'], 'unknown')
-        self.assertEqual(view['usage'][result['task_id']]['unknown_calls'], 1)
-        self.assertEqual(len(model.calls), 1)
-
-
 if __name__ == '__main__':
     unittest.main()
+
+
+class CurrentChatStreamTests(unittest.TestCase):
+    def test_chat_emits_reasoning_before_response_and_retains_only_canonical_reply(self):
+        import time
+        import uuid
+        from unittest.mock import patch
+        from agent.application.chat import Chatbot
+        from agent.application.store import ApplicationStore
+        from tests.fixtures.models import ScriptedModel, text_reply
+
+        with tempfile.TemporaryDirectory() as folder:
+            store = ApplicationStore(folder)
+            conversation = store.create()['thread_id']
+            command = {'id': str(uuid.uuid4()), 'kind': 'message', 'text': 'Explain the project.'}
+            store.submit(conversation, command)
+            test = self
+            clock = time.monotonic
+
+            class Streaming(ScriptedModel):
+                def invoke_with_progress(self, messages, receive):
+                    self.calls.append(messages)
+                    for number, fragment in enumerate(('first fragment', 'second fragment'), 1):
+                        with patch('agent.application.chat.time.monotonic', return_value=clock() + number):
+                            receive(fragment)
+                        activities = [event['payload'] for event in store.events(conversation)['events']
+                                      if event['kind'] == 'activity']
+                        test.assertEqual(activities[-1]['detail'], fragment)
+                        test.assertEqual(activities[-1]['status'], 'running')
+                        test.assertTrue(activities[-1]['append'])
+                        test.assertFalse(any(raw['type'] == 'ai' for _, raw in store.model_history(conversation)))
+                    return next(self.replies)
+
+            model = Streaming([text_reply('Canonical reply')])
+            bot = Chatbot(store, lambda *args: self.fail('No work handoff expected'),
+                          factory=lambda settings: model)
+            result = bot.run(conversation, command)
+            self.assertTrue(result['done'])
+            self.assertEqual(len(model.calls), 1)
+            snapshot = store.snapshot(conversation)
+            self.assertEqual([m['content'] for m in snapshot['messages']],
+                             [command['text'], 'Canonical reply'])
+            self.assertEqual(store.usage(conversation)['chat']['calls'], 1)
+
+    def test_chat_stream_failure_is_recorded_unknown_without_resend(self):
+        import uuid
+        from agent.application.chat import Chatbot
+        from agent.application.store import ApplicationStore
+        from tests.fixtures.models import ScriptedModel
+
+        with tempfile.TemporaryDirectory() as folder:
+            store = ApplicationStore(folder)
+            conversation = store.create()['thread_id']
+            command = {'id': str(uuid.uuid4()), 'kind': 'message', 'text': 'Explain.'}
+            store.submit(conversation, command)
+
+            class Interrupted(ScriptedModel):
+                def invoke_with_progress(self, messages, receive):
+                    self.calls.append(messages)
+                    receive('partial fragment')
+                    raise RuntimeError('stream disconnected')
+
+            model = Interrupted([])
+            bot = Chatbot(store, lambda *args: self.fail('No work handoff expected'),
+                          factory=lambda settings: model)
+            with self.assertRaisesRegex(RuntimeError, 'stream disconnected'):
+                bot.run(conversation, command)
+            self.assertEqual(len(model.calls), 1)
+            self.assertEqual(store.usage(conversation)['chat']['unknown_calls'], 1)
+            self.assertFalse(any(raw['type'] == 'ai' for _, raw in store.model_history(conversation)))

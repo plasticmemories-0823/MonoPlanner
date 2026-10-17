@@ -6,26 +6,11 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from langchain_core.messages import AIMessage
 import pytest
 from starlette.testclient import TestClient as RawClient
 
-from agent.execution.preparation import PreparationCancelled
 from agent.execution.projects import ProjectEnvironments, prepare_binding, require_binding
-from agent.storage.history import LocalHistory
 from tests.http_client import TestClient
-from tests import test_web_graph as graph_fixture
-
-
-@pytest.fixture
-def conversation():
-    fixture = graph_fixture.ConversationTests()
-    fixture.setUp()
-    (fixture.root / 'runs/project-environments.json').unlink()
-    try:
-        yield fixture
-    finally:
-        fixture.doCleanups()
 
 
 def binding():
@@ -34,152 +19,6 @@ def binding():
         'image': 'sha256:' + 'c' * 64,
         'runtime': {'python': '/usr/local/bin/python', 'conda_env': ''},
     }
-
-
-def checkpoint(fixture, task):
-    store = LocalHistory(fixture.root / 'runs/tasks' / task)
-    try:
-        with store.lease():
-            return store.load()
-    finally:
-        store.close()
-
-
-def test_plain_chat_with_no_environment_never_prepares_or_starts_docker(conversation):
-    model = graph_fixture.ScriptedModel([graph_fixture.text_reply('你好')])
-    with patch(
-        'agent.execution.preparation.ensure_prepared',
-        side_effect=AssertionError('chat must stay lazy'),
-    ), patch.object(graph_fixture.FixtureDocker, 'start', side_effect=AssertionError('no Docker')):
-        result = conversation.invoke(model)
-    assert result['status'] == 'chat_complete'
-    assert len(model.calls) == 1
-
-
-def test_automatic_preparation_precedes_work_and_preserves_handoff(conversation):
-    prepared = []
-
-    def prepare(repo, *, progress, cancelled):
-        assert not cancelled()
-        assert not list((conversation.root / 'runs/tasks').glob('*/baseline/*'))
-        prepared.append(repo)
-        progress({'status': 'preparing', 'stage': 'installing', 'message': '正在准备项目环境'})
-        return binding()
-
-    model = graph_fixture.ScriptedModel(
-        [
-            graph_fixture.start_reply(),
-            graph_fixture.investigation(['first.py']),
-            graph_fixture.text_reply('已读取'),
-        ]
-    )
-    with patch('agent.execution.preparation.ensure_prepared', side_effect=prepare):
-        result = conversation.invoke(model, '请直接读取项目')
-    assert result['status'] != 'runtime_error'
-    assert len(prepared) == 1
-    assert len(model.calls) == 3
-    saved = checkpoint(conversation, result['task_id'])
-    assert saved['execution_binding'] == binding()
-    assert saved['baseline']
-    assert saved['environment_preparation']['stage'] == 'installing'
-    assert sum(m.type == 'ai' and '开始准备工作资料' in m.content for m in result['messages']) == 1
-
-
-def test_pause_during_preparation_preserves_work_and_resume_does_not_reask_model(conversation):
-    calls = []
-
-    def prepare(repo, *, progress, cancelled):
-        calls.append(repo)
-        if len(calls) == 1:
-            conversation.store.enqueue(conversation.thread, 'pause-env', 'pause')
-            assert cancelled()
-            raise PreparationCancelled('环境准备等待已中断')
-        return binding()
-
-    model = graph_fixture.ScriptedModel(
-        [
-            graph_fixture.start_reply(),
-            graph_fixture.investigation(['first.py']),
-            graph_fixture.text_reply('已读取'),
-        ]
-    )
-    with patch('agent.execution.preparation.ensure_prepared', side_effect=prepare):
-        first = conversation.invoke(model, '请直接读取项目')
-        assert first['status'] == 'paused'
-        assert len(model.calls) == 1
-        saved = checkpoint(conversation, first['task_id'])
-        assert saved['coding_preparation_pending'] and not saved.get('baseline')
-        conversation.store.enqueue(conversation.thread, 'resume-env', 'resume')
-        with patch('tests.legacy.graph.model_factory', return_value=model):
-            result = conversation.compiled.invoke({'messages': []}, conversation.config)
-    assert result['task_id'] == first['task_id']
-    assert result['status'] != 'runtime_error'
-    assert len(model.calls) == 3
-    assert (
-        len(list((conversation.root / 'runs/tasks' / first['task_id']).glob('plans/*/plan.json')))
-        == 1
-    )
-
-
-def test_existing_entry_pause_during_preparation_does_not_start_or_consume_call(conversation):
-    reply = AIMessage(
-        content='运行现有脚本。',
-        tool_calls=[
-            {
-                'name': 'run_existing',
-                'id': 'run-once',
-                'args': {'entry': 'first.py', 'args': [], 'timeout': 10, 'usage_file': ''},
-            }
-        ],
-        usage_metadata={'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2},
-    )
-    model = graph_fixture.ScriptedModel([reply, graph_fixture.text_reply('脚本已运行')])
-
-    def cancelled(repo, **kwargs):
-        conversation.store.enqueue(conversation.thread, 'pause-env', 'pause')
-        raise PreparationCancelled('环境准备等待已中断')
-
-    with patch('agent.execution.preparation.ensure_prepared', side_effect=cancelled), patch.object(
-        graph_fixture.FixtureDocker, 'run_process', side_effect=AssertionError('not started')
-    ):
-        result = conversation.invoke(model, '直接运行现有脚本')
-    assert result['status'] == 'paused'
-    saved = checkpoint(conversation, result['task_id'])
-    assert saved['assistant_pending']['cursor'] == 0
-    assert not saved['assistant_running'] and not saved.get('assistant_process')
-    assert not saved.get('existing_runs')
-    assert len(model.calls) == 1
-    executions = []
-
-    def execute(
-        environment,
-        command,
-        *,
-        stdout_path,
-        stderr_path,
-        timeout=None,
-        shell=False,
-        on_started=None
-    ):
-        executions.append(command)
-        stdout_path.parent.mkdir(parents=True, exist_ok=True)
-        stdout_path.write_text('done\n')
-        stderr_path.write_text('')
-        if on_started:
-            on_started('f' * 64)
-        return {'exit_code': 0, 'timed_out': False}
-
-    conversation.store.enqueue(conversation.thread, 'resume-env', 'resume')
-    with patch('agent.execution.preparation.ensure_prepared', return_value=binding()), patch.object(
-        graph_fixture.FixtureDocker, 'run_process', execute
-    ), patch('tests.legacy.graph.model_factory', return_value=model):
-        resumed = conversation.compiled.invoke({'messages': []}, conversation.config)
-    assert resumed['status'] == 'chat_complete'
-    assert resumed['task_id'] == result['task_id']
-    assert len(executions) == 1 and len(model.calls) == 2
-    saved = checkpoint(conversation, result['task_id'])
-    assert saved['assistant_pending'] is None
-    assert len(saved['existing_runs']) == 1
 
 
 def test_manual_or_frozen_binding_cannot_be_replaced_by_automatic_defaults(tmp_path, monkeypatch):

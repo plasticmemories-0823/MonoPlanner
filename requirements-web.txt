@@ -1,5 +1,4 @@
 -c requirements.lock
 -r requirements.txt
-langgraph==1.2.14
 starlette==1.7.0
 uvicorn==0.54.0

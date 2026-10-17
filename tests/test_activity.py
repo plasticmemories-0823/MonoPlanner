@@ -3,72 +3,43 @@
 from contextlib import closing
 import hashlib
 import json
-import os
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 import uuid
-from unittest.mock import patch
 
-from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import InMemorySaver
-from tests.legacy.graph import builder
 from agent.storage.activity import projection, read_activity
-from tests.legacy.conversations import ConversationStore
-from test_web_graph import FixtureDocker, ScriptedModel, text_reply, investigation, start_reply
+from tests.fixtures.models import ScriptedModel, text_reply, investigation
+from agent.execution.local import LocalEnvironment
+from agent.task.runner import TaskRunner
+from agent.task.budget import StepBudget
 
 
 class ActivityTests(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
         self.repo = self.root / 'repo'
         self.repo.mkdir()
         (self.repo / 'first.py').write_text('VALUE = 1\n', encoding='utf-8')
-        self.runs = self.root / 'runs'
-        self.thread = str(uuid.uuid4())
-        self.store = ConversationStore(self.runs)
-        guard = patch.dict(os.environ, {'MONOPLANER_STATE_DIR': str(self.runs)})
-        guard.start()
-        self.addCleanup(guard.stop)
-        from agent.storage.preferences import atomic_write
+        self.runs, self.task = self.root / 'runs', uuid.uuid4().hex
+        self.environment = LocalEnvironment(self.repo, artifact_root=self.root / 'execution')
 
-        atomic_write(
-            self.runs / 'project-environments.json',
-            json.dumps(
-                {
-                    str(self.repo): {
-                        'backend': 'docker',
-                        'image': 'sha256:' + '1' * 64,
-                        'runtime': {
-                            'python': '/opt/miniconda3/envs/testbed/bin/python',
-                            'conda_env': 'testbed',
-                        },
-                    }
-                }
-            ).encode(),
-        )
-        execution = patch('agent.execution.task_docker.TaskDocker', FixtureDocker)
-        execution.start()
-        self.addCleanup(execution.stop)
-        self.graph = builder.compile(checkpointer=InMemorySaver())
-
-    def run_model(self, model, identity='first'):
-        with patch('tests.legacy.graph.model_factory', return_value=model):
-            return self.graph.invoke(
-                {'repo': str(self.repo), 'messages': [HumanMessage(content='读取', id=identity)]},
-                {'configurable': {'thread_id': self.thread}, 'recursion_limit': 100},
-            )
+    def run_model(self, model):
+        runner = TaskRunner(model, self.environment,
+                            state_dir=self.runs / 'tasks' / self.task, interactive=True)
+        result = runner.run([], 'Read the source without editing.', StepBudget(max_steps=5))
+        return {**result, 'task_id': self.task}
 
     def read(self, cursors=None, page_size=100):
-        return read_activity(
-            self.runs, self.store.session(self.thread)['activity_tasks'], cursors or {}, page_size
-        )
+        return read_activity(self.runs, [{'id': self.task, 'input_id': 'first'}],
+                             cursors or {}, page_size)
+
 
     def test_display_reads_exact_thinking_and_operation_without_changing_history(self):
-        model = ScriptedModel([start_reply(), investigation(['first.py']), text_reply()])
+        model = ScriptedModel([investigation(['first.py']), text_reply()])
         result = self.run_model(model)
         root = self.runs / 'tasks' / result['task_id']
         before = {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()}
@@ -80,7 +51,7 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(reads[-1]['status'], 'succeeded')
         self.assertIn('first.py', reads[-1]['detail'])
         self.assertEqual(before, {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()})
-        self.assertEqual(len(model.calls), 3)
+        self.assertEqual(len(model.calls), 2)
         self.assertEqual(self.read(display['cursors'])['items'], [])
 
     def test_waiting_is_visible_while_model_holds_execution_lease(self):
@@ -109,15 +80,6 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(row['after_id'], 'new-web-question')
         self.assertEqual(row['detail'], '公开资料')
 
-    def test_multiple_turns_restore_display_without_passing_thought_to_next_turn(self):
-        model = ScriptedModel([text_reply(), text_reply()])
-        self.run_model(model)
-        self.run_model(model, 'second')
-        tasks = self.store.session(self.thread)['activity_tasks']
-        self.assertEqual(len(tasks), 2)
-        thought = [r for r in self.read()['items'] if r['status'] == 'completed']
-        self.assertEqual([r['after_id'] for r in thought], ['first', 'second'])
-        self.assertNotIn('PRIVATE_REASONING', repr(model.calls[-1]))
 
     def test_incremental_pages_converge_to_same_activity_without_replay(self):
         model = ScriptedModel([investigation(['first.py']), text_reply()])
@@ -145,7 +107,7 @@ class ActivityTests(unittest.TestCase):
 
     def test_invalid_cursors_and_task_paths_are_rejected(self):
         self.run_model(ScriptedModel([text_reply()]))
-        task = self.store.session(self.thread)['task_id']
+        task = self.task
         with self.assertRaisesRegex(ValueError, 'cursor'):
             self.read({task: -1})
         with self.assertRaisesRegex(ValueError, 'task ID'):

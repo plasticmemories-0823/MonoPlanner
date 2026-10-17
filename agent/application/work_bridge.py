@@ -118,18 +118,16 @@ class WorkRunner(TaskRunner):
             import logging
             logging.getLogger(__name__).exception("Work event projection failed")
 
-    def _drive(self):
-        # 补充会立即中断模型等待，内核保存原件并应用补充后返回 needs_plan。
-        # 仍由本执行者在同一租约内继续，不能依靠浏览器唤醒或完整断点恢复。
-        while True:
-            result = super()._drive()
-            if self.state["status"] not in {"needs_plan", "executing"} or self.yield_boundary:
-                return result
-            # 内核 result() 已关闭只读预处理；续接时重新准备这项可丢弃缓存。
-            # 任务对象、预算、历史、执行游标及容器继续沿用。
-            self.preparation = None
-            self.executor.prepared = None
-            self.executor.prepared_probe = None
+    def continue_after_return(self):
+        # 补充中断保存结果后，仍由同一图和同一租约继续，不依靠浏览器唤醒。
+        if self.state["status"] not in {"needs_plan", "executing"} or self.yield_boundary:
+            return False
+        # result() 已关闭预处理；重建可丢弃缓存，沿用任务、预算和执行游标。
+        self.preparation = None
+        self.executor.prepared = None
+        self.executor.prepared_probe = None
+        return True
+
 
 
 def _job_data(job):

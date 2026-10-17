@@ -8,7 +8,6 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langgraph.graph import END, START, StateGraph, MessagesState
 
 from agent.model.client import ConfiguredModel, create_model
-from tests.legacy.graph import model_factory
 
 
 class CallbackModel(BaseChatModel):
@@ -60,28 +59,3 @@ def test_production_client_suppresses_sdk_raw_messages_without_api_changes():
         create_model({'model_name': 'deepseek-flash', 'api_key': 'offline-only'})
     assert client.call_args.kwargs['tags'] == ['nostream']
     assert client.call_args.kwargs['max_retries'] == 0
-
-
-def test_graph_factory_keeps_nostream_through_real_callback():
-    client = CallbackModel(tags=['nostream', 'existing-local-tag'])
-    with patch('tests.legacy.graph.create_model', return_value=ConfiguredModel(client)), patch(
-        'tests.legacy.graph.load_settings', return_value={}
-    ):
-        model = model_factory()
-    assert 'existing-local-tag' in model.client.tags
-    thoughts = []
-
-    def reply(state):
-        response = model.invoke_with_progress(state['messages'], thoughts.append)
-        return {'messages': [AIMessage(content=response.content, id='canonical-reply')]}
-
-    graph = StateGraph(MessagesState)
-    graph.add_node('reply', reply).add_edge(START, 'reply').add_edge('reply', END)
-    events = list(
-        graph.compile().stream(
-            {'messages': [HumanMessage(content='检查入口')]}, stream_mode=['messages', 'values']
-        )
-    )
-    visible = [event[1][0] for event in events if event[0] == 'messages']
-    assert [m.id for m in visible] == ['canonical-reply']
-    assert thoughts == ['本地思考片段']

@@ -1,15 +1,23 @@
-"""触顶的完整响应归档、聊天及用户主动续接；不调用真实模型。"""
+"""当前 Chatbot 与工作内核的输出触顶、原件保存及明确续接；全部离线。"""
 
 import hashlib
 import json
+from pathlib import Path
+import tempfile
 import unittest
-from unittest.mock import patch
+import uuid
+from unittest.mock import Mock
 
 from langchain_core.messages import AIMessage
 
-import test_web_graph as fixtures
+from agent.application.scheduler import Scheduler
+from agent.application.store import ApplicationStore
+from agent.execution.local import LocalEnvironment
 from agent.model.client import ModelPolicy, ConfiguredModel
+from agent.storage.history import LocalHistory
+from agent.task.budget import StepBudget
 from agent.task.output_limit import STATUS
+from agent.task.runner import TaskRunner
 
 
 def truncated(message=None):
@@ -17,22 +25,89 @@ def truncated(message=None):
     message.response_metadata['finish_reason'] = 'length'
     message.additional_kwargs['reasoning_content'] = 'RETAINED_PARTIAL_REASONING'
     message.usage_metadata = {
-        'input_tokens': 10,
-        'output_tokens': 256000,
-        'total_tokens': 256010,
+        'input_tokens': 10, 'output_tokens': 256000, 'total_tokens': 256010,
         'output_token_details': {'reasoning': 255990},
     }
     return message
 
 
+def investigation(name):
+    return AIMessage(content='', tool_calls=[{
+        'name': 'submit_plan', 'id': 'read-' + name,
+        'args': {'kind': 'inspect', 'note': 'Inspect this source once',
+                 'steps': [{'id': 'source', 'op': 'read', 'path': name}]},
+    }])
+
+
+def finished():
+    return AIMessage(content='', tool_calls=[{
+        'name': 'submit_plan', 'id': 'finished',
+        'args': {'kind': 'blocked', 'note': 'The offline continuation is complete'},
+    }])
+
+
+class Replies:
+    def __init__(self, replies):
+        self.replies, self.calls = iter(replies), []
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        self.calls.append(messages)
+        return next(self.replies)
+
+
 class OutputLimitTests(unittest.TestCase):
-    setUp = fixtures.ConversationTests.setUp
-    invoke = fixtures.ConversationTests.invoke
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.repo = self.root / 'repo'
+        self.repo.mkdir()
+        for name in ('first.py', 'second.py'):
+            (self.repo / name).write_text('VALUE = 1\n', encoding='utf-8')
+        self.data = self.root / 'runs'
+        self.task = uuid.uuid4().hex
+        self.artifacts = self.data / 'tasks' / self.task
+        self.environment = LocalEnvironment(self.repo, artifact_root=self.root / 'runtime')
+        self.commands = []
+
+    def invoke(self, model):
+        runner = TaskRunner(
+            model, self.environment, state_dir=self.artifacts,
+            control_source=lambda: self.commands,
+        )
+        return runner.run([], 'Inspect the specified files', StepBudget(max_steps=20))
 
     def resume(self, model, identity='resume-one'):
-        self.store.enqueue(self.thread, identity, 'resume')
-        with patch('tests.legacy.graph.model_factory', return_value=model):
-            return self.compiled.invoke({'messages': []}, self.config)
+        if not any(row['id'] == identity for row in self.commands):
+            self.commands.append({'id': identity, 'kind': 'resume'})
+        return self.invoke(model)
+
+    def saved_state(self, edit):
+        history = LocalHistory(self.artifacts)
+        try:
+            with history.lease():
+                state = history.load()
+                edit(state)
+                history.record(state, 'offline_fixture', {})
+        finally:
+            history.close()
+
+    def chat(self, replies, *, active_work=False):
+        store = ApplicationStore(self.root / 'application')
+        conversation = store.create(repo=str(self.repo) if active_work else '')['thread_id']
+        if active_work:
+            original = {'id': str(uuid.uuid4()), 'kind': 'message', 'text': 'Original work'}
+            store.submit(conversation, original)
+            task = store.create_work(conversation, original['id'])['task_id']
+            store.work_state(task, STATUS)
+        model = Replies(replies)
+        work = Mock(side_effect=AssertionError('Chat must not execute or resume work'))
+        scheduler = Scheduler(store, model_factory=lambda _settings: model, work_factory=work)
+        self.addCleanup(scheduler.close)
+        return store, conversation, model, scheduler, work
 
     def test_defaults_and_auxiliary_caps(self):
         from agent.application.titles import POLICY
@@ -42,163 +117,142 @@ class OutputLimitTests(unittest.TestCase):
         self.assertEqual(ModelPolicy().reasoning_effort, 'high')
         configured = ConfiguredModel(object())
         self.assertEqual(configured.request_options['max_tokens'], 256000)
-        self.assertEqual(
-            configured.for_purpose('compaction').max_output_tokens, CONFIG['summary_max_tokens']
-        )
+        self.assertEqual(configured.for_purpose('compaction').max_output_tokens,
+                         CONFIG['summary_max_tokens'])
         self.assertEqual(POLICY.max_output_tokens, 128)
 
     def test_complete_looking_tool_in_truncated_reply_never_executes(self):
-        model = fixtures.ScriptedModel(
-            [fixtures.start_reply(), truncated(fixtures.investigation(['second.py']))]
-        )
-        result = self.invoke(model, '开始编码')
+        model = Replies([truncated(investigation('second.py'))])
+        result = self.invoke(model)
         self.assertEqual(result['status'], STATUS, result)
-        self.assertEqual(len(model.calls), 2)
-        root = self.root / 'runs' / 'tasks' / result['task_id']
-        self.assertEqual(list(root.glob('plans/*/*/result.json')), [])
-        self.assertEqual(result['result']['output_limit']['output_tokens'], 256000)
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(list(self.artifacts.glob('plans/*/*/result.json')), [])
+        self.assertEqual(result['output_limit']['output_tokens'], 256000)
         self.assertIn('达到输出上限', repr(result['messages']))
         self.assertNotIn('RETAINED_PARTIAL_REASONING', repr(result))
         from agent.storage.activity import read_activity
 
-        display = read_activity(
-            self.root / 'runs', self.store.session(self.thread)['activity_tasks'], {}
-        )
+        display = read_activity(self.data, [{'id': self.task, 'input_id': 'initial'}], {})
         stopped = [row for row in display['items'] if row['label'] == '回复达到输出上限']
         self.assertEqual(len(stopped), 1)
         self.assertEqual(stopped[0]['status'], 'interrupted')
 
-    def test_chat_followup_does_not_activate_container_and_resume_does_not_replay(self):
-        model = fixtures.ScriptedModel(
-            [
-                fixtures.start_reply(),
-                fixtures.investigation(['first.py']),
-                truncated(fixtures.investigation(['second.py'])),
-                fixtures.text_reply('回复达到输出上限，尚未执行下一步。'),
-                fixtures.investigation(['second.py']),
-                fixtures.text_reply('本轮读取完成'),
-            ]
-        )
-        stopped = self.invoke(model, '开始编码')
-        root = self.root / 'runs' / 'tasks' / stopped['task_id']
-        raw_path = root / 'requests/call-0003/response.json'
+    def test_chat_followup_does_not_activate_work_and_resume_does_not_replay(self):
+        model = Replies([investigation('first.py'), truncated(investigation('second.py')),
+                         investigation('second.py'), finished()])
+        self.assertEqual(self.invoke(model)['status'], STATUS)
+        raw_path = self.artifacts / 'requests/call-0002/response.json'
         original = hashlib.sha256(raw_path.read_bytes()).hexdigest()
-        self.assertEqual(len(list(root.glob('plans/*/*/result.json'))), 1)
-        with patch(
-            'tests.legacy.runtime.ConversationRunner.activate',
-            side_effect=AssertionError('chat must not activate'),
-        ):
-            chatted = self.invoke(model, '为什么未完成', 'why')
-        self.assertEqual(chatted['status'], STATUS, chatted)
-        self.assertEqual(chatted['turn_status'], 'chat_complete')
-        self.assertIn('回复达到输出上限', repr(chatted['messages']))
-        self.assertIn('output_limit', repr(model.calls[3]))
-        resumed = self.resume(model)
-        self.assertEqual(resumed['status'], 'awaiting_user', resumed)
-        self.assertEqual(len(model.calls), 6)
-        self.assertEqual(len(list(root.glob('plans/*/*/result.json'))), 2)
-        self.assertIn('RETAINED_PARTIAL_REASONING', repr(model.calls[4]))
-        self.assertNotIn(
-            'second.py', repr([m.tool_calls for m in model.calls[4] if isinstance(m, AIMessage)])
+        self.assertEqual(len(list(self.artifacts.glob('plans/*/*/result.json'))), 1)
+        store, conversation, chat_model, scheduler, work = self.chat(
+            [AIMessage(content='回复达到输出上限，尚未执行下一步。')], active_work=True,
         )
+        command = {'id': str(uuid.uuid4()), 'kind': 'message', 'text': '为什么未完成'}
+        store.submit(conversation, command)
+        scheduler._chat(conversation, command)
+        self.assertEqual(store.snapshot(conversation)['work']['status'], STATUS)
+        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(len(chat_model.calls), 1)
+        work.assert_not_called()
+        resumed = self.resume(model)
+        self.assertEqual(resumed['status'], 'task_blocked', resumed)
+        self.assertEqual(len(model.calls), 4)
+        self.assertEqual(len(list(self.artifacts.glob('plans/*/*/result.json'))), 2)
+        self.assertIn('RETAINED_PARTIAL_REASONING', repr(model.calls[2]))
+        self.assertNotIn('second.py', repr([
+            message.tool_calls for message in model.calls[2] if isinstance(message, AIMessage)
+        ]))
         self.assertEqual(hashlib.sha256(raw_path.read_bytes()).hexdigest(), original)
         self.resume(model)
-        self.assertEqual(len(model.calls), 6)
+        self.assertEqual(len(model.calls), 4)
 
     def test_plain_chat_can_hit_limit_and_continue_without_workspace(self):
-        model = fixtures.ScriptedModel([truncated(), fixtures.text_reply('说明完整')])
-        result = self.invoke(model)
-        self.assertEqual(result['status'], STATUS)
-        with patch(
-            'tests.legacy.runtime.ConversationRunner.activate',
-            side_effect=AssertionError('no execution'),
-        ):
-            resumed = self.resume(model)
-        self.assertEqual(resumed['status'], 'chat_complete', resumed)
+        store, conversation, model, scheduler, work = self.chat([
+            truncated(), AIMessage(content='说明完整'),
+        ])
+        first = {'id': str(uuid.uuid4()), 'kind': 'message', 'text': '解释这个概念'}
+        store.submit(conversation, first)
+        scheduler._chat(conversation, first)
+        self.assertEqual(store.snapshot(conversation)['chat_status'], STATUS)
+        self.assertEqual(len(model.calls), 1)
+        next_message = {'id': str(uuid.uuid4()), 'kind': 'message', 'text': '请继续说明'}
+        store.submit(conversation, next_message)
+        scheduler._chat(conversation, next_message)
+        self.assertEqual(store.snapshot(conversation)['chat_status'], 'chat_complete')
         self.assertEqual(len(model.calls), 2)
+        self.assertFalse(store.snapshot(conversation)['work'])
+        work.assert_not_called()
 
     def test_pause_queued_before_explicit_resume_does_not_cancel_new_continuation(self):
-        model = fixtures.ScriptedModel([truncated(), fixtures.text_reply('继续后的完整回复')])
+        model = Replies([truncated(), finished()])
         self.invoke(model)
-        self.store.enqueue(self.thread, 'older-pause', 'pause')
+        self.commands.append({'id': 'older-pause', 'kind': 'pause'})
         result = self.resume(model)
-        self.assertEqual(result['status'], 'chat_complete', result)
+        self.assertEqual(result['status'], 'task_blocked', result)
         self.assertEqual(len(model.calls), 2)
-        self.assertEqual(self.store.pending(self.thread), [])
+        history = LocalHistory(self.artifacts)
+        try:
+            with history.lease():
+                self.assertTrue({'older-pause', 'resume-one'}.issubset(history.load()['applied_inputs']))
+        finally:
+            history.close()
 
     def test_changed_source_blocks_continuation(self):
-        model = fixtures.ScriptedModel([fixtures.start_reply(), truncated()])
-        self.invoke(model, '开始编码')
+        model = Replies([truncated()])
+        self.invoke(model)
         (self.repo / 'first.py').write_text('VALUE = 99', encoding='utf-8')
         result = self.resume(model)
         self.assertEqual(result['status'], 'state_conflict', result)
-        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(len(model.calls), 1)
 
     def test_saved_failure_response_is_identified_as_limit_without_tool_execution(self):
-        # 固定结构复现现场：65,536 思考 Token、零正文、零工具。
         response = truncated(AIMessage(content=''))
         response.usage_metadata.update(
-            output_tokens=65536, total_tokens=65546, output_token_details={'reasoning': 65536}
+            output_tokens=65536, total_tokens=65546, output_token_details={'reasoning': 65536},
         )
-        result = self.invoke(fixtures.ScriptedModel([response]))
+        result = self.invoke(Replies([response]))
         self.assertEqual(result['status'], STATUS)
-        self.assertEqual(result['result']['output_limit']['reasoning_tokens'], 65536)
+        self.assertEqual(result['output_limit']['reasoning_tokens'], 65536)
 
     def test_model_cannot_resume_work_when_user_only_asks_a_question(self):
-        model = fixtures.ScriptedModel(
-            [
-                fixtures.start_reply(),
-                truncated(),
-                fixtures.start_reply(),
-                fixtures.text_reply('需要你点击继续任务。'),
-            ]
+        start = AIMessage(content='', tool_calls=[{
+            'name': 'start_work', 'id': 'unexpected-resume',
+            'args': {'project_path': '.', 'create': False},
+        }])
+        store, conversation, model, scheduler, work = self.chat(
+            [start, AIMessage(content='需要你点击继续任务。')], active_work=True,
         )
-        self.invoke(model, '开始编码')
-        with patch(
-            'tests.legacy.runtime.ConversationRunner.activate',
-            side_effect=AssertionError('no activation'),
-        ):
-            result = self.invoke(model, '为什么停了', 'why')
-        self.assertEqual(result['status'], STATUS, result)
-        self.assertEqual(result['turn_status'], 'chat_complete')
-        self.assertIn('No operation was executed', repr(model.calls[-1]))
+        command = {'id': str(uuid.uuid4()), 'kind': 'message', 'text': '为什么停了'}
+        store.submit(conversation, command)
+        scheduler._chat(conversation, command)
+        self.assertEqual(store.snapshot(conversation)['work']['status'], STATUS)
+        self.assertEqual(store.snapshot(conversation)['chat_status'], 'chat_complete')
+        self.assertIn('actions_executed', repr(model.calls[-1]))
+        self.assertIn('false', repr(model.calls[-1]))
+        work.assert_not_called()
 
     def test_resume_checks_frozen_acceptance_before_request(self):
-        from agent.storage.history import LocalHistory
-
-        model = fixtures.ScriptedModel([fixtures.start_reply(), truncated()])
-        result = self.invoke(model, '开始编码')
-        root = self.root / 'runs/tasks' / result['task_id']
-        history = LocalHistory(root)
-        with history.lease():
-            state = history.load()
+        model = Replies([truncated()])
+        self.invoke(model)
+        def edit(state):
             state['verification_spec'] = {'test_code': 'original'}
             state['regression_command'] = 'original regression'
-            history.record(state, 'test_frozen_fixture', {})
-        history.close()
-        (root / 'frozen-acceptance.json').write_text(
+        self.saved_state(edit)
+        (self.artifacts / 'frozen-acceptance.json').write_text(
             json.dumps({'spec': {'test_code': 'changed'}, 'regression': 'original regression'}),
             encoding='utf-8',
         )
-        resumed = self.resume(model)
-        self.assertEqual(resumed['status'], 'state_conflict', resumed)
-        self.assertEqual(len(model.calls), 2)
+        with self.assertRaisesRegex(ValueError, 'Frozen acceptance was changed'):
+            self.resume(model)
+        self.assertEqual(len(model.calls), 1)
 
     def test_unknown_operation_blocks_resume(self):
-        from agent.storage.history import LocalHistory
-
-        model = fixtures.ScriptedModel([fixtures.start_reply(), truncated()])
-        result = self.invoke(model, '开始编码')
-        root = self.root / 'runs/tasks' / result['task_id']
-        history = LocalHistory(root)
-        with history.lease():
-            state = history.load()
-            state['running_step'] = {'id': 'unknown'}
-            history.record(state, 'test_unknown_fixture', {})
-        history.close()
-        resumed = self.resume(model)
-        self.assertEqual(resumed['status'], 'execution_unknown', resumed)
-        self.assertEqual(len(model.calls), 2)
+        model = Replies([truncated()])
+        self.invoke(model)
+        self.saved_state(lambda state: state.update(running_step={'id': 'unknown'}))
+        result = self.resume(model)
+        self.assertEqual(result['status'], 'execution_unknown', result)
+        self.assertEqual(len(model.calls), 1)
 
 
 class ContainerContinuationTests(unittest.TestCase):

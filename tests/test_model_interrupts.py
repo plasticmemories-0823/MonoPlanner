@@ -3,11 +3,9 @@
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from threading import Event
 import time
 import unittest
-from unittest.mock import patch
 
 import httpx
 from langchain_core.messages import AIMessageChunk, HumanMessage, ToolMessage
@@ -17,10 +15,7 @@ from agent.model.deepseek import DeepSeekClient
 from agent.model.errors import ModelInterrupted
 from agent.model.payload import RAW_TOOL_CALLS, wire_input
 from agent.task import control as interrupts
-from tests.legacy.app_adapter import control_value
-from agent.storage.history import LocalHistory
 from support import read_record
-import test_web_graph as fixtures
 
 
 class WaitingClient:
@@ -261,99 +256,6 @@ class CancellationTests(unittest.TestCase):
         self.assertEqual(requests[0]['tools'], requests[1]['tools'])
         self.assertEqual(requests[0]['reasoning_effort'], 'high')
         self.assertTrue(requests[0]['stream_options']['include_usage'])
-
-
-class GraphInterruptionTests(unittest.TestCase):
-    setUp = fixtures.ConversationTests.setUp
-    invoke = fixtures.ConversationTests.invoke
-
-    def interrupted(self, kind, text=''):
-        client = WaitingClient()
-        model = ConfiguredModel(client)
-        with ThreadPoolExecutor() as pool:
-            future = pool.submit(self.invoke, model, '原始要求')
-            self.assertTrue(client.started.wait(3))
-            started = time.monotonic()
-            value = control_value(self.thread, {'id': 'control-one', 'kind': kind, 'text': text})
-            self.assertTrue(json.loads(value.body)['received'])
-            result = future.result(timeout=5)
-            self.assertLess(time.monotonic() - started, 2)
-        self.assertTrue(client.closed.is_set())
-        task = self.root / 'runs' / 'tasks' / result['task_id']
-        archive = LocalHistory(task)
-        with archive.lease():
-            state = archive.load()
-        archive.close()
-        self.assertIsNone(state['request_pending'])
-        self.assertEqual(state['interrupted_requests'][0]['call'], 1)
-        self.assertTrue(state['interrupted_requests'][0]['request_sent'])
-        self.assertFalse((task / 'requests/call-0001/response.json').exists())
-        self.assertFalse(list(task.glob('plans/*/plan.json')))
-        self.assertFalse(
-            any(
-                c.get('id') == 'partial'
-                for m in state['history']
-                for c in m['data'].get('tool_calls', [])
-            )
-        )
-        self.assertEqual(state['budget']['unknown_usage_steps'], 1)
-        from agent.storage.activity import read_activity
-
-        view = read_activity(
-            self.root / 'runs', [{'id': result['task_id'], 'input_id': 'user-one'}], {}
-        )
-        interrupted = [r for r in view['items'] if r['status'] == 'interrupted']
-        self.assertEqual(len(interrupted), 1)
-        self.assertEqual(interrupted[0]['detail'], '部分思考')
-        return result, model, client, task
-
-    def test_pause_returns_without_reply_and_explicit_resume_uses_new_call(self):
-        result, model, client, task = self.interrupted('pause')
-        self.assertEqual(result['status'], 'paused')
-        self.assertEqual(len(client.calls), 1)
-        self.assertEqual(self.store.session(self.thread)['status'], 'paused')
-        control_value(self.thread, {'id': 'resume', 'kind': 'resume'})
-        with patch('tests.legacy.graph.model_factory', return_value=model):
-            resumed = self.compiled.invoke({'messages': []}, self.config)
-        self.assertEqual(resumed['status'], 'chat_complete')
-        self.assertEqual(len(client.calls), 2)
-        self.assertTrue((task / 'requests/call-0002/response.json').exists())
-        self.assertTrue((task / 'requests/call-0001/interruption.json').exists())
-
-    def test_supplement_interrupts_and_is_in_next_request_without_duplicate_input(self):
-        result, _, client, _ = self.interrupted('message', '新要求：只解释，不读取')
-        self.assertEqual(result['status'], 'chat_complete')
-        self.assertEqual(len(client.calls), 2)
-        self.assertIn('新要求：只解释，不读取', repr(client.calls[1][0]))
-        public = result['messages']
-        self.assertEqual(sum(m.type == 'human' and m.id == 'control-one' for m in public), 1)
-        self.assertTrue(any(m.type == 'human' and '原始要求' in m.content for m in public))
-        self.assertFalse(self.store.pending(self.thread))
-
-    def test_interrupting_a_supplement_retains_both_user_messages(self):
-        paused = fixtures.ScriptedModel(
-            [fixtures.start_reply(), fixtures.investigation(['first.py'])],
-            hook=lambda n: self.store.enqueue(self.thread, 'initial-pause', 'pause'),
-        )
-        self.assertEqual(self.invoke(paused, '最初要求')['status'], 'paused')
-        client = WaitingClient()
-        with ThreadPoolExecutor() as pool:
-            future = pool.submit(self.invoke, ConfiguredModel(client), '第一条补充', 'middle-input')
-            self.assertTrue(client.started.wait(3))
-            control_value(
-                self.thread, {'id': 'latest-input', 'kind': 'message', 'text': '第二条补充：只讨论'}
-            )
-            result = future.result(timeout=5)
-        self.assertEqual(len(client.calls), 2)
-        self.assertIn('第一条补充', repr(client.calls[-1][0]))
-        self.assertIn('第二条补充：只讨论', repr(client.calls[-1][0]))
-        for identity in ('middle-input', 'latest-input'):
-            self.assertEqual(
-                sum(m.id == identity and m.type == 'human' for m in result['messages']), 1
-            )
-        self.assertFalse(
-            list((self.root / 'runs' / 'tasks' / result['task_id']).glob('plans/*/plan.json'))
-        )
 
 
 if __name__ == '__main__':

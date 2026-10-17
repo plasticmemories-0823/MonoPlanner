@@ -101,12 +101,20 @@ def baseline_conditions(loop, spec, regression):
 
 def append_result(loop, response, result):
     call = response["data"]["tool_calls"][0]
+    from agent.model.tool_payloads import project
+    from agent.model.tool_results import normalize_result
+
+    normalized = normalize_result(
+        call["name"], result, source_version=loop.state.get("source"),
+        project=getattr(getattr(loop, "environment", None), "repo_root", None),
+    )
+    delivered = project(loop, normalized)
     loop.state["history"].extend(
         [
             response,
             message_to_dict(
                 ToolMessage(
-                    content=json.dumps(result, ensure_ascii=False),
+                    content=json.dumps(delivered, ensure_ascii=False),
                     name=call["name"],
                     tool_call_id=call["id"],
                 )

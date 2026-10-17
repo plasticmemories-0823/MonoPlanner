@@ -921,8 +921,6 @@ def test_external_result_requires_original_tool_target_and_conversation(setup):
 
 def test_default_plan_question_waits_for_user_before_work_handoff(setup):
     """假轨迹验证交接时机与原文保留；不把它当成真实模型服从率测试。"""
-    from pathlib import Path
-
     store, conversation, _ = setup
     proposal = '我会做一个能直接打开的动画网页。是否按照这个计划开始制作？'
     model = FakeModel([
@@ -946,9 +944,14 @@ def test_default_plan_question_waits_for_user_before_work_handoff(setup):
     assert store.snapshot(conversation)['messages'][-1]['content'] == proposal
 
     # 复用旧提示的询问、等待和明确授权规则，而非只在README里描述。
-    previous = Path(__file__).with_name('legacy').joinpath('conversation.txt').read_text('utf-8')
+    expected_rules = (
+        'This is an interactive conversation with one general assistant. Default to discussing the request, clarifying useful details and proposing an approach, not starting coding work. Broad requests such as "帮我做一个xxx", "做一个淘宝首页html可以吗", "I want a website" or "help me build X" express a goal, not permission to create or change files. Do not invent operations to answer a greeting or discussion.',
+        'Begin coding work only after the user clearly authorizes actual implementation: for example "你直接动手", "你直接帮我改", "现在开始实现", "按这个方案执行", or an explicit request to create and save specified files. Judge the meaning in context, not isolated keywords. A clear yes to your specific question asking whether to begin actual work is authorization; liking an idea or agreeing on details alone is not. A selected workspace is not authorization.',
+        "Before authorization, discuss the important purpose, scope, behavior, appearance and constraints that matter for this request; avoid an exhaustive questionnaire or unnecessary investigation. Offer sensible defaults. When you have enough information, summarize the proposed result briefly and ask whether to start actual work, then WAIT for the user's answer. Do not ask and call a work tool in the same response. Discussion may include complete code examples or a draft HTML page in normal text; do not save, execute or generate acceptance tests for the draft.",
+        'Explicit restrictions such as "先不改代码", "只讨论", "不要写文件" or "先给代码，不要保存" take precedence over a broad creation goal. Do not reinterpret them as permission to create a new file while leaving existing files unchanged. If the user gives contradictory instructions, ask which behavior is intended before acting.',
+    )
     rules = model.requests[0][0].content
-    for paragraph in [line for line in previous.splitlines() if line.strip()][:4]:
+    for paragraph in expected_rules:
         assert paragraph in rules
     assert 'do not demand a second ritual confirmation' not in rules
 

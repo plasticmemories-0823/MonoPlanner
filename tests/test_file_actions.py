@@ -9,8 +9,7 @@ from agent.execution.desktop import DesktopStore
 from agent.execution.assistant_files import AssistantFiles
 from agent.storage.permissions import Permissions
 from agent.storage.read_sources import ReadSources
-from test_web_graph import ScriptedModel, text_reply
-from test_general_assistant import reply
+from tests.fixtures.models import ScriptedModel, text_reply, reply
 
 
 class FileActionsTests(unittest.TestCase):

@@ -1,21 +1,11 @@
 """为一般查询和仓库已有任务提供单一执行者管理的工具日志。"""
 
-import json
-import time
-
-from langchain_core.messages import ToolMessage, message_to_dict
-
 from agent.execution.assistant_files import AssistantFiles
 from agent.execution import existing
-from agent.execution.web import WEB_NAMES, WebProvider, WebUnknown, archive_file
+from agent.execution.web import WEB_NAMES, WebProvider
 from agent.model.tools import ASSISTANT_SCHEMA
-from agent.storage.records import save
-from agent.execution.projects import EnvironmentRequired
-from agent.execution.preparation import PreparationCancelled
 
-READ_NAMES = {'list_files', 'read_file', 'search_files', 'list_applications'}
 OPEN_NAMES = {'open_file', 'launch_application', 'request_file_operation'}
-ASSISTANT_NAMES = {*READ_NAMES, *OPEN_NAMES, 'run_existing'}
 
 
 def validate(name, args):
@@ -89,134 +79,3 @@ def invoke(loop, call, folder, history):
             bool(args['reread_reason'].strip()),
         )
     return existing.execute(loop, args, folder)
-
-
-def execute_calls(loop, response, history=None):
-    pending = loop.state.get('assistant_pending')
-    if pending is None:
-        data = response['data']
-        pending = {
-            'response': response,
-            'cursor': 0,
-            'results': [],
-            'call': loop.budget.used_steps,
-            'calls': [*data.get('tool_calls', []), *data.get('invalid_tool_calls', [])],
-        }
-        loop.state['assistant_pending'] = pending
-        loop.persist('assistant_prepared')
-    calls = pending['calls']
-    conflict = any(c['name'] not in ASSISTANT_NAMES | WEB_NAMES for c in calls) or (
-        any(c['name'] in {'run_existing', *OPEN_NAMES} for c in calls) and len(calls) != 1
-    )
-    while pending['cursor'] < len(calls):
-        call = calls[pending['cursor']]
-        folder = loop.root / 'assistant' / ('call-%04d-%02d' % (pending['call'], pending['cursor']))
-        save(folder / 'request.json', call)
-        archive_file(loop, folder / 'request.json', 'assistant_call')
-        loop.state['assistant_running'] = call['id']
-        loop.persist(
-            'assistant_started',
-            {**call, 'request_call': pending['call'], 'started_at': time.time()},
-        )
-        started = time.monotonic()
-        try:
-            if conflict:
-                raise ValueError('已有任务运行须单独调用；查询不能混入编码、未知工具或应用启动')
-            target = loop.state['history'] if history is None else history
-            if history is None:
-                from agent.model.compaction import history as request_view
-
-                target = request_view(loop.state, loop.root)
-            result = invoke(loop, call, folder, [*target, *pending['results']])
-            if result.get('status') in {'unknown', 'launching', 'executing'}:
-                loop.state.update(status='execution_unknown', reason='外部操作结果不明，不自动重试')
-                loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
-                return
-            if result.get('status') == 'awaiting_approval':
-                pending.setdefault('approval_ids', []).append(result['id'])
-                loop.state.setdefault('desktop_approvals', {})[result['id']] = 'awaiting_approval'
-            status = (
-                'failed'
-                if result.get('error')
-                or (
-                    call['name'] == 'run_existing'
-                    and (result['exit_code'] != 0 or result['timed_out'])
-                )
-                else 'succeeded'
-            )
-        except PreparationCancelled as exc:
-            # 此条目尚未开始，保留调用及游标以供明确恢复；
-            # 它既不是结果不明的进程，也不是已完成的失败操作。
-            loop.state.update(assistant_running=None, assistant_process=None)
-            loop.environment_blocked(exc)
-            return
-        except EnvironmentRequired as exc:
-            result, status = {'error': str(exc)}, 'failed'
-            pending['environment_required'] = str(exc)
-        except WebUnknown:
-            loop.state.update(
-                status='execution_unknown', reason='已发出的网络请求结果不明，不自动重试'
-            )
-            loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
-            return
-        except (ValueError, OSError, KeyError, RuntimeError) as exc:
-            if call['name'] == 'run_existing' and loop.state.get('assistant_process'):
-                loop.state.update(
-                    status='execution_unknown', reason='已有任务执行结果不明，不自动重试'
-                )
-                loop.persist('assistant_unknown', {**call, 'request_call': pending['call']})
-                return
-            result, status = {'error': str(exc)}, 'failed'
-        seconds = time.monotonic() - started
-        result['seconds'] = seconds
-        save(folder / 'result.json', {'status': status, 'data': result})
-        for filename in ('result.json', 'stdout.log', 'stderr.log', 'child-usage.json'):
-            if (folder / filename).is_file():
-                archive_file(loop, folder / filename, 'assistant_result')
-        pending['results'].append(
-            message_to_dict(
-                ToolMessage(
-                    content=json.dumps(result, ensure_ascii=False),
-                    name=call['name'],
-                    tool_call_id=call['id'],
-                )
-            )
-        )
-        pending['cursor'] += 1
-        loop.state.update(assistant_running=None, assistant_process=None)
-        if call['name'] == 'run_existing':
-            turn = loop.state.get('conversation_turn')
-            loop.state['assistant_run_turn'] = turn['id'] if turn else 'initial'
-            loop.state.setdefault('existing_runs', []).append(
-                {
-                    'record': str(folder / 'result.json'),
-                    'entry': call['args'].get('entry') if isinstance(call['args'], dict) else None,
-                    'status': status,
-                    'seconds': seconds,
-                    'child_usage': result.get('child_usage'),
-                }
-            )
-        loop.persist(
-            'assistant_finished',
-            {
-                **call,
-                'request_call': pending['call'],
-                'status': status,
-                'seconds': seconds,
-                'exit_code': result.get('exit_code'),
-                'child_usage': result.get('child_usage'),
-            },
-        )
-        if loop.yield_boundary and pending['cursor'] < len(calls):
-            return
-    target = loop.state['history'] if history is None else history
-    target.extend([response, *pending['results']])
-    approval = bool(pending.get('approval_ids'))
-    loop.state.update(
-        assistant_pending=None,
-        response_pending=None,
-        status='awaiting_user' if approval or pending.get('environment_required') else 'needs_plan',
-    )
-    if pending.get('environment_required'):
-        loop.state['reason'] = pending['environment_required']
-    loop.persist('assistant_completed')

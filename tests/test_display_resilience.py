@@ -6,7 +6,6 @@ import unittest
 from unittest.mock import patch
 
 from agent.storage.live_reasoning import LiveReasoning, read_live, _active
-import test_web_graph as fixtures
 
 
 class DisplayResilienceTests(unittest.TestCase):
@@ -61,62 +60,37 @@ class DisplayResilienceTests(unittest.TestCase):
             self.assertNotIn(key, _active)
 
 
-class GraphDisplayFailureTests(unittest.TestCase):
-    setUp = fixtures.ConversationTests.setUp
-    invoke = fixtures.ConversationTests.invoke
+def test_critical_work_response_save_failure_stops_without_model_replay(tmp_path):
+    from contextlib import closing
+    from agent.execution.local import LocalEnvironment
+    from agent.storage.history import LocalHistory
+    from agent.task.budget import StepBudget
+    from agent.task.runner import TaskRunner, save
+    from tests.fixtures.models import ScriptedModel, text_reply
 
-    def test_display_write_failure_keeps_response_usage_and_no_retry(self):
-        owner = self
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'source.py').write_text('VALUE = 1\n')
+    root = tmp_path / 'task'
+    environment = LocalEnvironment(repo, artifact_root=tmp_path / 'execution')
+    model = ScriptedModel([text_reply()])
+    runner = TaskRunner(model, environment, state_dir=root, interactive=True)
 
-        class Streaming(fixtures.ScriptedModel):
-            def invoke_with_progress(self, messages, receive):
-                self.calls.append(messages)
-                receive('第一段')
-                receive('第二段')
-                from agent.storage.activity import read_activity
+    def fail_response(path, value):
+        if path.name == 'response.json':
+            raise PermissionError('response archive denied')
+        return save(path, value)
 
-                task = next((owner.root / 'runs/tasks').iterdir())
-                view = read_activity(
-                    owner.root / 'runs', [{'id': task.name, 'input_id': 'user-one'}], {}
-                )
-                owner.assertEqual(view['live'][0]['detail'], '第一段')
-                return next(self.replies)
-
-        model = Streaming([fixtures.text_reply()])
-        original = Path.open
-
-        def opened(path, *args, **kwargs):
-            if path.name == 'model.jsonl':
-                raise PermissionError('injected display lock')
-            return original(path, *args, **kwargs)
-
-        with patch.object(Path, 'open', opened):
-            result = self.invoke(model)
-        self.assertEqual(result['status'], 'chat_complete')
-        self.assertEqual(len(model.calls), 1)
-        self.assertEqual(result['result']['usage']['total_tokens'], 5)
-        response = self.root / 'runs/tasks' / result['task_id'] / 'requests/call-0001/response.json'
-        self.assertTrue(response.exists())
-
-    def test_critical_response_failure_stops_and_is_not_retried(self):
-        from agent.task.runner import save
-
-        model = fixtures.ScriptedModel([fixtures.text_reply()])
-
-        def persist(path, data):
-            if Path(path).name == 'response.json':
-                raise PermissionError('critical archive failure')
-            return save(path, data)
-
-        with patch('agent.task.runner.save', side_effect=persist):
-            result = self.invoke(model)
-        self.assertEqual(result['status'], 'runtime_error')
-        self.assertEqual(len(model.calls), 1)
-        from agent.storage.history import LocalHistory
-
-        history = LocalHistory(self.root / 'runs/tasks' / result['task_id'])
-        try:
-            with history.lease():
-                self.assertIsNotNone(history.load()['request_pending'])
-        finally:
-            history.close()
+    with patch('agent.task.runner.save', side_effect=fail_response):
+        stopped = runner.run([], 'Read the source.', StepBudget(max_steps=5))
+    assert stopped['status'] == 'runtime_error'
+    assert 'response archive denied' in stopped['stop_reason']
+    with closing(LocalHistory(root)) as history, history.lease():
+        saved = history.load()
+    assert saved['request_pending'] is not None
+    assert not (root / 'plans').exists()
+    resumed = TaskRunner(model, environment, state_dir=root, interactive=True).run(
+        [], 'Read the source.', StepBudget(max_steps=5)
+    )
+    assert resumed['status'] == 'model_request_unknown'
+    assert len(model.calls) == 1

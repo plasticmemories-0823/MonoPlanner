@@ -1,5 +1,6 @@
 """回放真实 HTTP 适配器，仅使用模拟传输，绝不调用付费搜索。"""
 
+from copy import deepcopy
 import json
 import socket
 from pathlib import Path
@@ -71,6 +72,53 @@ class WebRetrievalTests(unittest.TestCase):
         self.assertEqual(body['tools'][0]['max_uses'], 5)
         self.assertEqual(requests[0].headers['x-api-key'], 'offline-secret')
         self.assertEqual(str(requests[0].url), 'https://api.deepseek.com/anthropic/v1/messages')
+
+    def test_search_same_url_keeps_last_result_before_applying_ten_source_limit(self):
+        entries = [
+            {'type': 'web_search_result', 'url': 'https://example.com/a', 'title': 'old'},
+            *[{'type': 'web_search_result', 'url': f'https://example.com/b{index}',
+               'title': str(index)} for index in range(9)],
+            {'type': 'web_search_result', 'url': 'https://example.com/a', 'title': 'new'},
+        ]
+        raw = {'content': [{'type': 'web_search_tool_result', 'content': entries}]}
+        original = deepcopy(raw)
+        result = search_sources(raw)
+        self.assertEqual(len(result['sources']), 10)
+        self.assertEqual(result['sources'][0]['url'], 'https://example.com/b0')
+        self.assertEqual(result['sources'][-1]['title'], 'new')
+        self.assertFalse(result['truncated'])
+        self.assertEqual(raw, original)
+
+    def test_search_limit_is_applied_after_latest_occurrence_order(self):
+        entries = [
+            {'type': 'web_search_result', 'url': 'https://example.com/a', 'title': 'old'},
+            *[{'type': 'web_search_result', 'url': f'https://example.com/b{index}'}
+              for index in range(10)],
+            {'type': 'web_search_result', 'url': 'https://example.com/a', 'title': 'new'},
+        ]
+        result = search_sources({'content': [
+            {'type': 'web_search_tool_result', 'content': entries},
+        ]})
+        self.assertTrue(result['truncated'])
+        self.assertEqual([item['url'] for item in result['sources']],
+                         [f'https://example.com/b{index}' for index in range(10)])
+
+    def test_provider_archive_keeps_every_search_occurrence(self):
+        raw = {'content': [{'type': 'web_search_tool_result', 'content': [
+            {'type': 'web_search_result', 'url': 'https://example.com/a', 'title': 'old'},
+            {'type': 'web_search_result', 'url': 'https://example.com/a', 'title': 'new'},
+        ]}], 'usage': {'input_tokens': 10, 'output_tokens': 20}}
+        with tempfile.TemporaryDirectory() as name, httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=raw)),
+        ) as client, patch(
+            'agent.execution.web.load_settings', return_value={'api_key': 'offline'},
+        ), patch(
+            'agent.execution.web.model_http_clients', return_value={'http_client': client},
+        ):
+            result = WebProvider().search('query', self.loop(), Path(name))
+            self.assertEqual(result['sources'][0]['title'], 'new')
+            self.assertEqual(len(result['sources']), 1)
+            self.assertEqual(json.loads((Path(name) / 'provider-response.json').read_bytes()), raw)
 
     def test_missing_search_blocks_never_become_fabricated_results(self):
         with self.assertRaisesRegex(ValueError, 'not a search result'):

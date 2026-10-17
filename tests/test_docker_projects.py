@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from agent.execution.docker import DockerEnvironment, runtime_profile
+from agent.execution.docker import DockerEnvironment
 from agent.execution.projects import (
     EnvironmentRequired,
     ProjectEnvironments,
@@ -144,19 +144,6 @@ class ProjectDockerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             single.host_to_container(docs / '.env')
 
-    def test_plain_chat_requires_no_image_or_docker(self):
-        from test_web_graph import ConversationTests, ScriptedModel, text_reply
-
-        fixture = ConversationTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        (fixture.root / 'runs/project-environments.json').unlink()
-        with patch.object(TaskDocker, 'start', side_effect=AssertionError('no container')):
-            model = ScriptedModel([text_reply()])
-            result = fixture.invoke(model)
-        self.assertEqual(result['status'], 'chat_complete')
-        self.assertNotIn('cmd.exe', model.calls[0][0].content)
-        self.assertNotIn('Unix commands and heredocs are not available', model.calls[0][0].content)
 
     def test_private_launcher_credentials_cannot_be_mounted_even_with_custom_state(self):
         data = self.root / 'local/MonoPlanner'
@@ -169,51 +156,6 @@ class ProjectDockerTests(unittest.TestCase):
                         repo, self.image, self.root / 'state/tasks/private', runtime=self.runtime
                     )
 
-    def test_missing_image_preserves_first_work_response_and_waits(self):
-        from test_web_graph import ConversationTests, ScriptedModel, start_reply, investigation
-
-        fixture = ConversationTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        (fixture.root / 'runs/project-environments.json').unlink()
-        model = ScriptedModel([start_reply(), investigation(['first.py'])])
-        result = fixture.invoke(model, '直接修改')
-        self.assertEqual(result['status'], 'awaiting_user')
-        self.assertEqual(len(model.calls), 1)
-        self.assertFalse(
-            list((fixture.root / 'runs/tasks' / result['task_id']).glob('plans/*/*/result.json'))
-        )
-
-    def test_permission_modes_never_select_host_execution(self):
-        from test_web_graph import (
-            ConversationTests,
-            ScriptedModel,
-            start_reply,
-            investigation,
-            text_reply,
-            FixtureDocker,
-        )
-        from agent.storage.permissions import Permissions
-
-        for mode in ('sandbox', 'ask', 'full'):
-            with self.subTest(mode=mode):
-                fixture = ConversationTests()
-                fixture.setUp()
-                try:
-                    Permissions(fixture.root / 'runs').request(fixture.thread, mode)
-                    model = ScriptedModel(
-                        [start_reply(), investigation(['first.py']), text_reply('读取完成')]
-                    )
-                    with patch.object(FixtureDocker, 'start', wraps=lambda: None) as started:
-                        result = fixture.invoke(model, '直接读取源码')
-                    self.assertTrue(result['workspace_bound'])
-                    self.assertTrue(started.called)
-                    self.assertEqual(
-                        fixture.store.session(fixture.thread)['execution_binding']['backend'],
-                        'docker',
-                    )
-                finally:
-                    fixture.doCleanups()
 
     def test_environment_routes_do_not_start_containers_or_accept_foreign_origin(self):
         from tests.http_client import TestClient
@@ -245,7 +187,7 @@ class ProjectDockerTests(unittest.TestCase):
         import io
         from agent.cli.tasks import main
         from agent.application.work_bridge import run_work
-        from test_web_graph import (
+        from tests.fixtures.models import (
             FixtureDocker,
             ScriptedModel,
             investigation,

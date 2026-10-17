@@ -639,18 +639,12 @@ class TaskRunner:
         return self._drive()
 
     def _drive(self):
-        try:
-            while self.state["status"] in {"needs_plan", "executing"}:
-                self.advance()
-                if self.yield_boundary:
-                    break
-        except ModelInterrupted as exc:
-            self.on_model_interrupted(exc.kind, sent=exc.sent)
-        except ModelRequestNotSent as exc:
-            self.state.update(status=exc.status, reason=exc.reason)
-        except Exception as exc:
-            self.state.update(status="runtime_error", reason=f"{type(exc).__name__}: {exc}")
-        return self.result()
+        from agent.task.dispatch import run
+
+        return run(self)
+
+    def continue_after_return(self):
+        return False
 
     def on_model_interrupted(self, kind, *, sent=True):
         # 纯边界暂停没有半截模型回复，不能改动已保存检查点的历史前缀。
@@ -672,67 +666,6 @@ class TaskRunner:
         )
         dialogue.apply_controls(self)
         self.persist('model_wait_interrupted', {'kind': kind})
-
-    def advance(self):
-        # 补充消息仍在原有合法边界接入，不能打断本地拒收记录配对。
-        control.check_interrupted(pause_only=True)
-        if self.state.get('rejection_pending'):
-            repair.finish_rejection(self)
-            return
-        self.budget.check_request(0)
-        if dialogue.apply_controls(self):
-            return
-
-        # ========================================================================
-        # 优先推进已接收的计划，避免重复请求规划
-        # ========================================================================
-        if self.state.get("pending"):
-            self.execute_pending()
-            return
-        if self.state.get('web_pending'):
-            from agent.execution.web import execute_calls
-
-            execute_calls(self, self.state['web_pending']['response'])
-            return
-        if self.state.get('assistant_pending'):
-            from agent.server.assistant import execute_calls
-
-            execute_calls(self, self.state['assistant_pending']['response'])
-            return
-        if self.state.get("acceptance_release"):
-            release = self.state["acceptance_release"]
-            self.accept_plan(WorkRequest.model_validate(release["plan"]), release["response"])
-            return
-        try:
-            raw = self.state.get("response_pending")
-            plan, response = self.decode_plan(raw) if raw else self.call_planner()
-            if dialogue.apply_controls(self):
-                return
-            if self.interactive:
-                dialogue.publish(self, response)
-            if isinstance(plan, dialogue.TextReply):
-                dialogue.accept_text(self, response)
-                return
-            if isinstance(plan, dialogue.WebReply):
-                from agent.execution.web import execute_calls
-
-                execute_calls(self, response)
-                return
-            if isinstance(plan, dialogue.AssistantReply):
-                from agent.server.assistant import execute_calls
-
-                execute_calls(self, response)
-                return
-            if isinstance(plan, revisions.Review):
-                revisions.review(self, plan, response)
-                return
-            if plan.kind == "blocked":
-                self.state["response_pending"] = None
-                self.state.update(status="task_blocked", reason=plan.note)
-                return
-            self.accept_plan(plan, response)
-        except ValueError as exc:
-            repair.prepare_rejection(self, exc)
 
     # ========================================================================
     # 结果汇总与验证证据

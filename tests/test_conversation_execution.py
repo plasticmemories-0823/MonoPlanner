@@ -101,23 +101,3 @@ class ConversationExecutionTests(unittest.TestCase):
                     with self.assertRaises((ValueError, RuntimeError)):
                         TaskDocker(self.repo, self.image, self.task)
                     self.assertEqual(inspect.call_count, 1)
-
-    def test_chat_binding_is_frozen_without_starting_execution(self):
-        from tests.test_web_graph import ConversationTests, ScriptedModel, text_reply
-
-        fixture = ConversationTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        with patch.dict(
-            os.environ,
-            {'MONOPLANER_EVALUATION_WORKSPACES': json.dumps({str(fixture.repo): self.image})},
-        ), patch.object(TaskDocker, 'start') as start:
-            model = ScriptedModel([text_reply()])
-            result = fixture.invoke(model)
-            self.assertEqual(result['status'], 'chat_complete')
-            self.assertIn('Linux Docker', model.calls[0][0].content)
-            self.assertNotIn('Windows; shell', model.calls[0][0].content)
-            self.assertEqual(
-                fixture.store.session(fixture.thread)['execution_binding']['image'], self.image
-            )
-            start.assert_not_called()

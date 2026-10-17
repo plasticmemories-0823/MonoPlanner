@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import hashlib
 import json
+import re
 import time
 from pathlib import Path, PurePosixPath
 from agent.source.snapshots import _safe_file
@@ -64,6 +65,7 @@ class OperationExecutor:
                 "feedback",
                 "drafts",
                 "acceptance",
+                "tool-payloads",
             }:
                 raise ValueError("Only archived operation evidence is readable")
             base = self.root
@@ -72,7 +74,12 @@ class OperationExecutor:
                 raise ValueError("Path is absent or excluded from the source inventory")
             base = self.environment.repo_root
         path = _safe_file(base, relative)
-        if path.stat().st_size > 2_000_000:
+        from agent.model.tool_payloads import readable
+
+        payload = readable(name, getattr(self, 'archive', None))
+        if name.startswith('$record/tool-payloads/') and not payload:
+            raise ValueError('Tool payload paths require an exact SHA-256 filename.')
+        if not payload and path.stat().st_size > 2_000_000:
             raise ValueError("Read a bounded source/log file (at most 2MB)")
         return path
 
@@ -96,6 +103,11 @@ class OperationExecutor:
 
     def read(self, name, offset, limit, *, budget=None):
         name = PurePosixPath(name.replace('\\', '/')).as_posix()
+        from agent.model.tool_payloads import read, readable
+
+        archive = getattr(self, 'archive', None)
+        if readable(name, archive):
+            return read(self.root, name, offset, limit, budget=budget, archive=archive)
         if name.startswith('$record/'):
             data = self.path(name).read_bytes()
             lines = data.decode('utf-8').splitlines()
@@ -130,7 +142,11 @@ class OperationExecutor:
         ranges(offset, limit)  # 即使不需要补读，也必须检查参数限制。
         path = PurePosixPath(path.replace('\\', '/')).as_posix()
         if path.startswith('$record/'):
-            data = read_range(self, path, offset, limit, budget)
+            from agent.model.tool_payloads import readable
+
+            data = (self.read(path, offset, limit, budget=budget)
+                    if readable(path, getattr(self, 'archive', None))
+                    else read_range(self, path, offset, limit, budget))
             pages = list(read_pages(data))
             data['continuation'] = {
                 'requested_offset': offset,
@@ -242,8 +258,27 @@ class OperationExecutor:
             from agent.source.paging import ReadBudget, OUTPUT_BYTES
 
             budget = ReadBudget()
-            if step.from_step:
-                hits = prior[step.from_step]["data"]["hits"][:5]
+            if step.query.startswith('payload_bytes:'):
+                from agent.model.tool_payloads import read_bytes
+
+                match = re.fullmatch(r'payload_bytes:(0|[1-9][0-9]*)', step.query)
+                if not match or step.from_step or step.offset != 0 or step.limit != 2000:
+                    raise ValueError('Payload byte reads require an exact path, offset=0, default '
+                                     'limit=2000 and query=payload_bytes:<byte offset>; the shared '
+                                     '50 KiB display budget bounds this mode, not the line limit.')
+                data = read_bytes(
+                    self.root, step.path.replace('\\', '/'), int(match[1]),
+                    budget=budget, archive=getattr(self, 'archive', None),
+                )
+            elif step.from_step:
+                from agent.model.tool_results import normalize_result
+
+                source = prior[step.from_step]
+                result = normalize_result(
+                    "search_files", source["data"], source_version=source.get("before"),
+                    project=self.environment.repo_root,
+                )
+                hits = result["hits"][:5]
                 if not hits:
                     raise ValueError("Referenced search has no hits; no path was guessed")
                 data = {
