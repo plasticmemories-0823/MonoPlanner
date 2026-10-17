@@ -35,6 +35,8 @@ def _execute_pending(self):
             if self.state["verification"]["status"] == "passed"
             else "verification_failed"
         )
+    if plan.kind == "candidate" and len(self.state["rounds"]) >= self.max_rounds:
+        return self.finish_plan("candidate_limit_reached")
     prior = {r["id"]: r for r in pending["rows"]}
     while pending["cursor"] < len(plan.steps):
         self.budget.check_request(0)
@@ -139,8 +141,7 @@ def _execute_pending(self):
 
 def final_acceptance(self):
     if len(self.state["rounds"]) >= self.max_rounds:
-        self.state.update(status="stalled", reason="Final candidate attempt limit reached")
-        return
+        return self.finish_plan("candidate_limit_reached")
     pending = self.state["pending"]
     folder = self.root / "feedback" / pending["id"]
     if self.optimize_source:
@@ -196,6 +197,11 @@ def finish_plan(self, outcome):
         "plan": pending["id"],
         "steps": [{k: v for k, v in r.items() if k != "cache_key"} for r in pending["rows"]],
     }
+    if outcome == "candidate_limit_reached":
+        result["final_acceptance"] = {
+            "status": "not_run",
+            "reason": "Final candidate attempt limit reached",
+        }
     if outcome.startswith("verification") or outcome == "verified_success":
         report = self.state["verification"]
         result["verification"] = {
@@ -237,11 +243,15 @@ def finish_plan(self, outcome):
             ),
         ]
     )
+    status = "verified_success" if outcome == "verified_success" else "needs_plan"
+    reason = "Fixed final acceptance passed" if outcome == "verified_success" else outcome
+    if outcome == "candidate_limit_reached":
+        status, reason = "stalled", result["final_acceptance"]["reason"]
     self.state.update(
         last_plan=pending["id"],
         last_result=result,
         pending=None,
-        status="verified_success" if outcome == "verified_success" else "needs_plan",
-        reason="Fixed final acceptance passed" if outcome == "verified_success" else outcome,
+        status=status,
+        reason=reason,
     )
     self.persist("plan_finished", {"plan": self.state["last_plan"], "outcome": outcome})
