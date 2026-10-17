@@ -21,12 +21,12 @@ from agent.task import control
 
 def test_rewrite_signals_require_applicability():
     located = assess(intent='locate', exact_current_hit=True, missing_entities=['x'],
-                     single_source=True, dual_disagreement=True)
+                     single_source=True)
     assert not located['triggered']
     assert located['suppressed']['single_source'] == 'exact_current_version_short_circuit'
-    degraded = assess(intent='audit', dual_disagreement=True, vector_ready=False)
-    assert not degraded['triggered']
-    assert degraded['suppressed']['dual_disagreement'] == 'vector_route_incomplete'
+    absent = assess(intent='audit')
+    assert not absent['triggered']
+    assert 'dual_disagreement' not in absent['suppressed']
     missing = assess(intent='diagnostic', missing_entities=['x'])
     assert missing['triggered'] == ['required_evidence_missing']
 

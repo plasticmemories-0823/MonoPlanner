@@ -34,6 +34,18 @@ def retrieval_reply(**changes):
                      usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5})
 
 
+def search_reply(*, read=False, **changes):
+    step = {'id': 'find', 'op': 'search', **arguments(**changes)}
+    steps = [step]
+    if read:
+        steps.append({'id': 'read', 'op': 'read', 'from_step': 'find', 'limit': 20})
+    return AIMessage(content='', additional_kwargs={'reasoning_content': 'saved original thought'},
+                     tool_calls=[{'name': 'submit_plan', 'id': 'read-evidence',
+                                  'args': {'kind': 'inspect', 'note': 'Find original evidence',
+                                           'steps': steps}}],
+                     usage_metadata={'input_tokens': 3, 'output_tokens': 2, 'total_tokens': 5})
+
+
 def blocked():
     return AIMessage(content='', tool_calls=[{
         'name': 'submit_plan', 'id': 'blocked',
@@ -52,7 +64,7 @@ def project(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('intent', ['locate', 'diagnostic', 'audit'])
-def test_tokenizer_failure_keeps_lexical_evidence_without_paid_rewrite(
+def test_tokenizer_failure_keeps_semantic_unavailable_without_paid_rewrite(
     project, tmp_path, monkeypatch, intent,
 ):
     from agent.rag.models import ModelUnavailable
@@ -64,9 +76,9 @@ def test_tokenizer_failure_keeps_lexical_evidence_without_paid_rewrite(
 
     class ForbiddenRoute:
         def search(self, *_):
-            pytest.fail('An estimated fallback index must not be sent to the vector route')
+            pytest.fail('Unavailable tokenizer must not dispatch a vector request')
         def score(self, *_):
-            pytest.fail('The degraded request must not start another local model')
+            pytest.fail('Unavailable tokenizer must not dispatch reranking')
 
     model = SimpleNamespace(manifest={'models': {'embedding': {'configured': True}}},
                             index_documents=failed_index, vector=ForbiddenRoute(),
@@ -78,82 +90,66 @@ def test_tokenizer_failure_keeps_lexical_evidence_without_paid_rewrite(
     sources.add('source:main.py', version, len(text), lambda: text, kind='code', path='main.py')
     result = integration._retrieve(
         SimpleNamespace(), sources,
-        arguments(intent=intent, required_entities=['answer'], required_kinds=['code', 'log']),
+        arguments(mode='semantic', intent=intent, required_entities=['answer'], required_kinds=['code', 'log']),
         root=tmp_path, cache_root=tmp_path / 'tasks/task', repo=project, task_id='task',
         request_id='one-request', config=integration.task_configuration(tmp_path, 'task'),
-        rewrite=lambda *_: pytest.fail('Incomplete retrieval must not consume a rewrite'),
+        rewrite=lambda *_: pytest.fail('Unavailable retrieval must not consume a rewrite'),
     )
     assert attempted == ['count']
-    assert 'return 42' in json.dumps(result)
-    assert result['retrieval_mode'] == 'lexical_fallback'
-    assert result['retrieval_incomplete'] is True
+    assert result['results'] == [] and result['hits'] == []
+    assert result['retrieval_mode'] == 'semantic' and result['retrieval_incomplete']
     assert result['rewrite'] == {'status': 'not_triggered', 'triggered': []}
-    assert len(list((tmp_path / 'tasks/task/rag/indexes').glob('*.sqlite3'))) == 2
 
 
 def test_work_tool_reaches_next_request_after_original_and_preserves_pairing(project, tmp_path):
-    model = ScriptedModel([retrieval_reply(), blocked()])
+    model = ScriptedModel([search_reply(read=True), blocked()])
     loop = TaskRunner(model, LocalEnvironment(project, artifact_root=tmp_path / 'runtime'),
                       state_dir=tmp_path / 'tasks' / 'current', overlap_preparation=False,
                       user_request_id='one-user-request')
     result = loop.run([], 'Find the answer function', StepBudget(max_steps=5))
-    assert result['status'] == 'task_blocked'
-    assert len(model.calls) == 2
+    assert result['status'] == 'task_blocked' and len(model.calls) == 2
     tool = next(item for item in model.calls[1] if isinstance(item, ToolMessage))
-    assert tool.name == 'retrieve_evidence' and tool.tool_call_id == 'read-evidence'
+    assert tool.name == 'submit_plan' and tool.tool_call_id == 'read-evidence'
     payload = json.loads(tool.content)
     assert 'return 42' in tool.content and 'DO_NOT_INDEX' not in tool.content
-    assert payload['exact_current_version_hit'] is True
-    assert payload['rewrite']['status'] == 'not_triggered'
-    original = next(loop.root.glob('rag/operations/*/result.json'))
-    assert json.loads(original.read_text('utf-8')) == payload
+    search = payload['steps'][0]
+    assert search['data']['mode'] == 'exact' and search['data']['hits']
+    original = loop.root / search['record']
+    saved = json.loads(original.read_text('utf-8'))
+    assert saved['data']['hits'] == search['data']['hits']
     assert loop.state['rag_request_id'] == 'one-user-request'
-    assert loop.state['rag_pending'] is None and loop.state['rag_running'] is None
-    assert list((loop.root / 'rag/indexes').glob('*.sqlite3'))
-    assert not (tmp_path / 'rag/indexes').exists()
+    assert not loop.state.get('rag_pending') and not loop.state.get('rag_running')
+    assert not (loop.root / 'rag/operations').exists()
     assert not loop.state.get('verification_spec')
     assert loop.state['history'][:1] == [message_to_dict(model.calls[0][1])]
 
 
 def test_work_original_write_failure_never_dispatches_next_model(project, tmp_path, monkeypatch):
-    save = integration.save
+    from agent.task import operations
 
+    save = operations.save
     def fail(path, value):
         if Path(path).name == 'result.json':
             raise OSError('fixture disk failure')
         return save(path, value)
 
-    monkeypatch.setattr(integration, 'save', fail)
-    model = ScriptedModel([retrieval_reply(), blocked()])
+    monkeypatch.setattr(operations, 'save', fail)
+    model = ScriptedModel([search_reply(), blocked()])
     loop = TaskRunner(model, LocalEnvironment(project, artifact_root=tmp_path / 'runtime'),
                       state_dir=tmp_path / 'tasks' / 'failed', overlap_preparation=False)
     result = loop.run([], 'Find answer', StepBudget(max_steps=5))
     assert result['status'] == 'runtime_error' and len(model.calls) == 1
-    assert loop.state['rag_running'] == 'read-evidence'
+    assert loop.state['running_step']['id'] == 'find'
     assert all(raw['type'] != 'tool' for raw in loop.state['history'])
-    assert 'response_ref' in loop.state['rag_pending']
-    assert 'response' not in loop.state['rag_pending']
+    assert loop.state['pending']['rows'] == []
 
 
-def test_saved_retrieval_result_can_be_paired_without_running_again(project, tmp_path, monkeypatch):
-    raw = message_to_dict(retrieval_reply())
-    root = tmp_path / 'task'
-    root.mkdir()
-    loop = SimpleNamespace(root=root, state={'history': [], 'response_pending': raw},
-                           history_store=None, persist=lambda *_: None)
-    observed = []
-    monkeypatch.setattr(integration, 'retrieve_work',
-                        lambda *_: observed.append('retrieved') or {'results': ['unchanged']})
-    delivery = integration.delivery
-    monkeypatch.setattr(integration, 'delivery', lambda *_: (_ for _ in ()).throw(OSError('paused')))
-    with pytest.raises(OSError):
-        integration.execute_work_retrieval(loop, raw)
-    assert loop.state['rag_pending']['result_record'] and loop.state['rag_running'] is None
-    monkeypatch.setattr(integration, 'delivery', delivery)
-    integration.execute_work_retrieval(loop, None)
-    assert observed == ['retrieved']
-    assert [message['type'] for message in loop.state['history']] == ['ai', 'tool']
-    assert loop.state['history'][1]['data']['tool_call_id'] == 'read-evidence'
+def test_retired_work_tool_is_rejected_before_any_search(project, tmp_path, monkeypatch):
+    monkeypatch.setattr(integration, 'retrieve_work', lambda *_: pytest.fail('Retired lane executed'))
+    loop = TaskRunner(ScriptedModel([]), LocalEnvironment(project, artifact_root=tmp_path / 'runtime'))
+    loop.state = {}
+    with pytest.raises(ValueError):
+        loop.decode_plan(message_to_dict(retrieval_reply()))
 
 
 def test_rewrite_uses_separate_request_state_and_keeps_work_response(project, tmp_path):
@@ -162,7 +158,7 @@ def test_rewrite_uses_separate_request_state_and_keeps_work_response(project, tm
     loop.root = tmp_path / 'task'
     loop.root.mkdir()
     loop.budget = StepBudget(max_steps=5)
-    current = message_to_dict(retrieval_reply())
+    current = message_to_dict(search_reply())
     loop.state = {'history': [], 'response_pending': current, 'context_usage': {'used_tokens': 23}}
     loop.persist = lambda *_: None
     result = loop.request_model([HumanMessage(content='rewrite answer')], 'rag_rewrite')
@@ -192,12 +188,12 @@ def test_unknown_rewrite_stops_and_restart_does_not_repeat(project, tmp_path, mo
     monkeypatch.setattr(integration, 'retrieve_work', retrieve)
     environment = LocalEnvironment(project, artifact_root=tmp_path / 'runtime')
     root = tmp_path / 'tasks' / 'unknown'
-    first_model = ScriptedModel([retrieval_reply()])
+    first_model = ScriptedModel([search_reply()])
     first = TaskRunner(first_model, environment, state_dir=root, overlap_preparation=False,
                        user_request_id='shared-request')
     first.run([], 'Find answer', StepBudget(max_steps=5))
     assert attempts == ['sent'] and len(first_model.calls) == 1
-    assert first.state['rag_running'] == 'read-evidence'
+    assert first.state['running_step']['id'] == 'find'
     model = ScriptedModel([])
     resumed = TaskRunner(model, environment, state_dir=root, overlap_preparation=False,
                          user_request_id='shared-request')
@@ -207,34 +203,23 @@ def test_unknown_rewrite_stops_and_restart_does_not_repeat(project, tmp_path, mo
 
 
 def test_resume_saved_result_preserves_prefix_and_original_tool_id(project, tmp_path, monkeypatch):
-    from agent.model.errors import ModelInterrupted
-
-    original_delivery = integration.delivery
-    raised = []
-
-    def stop_after_save(result, call):
-        if not raised:
-            raised.append(True)
-            raise ModelInterrupted('pause', sent=False)
-        return original_delivery(result, call)
-
-    monkeypatch.setattr(integration, 'delivery', stop_after_save)
     environment = LocalEnvironment(project, artifact_root=tmp_path / 'runtime')
     root = tmp_path / 'tasks' / 'saved'
-    first_model = ScriptedModel([retrieval_reply()])
-    first = TaskRunner(first_model, environment, state_dir=root, overlap_preparation=False)
+    first_model = ScriptedModel([search_reply()])
+    first = TaskRunner(first_model, environment, state_dir=root, overlap_preparation=False,
+                       pause_after_steps=1)
     result = first.run([], 'Find answer', StepBudget(max_steps=5))
     assert result['status'] == 'paused'
     prefix = deepcopy(first.state['history'])
     monkeypatch.setattr(integration, 'retrieve_work',
-                        lambda *_: pytest.fail('A saved retrieval must not be replayed'))
+                        lambda *_: pytest.fail('A saved search must not be replayed'))
     model = ScriptedModel([blocked()])
     resumed = TaskRunner(model, environment, state_dir=root, overlap_preparation=False)
     result = resumed.run([], 'Find answer', StepBudget(max_steps=5))
     assert result['status'] == 'task_blocked' and len(model.calls) == 1
     assert resumed.state['history'][:len(prefix)] == prefix
     tool = next(item for item in model.calls[0] if isinstance(item, ToolMessage))
-    assert tool.tool_call_id == 'read-evidence' and 'return 42' in tool.content
+    assert tool.tool_call_id == 'read-evidence' and 'answer' in tool.content
 
 
 def test_records_require_current_task_commit_and_skip_model_and_acceptance(tmp_path):
@@ -292,7 +277,7 @@ def test_chat_uses_bound_project_not_parent_or_additional_sources(project, tmp_p
 def test_chat_without_bound_project_reports_gap_without_model_rewrite(project, tmp_path):
     store = ApplicationStore(tmp_path / 'state')
     conversation = store.create(repo=str(project))['thread_id']
-    model = ScriptedModel([retrieval_reply(), text_reply()])
+    model = ScriptedModel([retrieval_reply(mode='semantic'), text_reply()])
     bot = Chatbot(store, lambda *_: pytest.fail('Unexpected handoff'), factory=lambda _: model)
     command = {'id': str(uuid.uuid4()), 'kind': 'message', 'text': 'Retrieve evidence'}
     store.submit(conversation, command)
@@ -348,9 +333,9 @@ def test_work_citation_audit_preserves_response_and_does_not_reject_plan(project
         def invoke(self, messages):
             self.calls.append(messages)
             if len(self.calls) == 1:
-                return retrieval_reply()
+                return search_reply()
             tool = next(item for item in messages if isinstance(item, ToolMessage))
-            chunk = json.loads(tool.content)['results'][0]
+            chunk = json.loads(tool.content)['steps'][0]['data']['results'][0]
             response = blocked()
             response.content = f"Observed source [evidence:{chunk['id']}] [evidence:unknown]."
             self.original = message_to_dict(response)
@@ -392,7 +377,7 @@ def test_public_record_projection_never_reuses_work_private_index(project, tmp_p
         sources.add('record:plans/p1/p1-s1/result.json', version, len(text), lambda: text,
                     kind='tool_result', path='$record/plans/p1/p1-s1/result.json', run_id='task')
         return integration._retrieve(
-            SimpleNamespace(), sources, arguments(query='failed detail', path='.', intent='diagnostic'),
+            SimpleNamespace(), sources, arguments(query='failed', path='.', intent='diagnostic'),
             root=tmp_path, cache_root=tmp_path / 'tasks/task', repo=project,
             task_id='task', request_id='request',
             config=configuration, rewrite=None, reader_scope=reader_scope,
@@ -429,7 +414,7 @@ def test_index_resource_failure_is_not_presented_as_absent_evidence(project, tmp
 def test_required_gap_uses_one_charged_rewrite_with_isolated_context(project, tmp_path, monkeypatch):
     class Vector:
         def search(self, query, index, limit):
-            return [(chunk.id, 1.0) for chunk, _ in index.search(query)][:limit]
+            return [(chunk.id, 1.0) for chunk in index.chunks(query)][:limit]
 
     class Reranker:
         def score(self, query, chunks):
@@ -439,7 +424,7 @@ def test_required_gap_uses_one_charged_rewrite_with_isolated_context(project, tm
         vector=Vector(), reranker=Reranker(),
     ))
     model = ScriptedModel([
-        retrieval_reply(intent='diagnostic', required_entities=['missingSymbol']),
+        search_reply(mode='semantic', intent='diagnostic', required_entities=['missingSymbol']),
         text_reply('{"query":"answer missingSymbol"}'), blocked(),
     ])
     loop = TaskRunner(model, LocalEnvironment(project, artifact_root=tmp_path / 'runtime'),
@@ -453,7 +438,7 @@ def test_required_gap_uses_one_charged_rewrite_with_isolated_context(project, tm
     assert 'saved original thought' not in str(rewrite_messages)
     tool = next(item for item in model.calls[2] if isinstance(item, ToolMessage))
     assert tool.tool_call_id == 'read-evidence'
-    assert json.loads(tool.content)['rewrite']['status'] == 'complete'
+    assert json.loads(tool.content)['steps'][0]['data']['rewrite']['status'] == 'complete'
     assert [entry['purpose'] for entry in loop.state['model_usage']] == ['plan', 'rag_rewrite', 'plan']
     from agent.rag.rewrite import RewriteLedger
 
@@ -523,7 +508,7 @@ def test_full_source_cache_prunes_stale_versions_before_admitting_replacement(pr
     assert retrieve('old', 'answer old')['results']
     original = Index.upsert_documents
     observations = []
-    def bounded(index, documents):
+    def bounded(index, documents, **kwargs):
         # 确定性的单版本缓存上限：旧版本未释放时拒绝下一次写入。
         with index._connection() as db:
             old = db.execute('SELECT version FROM documents WHERE scope=?',
@@ -531,7 +516,7 @@ def test_full_source_cache_prunes_stale_versions_before_admitting_replacement(pr
         observations.append(old)
         if old:
             raise sqlite3.OperationalError('database or disk is full')
-        return original(index, documents)
+        return original(index, documents, **kwargs)
     monkeypatch.setattr(Index, 'upsert_documents', bounded)
     result = retrieve('new', 'answer new')
     assert observations == [[]]

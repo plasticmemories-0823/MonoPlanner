@@ -22,6 +22,27 @@ from agent.storage.recovery import code_key
 
 
 class PlanSchemaTests(unittest.TestCase):
+    def test_chat_retrieval_uses_supported_strict_schema_fields(self):
+        from agent.model.tools import retrieve_evidence
+
+        parameters = convert_to_openai_tool(retrieve_evidence, strict=True)['function']['parameters']
+
+        def check(value):
+            if isinstance(value, dict):
+                self.assertFalse(set(value) & {
+                    'minLength', 'maxLength', 'minItems', 'maxItems', 'default',
+                })
+                if value.get('type') == 'object':
+                    self.assertEqual(set(value['required']), set(value['properties']))
+                    self.assertIs(value['additionalProperties'], False)
+                for child in value.values():
+                    check(child)
+            elif isinstance(value, list):
+                for child in value:
+                    check(child)
+
+        check(parameters)
+
     def test_resource_matches_local_contract_and_supported_strict_rules(self):
         # 在相同且受支持的投影处理之后，比较现有约定。
         expected = convert_to_openai_tool(WorkRequest, strict=True)["function"]["parameters"]

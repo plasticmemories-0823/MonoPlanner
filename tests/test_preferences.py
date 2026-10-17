@@ -150,7 +150,6 @@ class PreferencesTests(unittest.TestCase):
                 'web_fetch',
                 'list_files',
                 'read_file',
-                'search_files',
                 'run_existing',
                 'list_applications',
                 'open_file',

@@ -311,16 +311,21 @@ def test_completed_tool_event_save_failure_keeps_actual_result_and_stops(setup, 
         {'url': 'https://example.test/a?x=2', 'title': 'other'},
         {'url': 'https://example.test/a?x=1', 'title': 'new'},
     ]),
-    ('search_files', 'hits', [
+    ('retrieve_evidence', 'hits', [
         {'path': 'src/a.py', 'line': 3, 'text': 'old'},
         {'path': 'src/a.py', 'line': 4, 'text': 'other'},
         {'path': 'src/a.py', 'line': 3, 'text': 'new'},
     ]),
 ])
-def test_chat_search_collection_normalization_keeps_original_and_order(setup, name, key, items):
+def test_chat_search_collection_normalization_keeps_original_and_order(
+    setup, name, key, items, monkeypatch
+):
     store, conversation, _ = setup
     raw = {key: items, 'next_offset': 12, 'record': 'unchanged-original-reference'}
-    model = ScriptedModel([reply(call(name)), text_reply()])
+    if name == 'retrieve_evidence':
+        monkeypatch.setattr('agent.rag.integration.retrieve_chat', lambda *_: raw)
+    arguments = {'query': 'new', 'path': '.'} if name == 'retrieve_evidence' else {}
+    model = ScriptedModel([reply(call(name, **arguments)), text_reply()])
     bot = Chatbot(store, lambda *_: None, factory=lambda _: model, invoke_tool=lambda *_: raw)
     item = incoming()
     store.submit(conversation, item)

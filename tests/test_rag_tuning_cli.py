@@ -104,7 +104,7 @@ class RAGTuningCLITests(unittest.TestCase):
 
     def test_tampered_or_no_change_proposal_cannot_create_shadow_trial(self):
         proposal = self.propose()
-        proposal['values']['vector_weight'] = 0.9
+        proposal['values']['rewrite_threshold'] = 0.9
         code, _ = self.run_cli('shadow', '--proposal', self.save('tampered', proposal),
                                '--spec', self.save('spec', self.spec()))
         self.assertEqual(code, 2)

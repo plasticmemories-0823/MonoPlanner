@@ -98,15 +98,21 @@ class OperationExecutor:
             lines = self.prepared['lines'].get(name)
             if lines is not None:
                 self.prepared_line_hits += 1
+                if lines and lines[0].startswith('\ufeff'):
+                    lines = [lines[0][1:], *lines[1:]]
+                    if lines == ['']:
+                        lines = []
                 return lines
-        return self.source_bytes(name).decode('utf-8').splitlines()
+        return self.source_bytes(name).decode('utf-8-sig').splitlines()
 
-    def read(self, name, offset, limit, *, budget=None):
+    def read(self, name, offset, limit, *, budget=None, cursor=None):
         name = PurePosixPath(name.replace('\\', '/')).as_posix()
         from agent.model.tool_payloads import read, readable
 
         archive = getattr(self, 'archive', None)
         if readable(name, archive):
+            if cursor:
+                raise ValueError('Tool payloads use their explicit byte continuation query.')
             return read(self.root, name, offset, limit, budget=budget, archive=archive)
         if name.startswith('$record/'):
             data = self.path(name).read_bytes()
@@ -122,7 +128,7 @@ class OperationExecutor:
             "offset": offset,
             "total_lines": len(lines),
             "sha256": hashlib.sha256(data).hexdigest(),
-            **budget.excerpt(lines, offset, limit),
+            **budget.source(data, offset, limit, cursor=cursor),
         }
 
     def has_visible_overlap(self, step):
@@ -135,12 +141,14 @@ class OperationExecutor:
             for start, end in self.visible_reads.get((name, sha), [])
         )
 
-    def read_continuation(self, path, offset, limit, repeat=False, *, budget=None):
+    def read_continuation(self, path, offset, limit, repeat=False, *, budget=None, cursor=None):
         from agent.source.paging import ranges, unread, read_pages, read_range, ReadBudget
 
         budget = budget if budget is not None else ReadBudget()
         ranges(offset, limit)  # 即使不需要补读，也必须检查参数限制。
         path = PurePosixPath(path.replace('\\', '/')).as_posix()
+        if cursor:
+            return read_range(self, path, offset, limit, budget, cursor=cursor)
         if path.startswith('$record/'):
             from agent.model.tool_payloads import readable
 
@@ -171,7 +179,8 @@ class OperationExecutor:
             data = (
                 reads[0]
                 if len(reads) == 1
-                else {'reads': reads, 'truncated': any(r['truncated'] for r in reads)}
+                else {'reads': reads, 'truncated': any(r['truncated'] for r in reads),
+                      'next_cursor': reads[-1].get('next_cursor')}
             )
         else:
             data = {
@@ -209,48 +218,52 @@ class OperationExecutor:
         return data
 
     def search(self, step):
-        if step.path == "$record" or step.path.startswith("$record/"):
-            archive = getattr(self, "archive", None)
-            if archive is None:
-                raise ValueError("Indexed history is disabled; use an exact $record path")
-            items = archive.find(
-                step.query,
-                min(step.limit, 50),
-                step.path[8:] if step.path.startswith("$record/") else "",
-            )
-            return {
-                "hits": [
-                    {
-                        "path": "$record/" + v["path"],
-                        "line": 1,
-                        "text": v["kind"] + ": " + (v["query"] or ""),
-                    }
-                    for v in items
-                ],
-                "truncated": len(items) >= min(step.limit, 50),
-                "files_examined": None,
-            }
-        prefix = Path(step.path).as_posix().strip("/")
-        if prefix in {"", "."}:
-            prefix = ""
-        if Path(step.path).is_absolute() or ".." in Path(step.path).parts or ":" in step.path:
-            raise ValueError("Search scope must be a repository-relative directory")
-        hits, examined = [], 0
-        names = sorted(
-            n for n in self.inventory() if not prefix or n.startswith(prefix + "/") or n == prefix
+        from agent.rag.integration import retrieve_work
+
+        return retrieve_work(getattr(self, 'retrieval_owner', self), {
+            'query': step.query, 'path': step.path, 'mode': step.mode,
+            'offset': step.offset, 'limit': step.limit, 'cursor': step.cursor,
+            'intent': step.intent, 'required_entities': step.required_entities,
+            'required_kinds': step.required_kinds,
+        })
+
+    def read_hit(self, hit, step, budget):
+        """依赖搜索读取先核验命中原件，防止旧位置读成变化后的另一段正文。"""
+        path = hit['path']
+        expected = hit.get('source_sha256')
+        version = hit.get('version')
+        if not expected or not version:
+            raise ValueError('Search hit has no verified source version.')
+        if not path.startswith('$record/') and self.inventory().get(path) != version:
+            raise ValueError('Search hit source version changed; repeat the search.')
+        raw = self.path(path).read_bytes() if path.startswith('$record/') else self.source_bytes(path)
+        if hashlib.sha256(raw).hexdigest() != expected:
+            raise ValueError('Search hit source changed; repeat the search.')
+        from agent.source.paging import read_pages, source_cursor
+
+        text = raw.decode('utf-8')
+        position = hit.get('match_start')
+        end = hit.get('match_end')
+        if position is None:
+            position, end = hit.get('start'), hit.get('end')
+        if type(position) is int and type(end) is int and 0 <= position < end <= len(text):
+            line_start = text.rfind('\n', 0, position) + 1
+            line_end = text.find('\n', end)
+            line_end = len(text) if line_end < 0 else line_end
+            if len(text[line_start:line_end].encode('utf-8')) > budget.maximum and budget.remaining:
+                # 检索区间是 Unicode 位置，续读必须换成含 BOM/CRLF 的原始 UTF-8 字节位置。
+                start = len(text[:max(line_start, position - 96)].encode('utf-8'))
+                stop = len(text[:line_end].encode('utf-8'))
+                result = budget.source(raw, hit['line'] - 1, step.limit,
+                                       cursor=source_cursor(expected, start, stop))
+                return {'path': path, **result}
+        result = self.read_continuation(
+            path, max(0, hit['line'] - 1 - step.limit // 2), step.limit,
+            step.query.startswith('reread:'), budget=budget,
         )
-        for name in names:
-            examined += 1
-            try:
-                lines = self.source_lines(name)
-            except UnicodeError:
-                continue
-            for i, line in enumerate(lines):
-                if step.query in line:
-                    hits.append({"path": name, "line": i + 1, "text": line[:500]})
-                    if len(hits) >= min(step.limit, 50):
-                        return {"hits": hits, "truncated": True, "files_examined": examined}
-        return {"hits": hits, "truncated": False, "files_examined": examined}
+        if any(page['sha256'] != expected for page in read_pages(result)):
+            raise ValueError('Search hit source changed while reading; no new text was delivered.')
+        return result
 
     def execute(self, step, prior, directory, timeout, *, isolated=False):
         started = time.monotonic()
@@ -262,7 +275,8 @@ class OperationExecutor:
                 from agent.model.tool_payloads import read_bytes
 
                 match = re.fullmatch(r'payload_bytes:(0|[1-9][0-9]*)', step.query)
-                if not match or step.from_step or step.offset != 0 or step.limit != 2000:
+                if (not match or step.from_step or step.cursor
+                        or step.offset != 0 or step.limit != 2000):
                     raise ValueError('Payload byte reads require an exact path, offset=0, default '
                                      'limit=2000 and query=payload_bytes:<byte offset>; the shared '
                                      '50 KiB display budget bounds this mode, not the line limit.')
@@ -275,7 +289,7 @@ class OperationExecutor:
 
                 source = prior[step.from_step]
                 result = normalize_result(
-                    "search_files", source["data"], source_version=source.get("before"),
+                    "retrieve_evidence", source["data"], source_version=source.get("before"),
                     project=self.environment.repo_root,
                 )
                 hits = result["hits"][:5]
@@ -283,13 +297,7 @@ class OperationExecutor:
                     raise ValueError("Referenced search has no hits; no path was guessed")
                 data = {
                     "reads": [
-                        self.read_continuation(
-                            h["path"],
-                            max(0, h["line"] - 1 - step.limit // 2),
-                            step.limit,
-                            step.query.startswith('reread:'),
-                            budget=budget,
-                        )
+                        self.read_hit(h, step, budget)
                         for h in hits
                     ]
                 }
@@ -301,6 +309,7 @@ class OperationExecutor:
                     step.limit,
                     step.query.startswith('reread:'),
                     budget=budget,
+                    cursor=step.cursor,
                 )
             data['output_budget'] = {
                 'limit_bytes': OUTPUT_BYTES,
@@ -311,12 +320,7 @@ class OperationExecutor:
             ok = True
         elif step.op == "search":
             data, ok = self.search(step), True
-            data.update(
-                query=step.query,
-                scope=step.path,
-                requested_limit=step.limit,
-                match_mode="literal_case_sensitive",
-            )
+            data.update(requested_limit=step.limit, requested_offset=step.offset)
         elif isolated:
             from agent.execution.probe import run_probe
 

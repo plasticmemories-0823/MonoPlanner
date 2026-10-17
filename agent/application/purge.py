@@ -46,6 +46,7 @@ def task_paths(store, tasks, check_state):
             with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
                 row = db.execute('SELECT path,sha256 FROM commits ORDER BY seq DESC LIMIT 1').fetchone()
             state = checked(target, *row)['state'] if row else {}
+            # 历史检索未知记录仍受删除保护；这里不恢复旧执行通道。
             if (any(state.get(key) for key in ('request_pending', 'running_step',
                     'verification_running', 'acceptance_running', 'assistant_running',
                     'web_running', 'web_request_pending', 'rag_running', 'rag_request_pending'))

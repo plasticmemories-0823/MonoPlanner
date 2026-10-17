@@ -187,6 +187,14 @@ class RecordingModel:
         return result
 
     @property
+    def policy(self):
+        return getattr(self.model, 'policy', None)
+
+    @property
+    def timeout(self):
+        return getattr(self.model, 'timeout', None)
+
+    @property
     def context_envelope(self):
         value = getattr(self.model, "context_envelope", None)
         return value if isinstance(value, dict) else {}

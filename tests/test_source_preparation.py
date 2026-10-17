@@ -124,8 +124,9 @@ class SourceTests(unittest.TestCase):
         nav = RepositoryNavigator.from_prepared(ev.view(), prepared, self.root / 'map')
         (self.repo / 'sample.py').write_text('def replacement(): pass')
         with patch('agent.source.index.os.walk', side_effect=AssertionError('no live walk')):
-            data = nav.inspect_code('value', limit=1)
-        self.assertIn('return 0', str(data))
+            nav.refresh()
+        self.assertEqual(nav.entries['sample.py']['symbols'][0]['name'], 'value')
+        self.assertNotIn('replacement', str(nav.entries))
         self.assertEqual(nav.version, ev.current)
         old_cache = prepared['parse_cache']
         ev.record('new_version')

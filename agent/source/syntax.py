@@ -1,8 +1,7 @@
-"""静态 Python 符号与词法查询提示；不执行源码。"""
+"""静态 Python 符号、导入与调用解析；不执行源码。"""
 
 import ast
 from pathlib import PurePosixPath
-import re
 
 
 def _module(path):
@@ -21,90 +20,6 @@ def _dotted(node):
         parent = _dotted(node.value)
         return parent + "." + node.attr if parent else ""
     return ""
-
-
-def _tokens(text):
-    text = re.sub(r"([a-z])([A-Z])", r"\1_\2", text)
-    return {
-        word.lower()
-        for word in re.findall(r"[A-Za-z][A-Za-z0-9]*", text)
-        if len(word) > 1
-        and word.lower()
-        not in {"the", "and", "for", "from", "with", "def", "class", "test", "tests", "fix", "src"}
-    }
-
-
-def _is_test(path):
-    p = PurePosixPath(path)
-    return "tests" in p.parts or p.name.startswith("test_") or p.name.endswith("_test.py")
-
-
-def query_identifiers(query):
-    """区分大小写的代码名称；字面量和偶然出现的单字母变量不视为 API。"""
-    query = re.sub(r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'", " ", query)
-    words = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", query)
-    quoted = re.findall(r"(?<!`)`([^`\n]+)`(?!`)", query)
-    common = {
-        "has",
-        "for",
-        "and",
-        "the",
-        "this",
-        "that",
-        "when",
-        "where",
-        "with",
-        "from",
-        "into",
-        "is",
-        "are",
-        "not",
-        "use",
-        "fix",
-        "please",
-        "can",
-        "you",
-        "in",
-        "on",
-        "it",
-        "a",
-        "an",
-        "i",
-        "out",
-        "true",
-        "false",
-        "none",
-        "exists",
-    }
-    names = {
-        name
-        for text in quoted
-        for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)
-        if len(name) > 1 and name.lower() not in common
-    }
-    for word in words:
-        if word.lower() in common or (len(word) == 1 and query.strip() != word):
-            continue
-        if "_" in word or any(c.isupper() for c in word[1:]) or word[0].isupper():
-            names.add(word)
-        elif len(words) <= 3 or re.search(r"\b" + re.escape(word) + r"\s*\(", query):
-            names.add(word)
-    return names
-
-
-def query_focus(query):
-    """优先选择问题中第一个明确的 API，包括嵌套调用。
-
-    跳过仅属描述文字的外层包装；c(f(x)) 先关注 c，再关注其参数 f。
-    这只是导航提示，不用于自动分类任务或验收。"""
-    for line in query.splitlines():
-        names = query_identifiers(line)
-        if not names:
-            continue
-        call = re.search(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(", line)
-        primary = call.group(1).split(".")[-1] if call else None
-        return names, primary
-    return set(), None
 
 
 def _parse(data, path):

@@ -274,7 +274,7 @@ real_tool = service.chatbot._invoke_tool
 def tool(conversation, call, operation):
     if call['name'] in {'web_search', 'web_fetch'}:
         return {'text': '离线网页样本，没有联网', 'sources': [{'url': 'https://example.com/offline'}]}
-    if call['name'] in {'list_files', 'read_file', 'search_files', 'open_file'}:
+    if call['name'] in {'list_files', 'read_file', 'retrieve_evidence', 'open_file'}:
         return real_tool(conversation, call, operation)
     return {'error': '该外部操作未在此离线样本执行', 'actions_executed': False}
 

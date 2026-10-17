@@ -30,7 +30,7 @@ def validate(name, args):
             errors.append(f'{key}: 实际值 {value!r}；要求 {field["enum"]}')
     for key, minimum, maximum in (
         ('offset', 0, None),
-        ('limit', 1, 200 if name == 'list_files' else 50 if name == 'search_files' else 1000),
+        ('limit', 1, 200 if name == 'list_files' else 1000),
         ('timeout', 1, None),
     ):
         if type(args.get(key)) is int and (
@@ -44,7 +44,7 @@ def validate(name, args):
 def invoke(loop, call, folder, history):
     name, args = call['name'], call['args']
     if name == 'retrieve_evidence':
-        # 此入口没有当前任务的版本及请求身份，不能把额外授权目录冒充 RAG 资料源。
+        # 统一检索需由聊天入口提供会话授权范围和当前工作身份。
         raise ValueError('retrieve_evidence requires the bound project retrieval service.')
     if name in WEB_NAMES:
         if not loop.runtime_settings.get('online'):
@@ -63,6 +63,8 @@ def invoke(loop, call, folder, history):
             if name == 'web_search'
             else provider.fetch(args[field], loop, folder)
         )
+    if name == 'read_file':
+        args = {'cursor': '', **args}
     validate(name, args)
     if name in OPEN_NAMES or name == 'list_applications':
         from agent.execution.desktop import invoke as desktop_invoke
@@ -71,8 +73,6 @@ def invoke(loop, call, folder, history):
     files = AssistantFiles(loop.repo, read_sources=loop.state.get('read_sources', []))
     if name == 'list_files':
         return files.list(args['path'], args['offset'], args['limit'])
-    if name == 'search_files':
-        return files.search(args['path'], args['query'], args['offset'], args['limit'])
     if name == 'read_file':
         return files.read(
             args['path'],
@@ -80,5 +80,6 @@ def invoke(loop, call, folder, history):
             args['limit'],
             history,
             bool(args['reread_reason'].strip()),
+            cursor=args['cursor'],
         )
     return existing.execute(loop, args, folder)

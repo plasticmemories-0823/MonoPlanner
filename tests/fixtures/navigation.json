@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "scope": "Offline localization fixtures, not coding success-rate tasks or SWE-bench scores",
+  "scope": "Offline static source parsing fixtures, not coding success-rate tasks",
   "files": {
     "README.md": "# TinyCalc\nA Python library for totals, user identifiers and decimal display.\nPublic APIs live in src/tinycalc. Tests live in tests and use pytest fixtures.\nRun python -m pytest tests after installing project dependencies.\n",
     "pyproject.toml": "[project]\nname = 'tinycalc'\nversion = '0.1'\n[tool.pytest.ini_options]\ntestpaths = ['tests']\n",
@@ -15,13 +15,5 @@
     "tests/test_api.py": "from tinycalc import api as public_api\n\ndef test_total(sample_values):\n    assert public_api.total(sample_values) == 5\n",
     "tests/test_names.py": "from tinycalc.names import normalize_name as canon\n\ndef test_empty():\n    assert canon('  ') == ''\n",
     "tests/test_printing.py": "from tinycalc import formatting\n\ndef test_precision():\n    assert formatting.format_total(2.0) == '2.00'\n"
-  },
-  "cases": [
-    {"id": "explicit_path", "query": "src/tinycalc/arithmetic.py add", "search_term": "add", "expected_file": "src/tinycalc/arithmetic.py", "expected_test": "tests/test_arithmetic.py"},
-    {"id": "public_symbol", "query": "total", "search_term": "total", "expected_file": "src/tinycalc/api.py", "expected_test": "tests/test_api.py"},
-    {"id": "qualified_symbol", "query": "tinycalc.names.normalize_name", "search_term": "normalize_name", "expected_file": "src/tinycalc/names.py", "expected_test": "tests/test_names.py"},
-    {"id": "keyword_symbol", "query": "修复 format_total 的精度", "search_term": "format_total", "expected_file": "src/tinycalc/formatting.py", "expected_test": "tests/test_printing.py"},
-    {"id": "stack_path", "query": "src/tinycalc/api.py:8 total", "search_term": "total", "expected_file": "src/tinycalc/api.py", "expected_test": "tests/test_api.py"},
-    {"id": "doc_terms", "query": "whitespace identifiers", "search_term": "whitespace", "expected_file": "src/tinycalc/names.py", "expected_test": "tests/test_names.py"}
-  ]
+  }
 }

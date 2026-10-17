@@ -211,27 +211,26 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(self.index.stats()["chunks"], before["chunks"])
         with self.assertRaisesRegex(ValueError, "immutable"):
             self.index.upsert(replace(doc, text="different failure"))
-        self.assertEqual(self.index.search(self.query())[0][0].text, doc.text)
+        self.assertEqual(self.retrieve(self.query()).chunks[0].text, doc.text)
 
     def test_scope_version_and_exclusions_apply_before_top_k(self):
         self.add(Document("source:a", "old", "failure secret", path="secret/a.py"))
         self.add(Document("source:a", "new", "failure current", path="public/a.py"))
         self.add(Document("record:one", "old-run", "failure historical", "log", "logs/one"))
         query = Query("failure", {"source:a": "new", "record:one": "old-run"})
-        hits = self.index.search(query)
-        self.assertEqual({chunk.version for chunk, _ in hits}, {"new", "old-run"})
-        self.assertEqual(len(self.index.search(replace(query, excluded_paths=("public",)))), 1)
+        hits = self.index.chunks(query)
+        self.assertEqual({chunk.version for chunk in hits}, {"new", "old-run"})
+        self.assertEqual(len(self.index.chunks(replace(query, excluded_paths=("public",)))), 1)
         with Index(self.index.path, Scope("different-project", "task"), RagConfig(), tokens) as other:
-            self.assertEqual(other.search(query), [])
-        self.assertEqual(self.index.search(Query("failure", {})), [])
+            self.assertEqual(other.chunks(query), [])
+        self.assertEqual(self.index.chunks(Query("failure", {})), [])
 
-    def test_real_bm25_missing_models_report_incomplete_without_model_calls(self):
+    def test_exact_bm25_is_complete_without_model_calls(self):
         self.add(Document("source:a", "v", "socket failure timeout timeout", path="a.txt"))
         self.add(Document("source:b", "v", "socket success", path="b.txt"))
         result = self.retrieve(self.query("timeout"))
-        self.assertTrue(result.incomplete)
-        self.assertIn("vector_unavailable", result.reasons)
-        self.assertIn("reranker_unavailable", result.reasons)
+        self.assertFalse(result.incomplete)
+        self.assertEqual(result.reasons, ())
         self.assertEqual(result.chunks[0].source_id, "source:a")
         self.assertLessEqual(tokens(result.message), 8192)
 
@@ -242,27 +241,25 @@ class RetrievalTests(unittest.TestCase):
                 raise AssertionError("Vector must not be called.")
             def score(self, *_):
                 raise AssertionError("Reranker must not be called.")
-        query = self.query("target", intent="locate", exact_path="a.py", exact_symbol="target")
+        query = self.query("target", intent="locate")
         result = self.retrieve(query, vector=Forbidden(), reranker=Forbidden())
         self.assertTrue(result.exact_hit)
         self.assertFalse(result.incomplete)
         self.assertEqual(len(result.chunks), 1)
 
-    def test_exact_identity_is_filtered_before_unrelated_candidate_memory(self):
+    def test_exact_original_scan_is_not_limited_by_unrelated_chunk_candidates(self):
         self.add(Document("source:target", "current", "def target():\n    pass\n",
                           "code", "src/target.py"))
-        for number in range(20):
-            self.add(Document(f"record:{number}", "v", "unrelated log output " * 20,
-                              "log", f"logs/{number}.txt"))
-        query = self.query("target", intent="locate", exact_path="src\\target.py",
-                           exact_symbol="target")
+        self.add(Document("record:large", "v", "unrelated log output " * 2000,
+                          "log", "logs/large.txt"))
+        query = self.query("target", intent="locate")
         with patch("agent.rag.index.CANDIDATE_MEMORY_BYTES", 6000):
             with self.assertRaisesRegex(ValueError, "memory"):
                 self.index.chunks(query)
-            matches = self.index.exact(query)
-            self.assertEqual([item.source_id for item in matches], ["source:target"])
-            self.assertEqual(self.index.exact(replace(query, source_versions={})), [])
-            self.assertEqual(self.index.exact(replace(query, excluded_paths=("src",))), [])
+            matches = self.retrieve(query)
+            self.assertEqual([item.source_id for item in matches.chunks], ["source:target"])
+            self.assertEqual(self.retrieve(replace(query, source_versions={})).chunks, ())
+            self.assertEqual(self.retrieve(replace(query, excluded_paths=("src",))).chunks, ())
 
     def test_required_file_identity_does_not_trigger_missing_evidence(self):
         document = self.add(Document("source:a", "v", "failure evidence", "code", "auth/login.py"))
@@ -301,7 +298,7 @@ class RetrievalTests(unittest.TestCase):
         self.add(Document("a", "v", "failure alpha"))
         self.add(Document("b", "v", "failure beta"))
         self.add(Document("private", "v", "failure secret"))
-        query = Query("failure", {"a": "v", "b": "v"})
+        query = Query("failure", {"a": "v", "b": "v"}, mode="semantic")
         all_chunks = self.index.chunks(self.query())
         by_source = {item.source_id: item for item in all_chunks}
         class Vector:
@@ -315,12 +312,16 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(result.chunks[0].source_id, "b")
         self.assertNotIn("private", result.message)
 
-    def test_failed_rerank_preserves_lexical_evidence_and_reports_reason(self):
+    def test_failed_rerank_preserves_vector_evidence_and_reports_reason(self):
         self.add(Document("a", "v", "failure evidence"))
         class Broken:
             def score(self, *_):
                 return [float("nan")]
-        result = self.retrieve(self.query(), reranker=Broken())
+        chunk_id = self.index.chunks(self.query())[0].id
+        class Vector:
+            def search(self, *_):
+                return [(chunk_id, 0.9)]
+        result = self.retrieve(self.query(mode="semantic"), vector=Vector(), reranker=Broken())
         self.assertIn("failure evidence", result.message)
         self.assertIn("reranker_unavailable:ValueError", result.reasons)
 
@@ -438,7 +439,7 @@ class RetrievalTests(unittest.TestCase):
     def test_unverifiable_exact_hit_does_not_suppress_missing_evidence(self):
         self.add(Document("source:a", "v", "def target():\n    pass\n", "code", "a.py"))
         self.documents[("source:a", "v")] = "source changed"
-        result = self.retrieve(self.query("target", intent="locate", exact_path="a.py"))
+        result = self.retrieve(self.query("target", intent="locate"))
         self.assertFalse(result.exact_hit)
         self.assertFalse(json.loads(result.message)["exact_current_version_hit"])
         self.assertTrue(result.incomplete)
@@ -453,7 +454,7 @@ class RetrievalTests(unittest.TestCase):
                 signal.interrupt("pause")
                 check_interrupted(pause_only=True)
         with using(signal), self.assertRaises(ModelInterrupted):
-            self.retrieve(self.query(), vector=Paused())
+            self.retrieve(self.query(mode="semantic"), vector=Paused())
 
     def test_memory_guard_stops_before_loading_all_candidates_or_vectors(self):
         self.add(Document("a", "v", "failure evidence"))
@@ -468,10 +469,10 @@ class RetrievalTests(unittest.TestCase):
 
     def test_bm25_statistics_do_not_leak_across_project_scopes(self):
         self.add(Document("a", "v", "failure evidence"))
-        before = [(item.id, score) for item, score in self.index.search(self.query())]
+        before = json.loads(self.retrieve(self.query()).message)["hits"]
         with Index(self.index.path, Scope("private", "task"), RagConfig(), tokens) as other:
             other.upsert(Document("secret", "v", "failure " * 1000))
-        after = [(item.id, score) for item, score in self.index.search(self.query())]
+        after = json.loads(self.retrieve(self.query()).message)["hits"]
         self.assertEqual(before, after)
 
 

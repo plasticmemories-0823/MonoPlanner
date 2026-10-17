@@ -1,7 +1,6 @@
 """按范围读取当前文本，不创建源码快照、不调用模型决策或执行命令。"""
 
 import hashlib
-import os
 from pathlib import Path
 
 from agent.source.snapshots import _link, _reason, _PRIVATE_MARKERS, _safe_file, SnapshotError
@@ -144,18 +143,25 @@ class AssistantFiles:
             'next_offset': stop if stop < len(entries) else None,
         }
 
-    def read(self, path, offset, limit, history, repeat=False):
+    def read(self, path, offset, limit, history, repeat=False, *, cursor=None):
+        from agent.source.paging import ReadBudget, read_pages
+        import json
+
         ranges(offset, limit)
         path = self.path(path)
         raw = self.bytes(path)
         lines = raw.decode('utf-8-sig').splitlines()
         sha = hashlib.sha256(raw).hexdigest()
+        budget = ReadBudget(24000, unit='unicode_characters')
+        if cursor:
+            return {
+                'path': str(path),
+                'already_visible': False,
+                **budget.source(raw, offset, limit, cursor=cursor),
+            }
         seen = []
         if not repeat:
             # 只有当前请求视图中的实际读取结果算作已读，本地归档和摘要不算。
-            from agent.source.paging import read_pages
-            import json
-
             for message in history:
                 if message.get('type') != 'tool':
                     continue
@@ -166,76 +172,33 @@ class AssistantFiles:
                 for page in read_pages(data):
                     if page['path'] == str(path) and page['sha256'] == sha:
                         seen.extend(page['visible_ranges'])
-        missing = unread(offset, min(len(lines), offset + limit), merged(seen))
-        selected, length = [], 0
+        end = min(len(lines), offset + limit)
+        missing = unread(offset, end, merged(seen))
+        pages = []
         for start, stop in missing:
-            for i in range(start, stop):
-                row = f'{i+1}: {lines[i]}'
-                if length + len(row) > 24000:
-                    break
-                selected.append((i, row))
-                length += len(row) + 1
-            if length >= 24000 or (selected and selected[-1][0] + 1 < stop):
+            if pages and budget.remaining:
+                budget.remaining -= 1
+            pages.append(budget.source(raw, start, stop - start))
+            if pages[-1]['truncated']:
                 break
-        visible = merged([[i, i + 1] for i, _ in selected])
-        gaps = unread(offset, min(len(lines), offset + limit), merged([*seen, *visible]))
-        return {
+        visible = merged([pair for page in pages for pair in page['visible_ranges']])
+        gaps = unread(offset, end, merged([*seen, *visible]))
+        result = {
             'path': str(path),
             'sha256': sha,
             'offset': offset,
+            'offset_unit': 'lines',
             'total_lines': len(lines),
-            'text': '\n'.join(row for _, row in selected),
+            'text': '\n'.join(page['text'] for page in pages if page['text']),
             'visible_ranges': visible,
             'already_visible': not missing,
-            'next_offset': gaps[0][0] if gaps else min(len(lines), offset + limit),
+            'truncated': bool(gaps),
+            'next_offset': gaps[0][0] if gaps else end,
+            'next_cursor': pages[-1].get('next_cursor') if pages else None,
+            'budget_unit': budget.unit,
         }
-
-    def search(self, path, query, offset, limit):
-        ranges(offset, limit)
-        if not query.strip() or len(query) > 2000:
-            raise ValueError('query 必须是 1..2000 字符的文字，使用字面量匹配')
-        scope = self.path(
-            path,
-            directory=(
-                Path(path).is_dir()
-                if Path(path).is_absolute()
-                else bool(self.workspace and (self.workspace / path).is_dir())
-            ),
-        )
-        paths = []
-        if scope.is_file():
-            paths = [scope]
-        else:
-            for directory, directories, files in os.walk(scope, followlinks=False):
-                directories[:] = sorted(
-                    d
-                    for d in directories
-                    if not _link(Path(directory) / d) and _reason(Path(d) / '_') is None
-                )
-                paths.extend(Path(directory) / f for f in sorted(files))
-                if len(paths) > 10000:
-                    raise ValueError('范围超过一万文件，请缩小至具体目录')
-        hits, count = [], 0
-        for path in paths:
-            if (
-                _link(path)
-                or path.suffix.lower() == '.dpapi'
-                or _reason(path.relative_to(scope if scope.is_dir() else scope.parent))
-            ):
-                continue
-            try:
-                lines = self.bytes(path).decode('utf-8-sig').splitlines()
-            except (ValueError, UnicodeError):
-                continue
-            for number, line in enumerate(lines, 1):
-                if query in line:
-                    if count >= offset:
-                        hits.append({'path': str(path), 'line': number, 'text': line[:500]})
-                    count += 1
-                    if len(hits) > min(limit, 50):
-                        return {
-                            'hits': hits[:-1],
-                            'next_offset': offset + len(hits) - 1,
-                            'match_mode': 'literal_case_sensitive',
-                        }
-        return {'hits': hits, 'next_offset': None, 'match_mode': 'literal_case_sensitive'}
+        if pages:
+            for key in ('long_line', 'partial_byte_range', 'byte_offset_unit'):
+                if key in pages[-1]:
+                    result[key] = pages[-1][key]
+        return result

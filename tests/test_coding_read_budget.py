@@ -23,6 +23,13 @@ class CodingReadBudgetTests(unittest.TestCase):
     def body_size(self, result):
         return sum(len(p['text'].encode('utf-8')) for p in read_pages(result))
 
+    def source_hits(self, reader, *names):
+        return [
+            {'path': name, 'line': 1, 'version': reader.inventory()[name],
+             'source_sha256': reader.inventory()[name]}
+            for name in names
+        ]
+
     def test_only_read_defaults_to_2000_and_explicit_smaller_windows_remain_valid(self):
         self.assertEqual(Operation(id='r', op='read').limit, 2000)
         self.assertEqual(Operation(id='s', op='search', query='value').limit, 80)
@@ -70,7 +77,7 @@ class CodingReadBudgetTests(unittest.TestCase):
             step,
             {
                 'find': {
-                    'data': {'hits': [{'path': 'a.py', 'line': 1}, {'path': 'b.py', 'line': 1}]}
+                    'data': {'hits': self.source_hits(reader, 'a.py', 'b.py')}
                 }
             },
             self.root / 'read',
@@ -89,6 +96,28 @@ class CodingReadBudgetTests(unittest.TestCase):
         self.assertEqual(result['continuation']['next_offset'], 0)
         self.assertEqual(page['long_line']['offset'], 0)
         self.assertTrue(result['truncated'])
+
+    def test_long_source_cursor_advances_through_read_operations(self):
+        original = '中🙂' * 30000 + '\nlast\n'
+        reader = self.reader({'line.py': original})
+        original = reader.source_bytes('line.py').decode('utf-8')
+        first = reader.read_continuation('line.py', 0, 2000)
+        page = next(read_pages(first))
+        parts = [page['text'][3:]]
+        end = page['partial_byte_range'][1]
+        cursor = page['next_cursor']
+        while cursor:
+            step = Operation(id='r', op='read', path='line.py', cursor=cursor)
+            result = reader.execute(step, {}, self.root / 'read', 10)['data']
+            self.assertEqual(result['byte_range'][0], end)
+            self.assertGreater(result['byte_range'][1], end)
+            self.assertEqual(result['visible_ranges'], [])
+            self.assertEqual(result['output_budget']['used_bytes'], len(result['text'].encode()))
+            self.assertLessEqual(result['output_budget']['used_bytes'], 50 * 1024)
+            parts.append(result['text'])
+            end, cursor = result['byte_range'][1], result['next_cursor']
+        self.assertEqual(''.join(parts), original)
+        self.assertFalse(result['truncated'])
 
     def test_multiple_missing_ranges_share_budget_and_never_drop_a_gap(self):
         reader = self.reader({'long.py': ('中' * 80 + '\n') * 650})
@@ -114,7 +143,7 @@ class CodingReadBudgetTests(unittest.TestCase):
             Operation(id='r', op='read', from_step='find', limit=200),
             {
                 'find': {
-                    'data': {'hits': [{'path': 'a.py', 'line': 1}, {'path': 'b.py', 'line': 1}]}
+                    'data': {'hits': self.source_hits(reader, 'a.py', 'b.py')}
                 }
             },
             self.root / 'read',

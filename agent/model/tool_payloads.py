@@ -187,51 +187,24 @@ def read(root, name, offset, limit, *, budget=None, archive=None, preview=False)
 
 
 def read_bytes(root, name, offset, *, budget=None, archive=None):
-    """超长行按真实原字节续读；替代解码只影响展示，不改变游标和原件哈希。"""
-    from agent.source.paging import ReadBudget
-    from agent.storage.resources import owner_cancelled
+    """超长行按真实原字节续读；与源码读取共用有界校验窗口。"""
+    from agent.source.paging import ReadBudget, read_byte_window
 
-    if type(offset) is not int or offset < 0:
-        raise ValueError('Payload byte offset must be a nonnegative integer.')
     budget = budget if budget is not None else ReadBudget()
     path, expected = _location(root, name, archive)
     original_log = not bool(_CAS.fullmatch(name))
-    # 非UTF8字节的替代字符最多占三字节，预留相应展示空间。
-    count = budget.remaining // 3 if original_log else budget.remaining
-    if count < 4:
-        raise ValueError('Insufficient shared read budget for a complete UTF-8 byte window.')
-    digest, selected, total = hashlib.sha256(), bytearray(), 0
-    decoder = codecs.getincrementaldecoder('utf-8')('replace' if original_log else 'strict')
     with path.open('rb') as stream:
-        while chunk := stream.read(64 * 1024):
-            if owner_cancelled():
-                raise InterruptedError('Payload reading was cancelled; no partial result was returned.')
-            digest.update(chunk)
-            decoder.decode(chunk)
-            start, stop = max(0, offset - total), min(len(chunk), offset + count - total)
-            if start < stop:
-                selected.extend(chunk[start:stop])
-            total += len(chunk)
-        decoder.decode(b'', final=True)
-    if digest.hexdigest() != expected:
-        raise ValueError('Archived tool payload SHA-256 mismatch; no content was returned.')
-    if offset > total:
-        raise ValueError('Payload byte offset exceeds the original byte length.')
-    if selected and not original_log and 0x80 <= selected[0] < 0xC0:
-        raise ValueError('Payload byte offset splits a UTF-8 character; use the returned next_query.')
-    selected_decoder = codecs.getincrementaldecoder('utf-8')('replace' if original_log else 'strict')
-    text = selected_decoder.decode(bytes(selected), final=offset + len(selected) == total)
-    end = offset + len(selected) - len(selected_decoder.getstate()[0])
-    shown_bytes = len(text.encode('utf-8'))
-    if shown_bytes > budget.remaining or (end == offset and offset < total):
-        raise ValueError('The byte window cannot fit in the remaining shared read budget.')
-    budget.remaining -= shown_bytes
-    return {'path': name, 'sha256': expected, 'text': text, 'visible_ranges': [],
-            'byte_range': [offset, end], 'total_bytes': total, 'shown_utf8_bytes': shown_bytes,
-            'next_byte_offset': end, 'next_query': 'payload_bytes:' + str(end) if end < total else None,
-            'truncated': end < total, 'encoding': 'utf-8',
-            'decoding_errors': 'replace' if original_log else 'strict',
-            'continuation': {'reason': 'payload_byte_window', 'next_byte_offset': end}}
+        result = read_byte_window(
+            stream, expected, offset, budget=budget,
+            errors='replace' if original_log else 'strict',
+        )
+    end = result['next_byte_offset']
+    return {
+        'path': name,
+        **result,
+        'next_query': 'payload_bytes:' + str(end) if result['truncated'] else None,
+        'continuation': {'reason': 'payload_byte_window', 'next_byte_offset': end},
+    }
 
 
 def _store(loop, text):

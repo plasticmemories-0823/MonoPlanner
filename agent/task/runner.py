@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages import message_to_dict, messages_from_dict, messages_to_dict
 from agent.task.instructions import ARTIFACT_RULES
 from agent.acceptance.artifact_checks import required_consumer, requested_calls
-from agent.model.client import configure_call
+from agent.model.client import configure_call, request_timeout
 from agent.model.errors import (
     ModelInterrupted,
     ModelRequestNotSent,
@@ -147,7 +147,7 @@ class TaskRunner:
         selected = configure_call(
             self.model.bind_tools(self.tools),
             purpose,
-            timeout=min(90, self.budget.remaining_time() or 90),
+            timeout=request_timeout(self.model, self.budget.remaining_time()),
         )
         cap = getattr(selected, "max_output_tokens", 256000)
         cap = cap if type(cap) is int else 256000
@@ -177,7 +177,7 @@ class TaskRunner:
         selected = configure_call(
             self.model.bind_tools(request_tools),
             purpose,
-            timeout=min(90, self.budget.remaining_time() or 90),
+            timeout=request_timeout(self.model, self.budget.remaining_time()),
         )
         cap = getattr(selected, "max_output_tokens", 256000)
         cap = cap if type(cap) is int else 256000
@@ -367,9 +367,6 @@ class TaskRunner:
         if finish in {"length", "content_filter", "aborted", "insufficient_system_resource"}:
             raise ValueError("Incomplete model response: " + str(finish))
         calls = response.tool_calls
-        if (len(calls) == 1 and not response.invalid_tool_calls
-                and calls[0]['name'] == 'retrieve_evidence'):
-            return dialogue.RetrievalReply(calls), raw
         if (
             calls
             and not response.invalid_tool_calls
@@ -608,6 +605,7 @@ class TaskRunner:
             self.environment, self.evidence, self.root, versioned_reads=self.optimize_source
         )
         self.executor.archive = self.history_store
+        self.executor.retrieval_owner = self
         self.rules = (
             TASK_RULES
             + "\nShell cwd: "
@@ -662,11 +660,10 @@ class TaskRunner:
             code_key=self.code_key,
             rules=self.rules,
         )
-        from agent.rag.integration import RAG_GUIDANCE, bind_work
+        from agent.rag.integration import WORK_RAG_GUIDANCE
 
-        self.rules += RAG_GUIDANCE
+        self.rules += WORK_RAG_GUIDANCE
         self.state['rules'] = self.rules
-        bind_work(self)
         self.persist("task_started")
         return self._drive()
 

@@ -160,6 +160,23 @@ def configure_call(model, purpose, timeout=None):
     return model
 
 
+def request_timeout(model, remaining=None):
+    """遵循显式调用配置和模型策略，并受任务剩余时间约束。"""
+    from agent.model.errors import ModelRequestNotSent
+
+    policy = getattr(model, 'policy', None)
+    configured = getattr(model, 'timeout', None)
+    if not isinstance(configured, (int, float)) or isinstance(configured, bool):
+        configured = (
+            policy.api_timeout if isinstance(policy, ModelPolicy) else ModelPolicy().api_timeout
+        )
+    if remaining is not None:
+        if remaining <= 0:
+            raise ModelRequestNotSent('task_timeout', 'Task time limit reached before model dispatch.')
+        configured = min(configured, remaining)
+    return configured
+
+
 def create_model(settings, policy=None):
     """加载本模块时不读取凭据，也不创建 API 客户端。"""
     from agent.model.deepseek import DeepSeekClient

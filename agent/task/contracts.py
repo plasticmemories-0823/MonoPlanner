@@ -17,6 +17,19 @@ class Operation(BaseModel):
         le=2000,
         description='read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.',
     )
+    mode: Literal["exact", "semantic"] = Field(
+        default="exact",
+        description='search mode only; exact uses literal case-sensitive original text.',
+    )
+    intent: Literal["locate", "diagnostic", "audit"] = "locate"
+    required_entities: list[str] = Field(default_factory=list, max_length=16)
+    required_kinds: list[Literal["code", "document", "tool_result", "log"]] = Field(
+        default_factory=list, max_length=4,
+    )
+    cursor: str = Field(
+        default="", max_length=8192,
+        description='Opaque continuation from search or read; empty for an initial request.',
+    )
     from_step: str = ""
     command: str = Field(default="", max_length=30000)
     expected_exit: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=4)
@@ -36,10 +49,14 @@ class Operation(BaseModel):
             )
         if self.op == "shell" and not self.command.strip():
             raise ValueError("shell requires actual executable commands, not a task description")
-        if self.op == "search" and not self.query.strip():
-            raise ValueError("search requires a literal query")
+        if self.op == "search" and not self.query:
+            raise ValueError("search requires a non-empty query")
         if self.from_step and self.op != "read":
             raise ValueError("Only read may refer to an earlier search")
+        if self.op != 'search' and self.mode != 'exact':
+            raise ValueError('semantic mode applies only to search')
+        if self.cursor and (self.op == 'shell' or self.from_step):
+            raise ValueError('A continuation cursor requires one explicit read or search scope')
         return self
 
 

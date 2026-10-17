@@ -13,7 +13,7 @@ from agent.settings import PROJECT_ROOT
 
 class CodingHandoffTests(unittest.TestCase):
 
-    def test_original_four_schema_and_other_task_rules_are_unchanged(self):
+    def test_acceptance_schema_and_task_rules_outside_lookup_protocol_are_unchanged(self):
         for name in ('plan.schema.json', 'repair.schema.json', 'acceptance-review.schema.json'):
             original = subprocess.check_output(
                 ['git', 'show', '98b3851:resources/' + name], cwd=PROJECT_ROOT
@@ -24,7 +24,13 @@ class CodingHandoffTests(unittest.TestCase):
                 expected['properties']['steps']['items']['properties']['limit'][
                     'description'
                 ] = 'read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.'
-            self.assertEqual(json.loads((PROJECT_ROOT / 'resources' / name).read_bytes()), expected)
+            actual = json.loads((PROJECT_ROOT / 'resources' / name).read_bytes())
+            if name == 'plan.schema.json':
+                step = actual['properties']['steps']['items']
+                for field in ('mode', 'cursor', 'intent', 'required_entities', 'required_kinds'):
+                    step['properties'].pop(field)
+                    step['required'].remove(field)
+            self.assertEqual(actual, expected)
         original = subprocess.check_output(
             ['git', 'show', '98b3851:resources/prompts/task.txt'], cwd=PROJECT_ROOT
         ).decode()
@@ -42,15 +48,19 @@ class CodingHandoffTests(unittest.TestCase):
             'All full plans, responses and logs remain on disk. To read a recorded result use read path=$record/<relative record path>.',
             'All full plans, responses and logs remain on disk. Large tool text may be offloaded: a monoplanner-tool-payload-v1 reference identifies the exact record path, SHA-256, full size and line count; preview is partial, not the full result. Identical text already visible in this context may return only its hash and record reference. Read the required original ranges with read path=$record/<relative record path>, offset and limit; use continuation.next_offset when present. For an oversized payload line, follow its next_query with read query=payload_bytes:<raw byte offset>, offset=0 and limit=2000; this mode returns a bounded byte window, not complete source lines. Source-file reads retain their normal paging limits.',
         )
-        self.assertEqual(rules, expected)
+        lookup_prefixes = ('submit_plan fields are required.', 'read uses repository-relative',
+                           'A read may use from_step=')
+        unchanged = lambda text: [line for line in text.splitlines()
+                                  if not line.startswith(lookup_prefixes)]
+        self.assertEqual(unchanged(rules), unchanged(expected))
         self.assertEqual(
             wire_input([], CODING_TOOLS)['tools'][:4], wire_input([], WORK_TOOLS)['tools']
         )
         self.assertEqual(
             [t.name for t in CODING_TOOLS],
-            [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch', 'retrieve_evidence'],
+            [t.name for t in WORK_TOOLS] + ['web_search', 'web_fetch'],
         )
-        # 新增独立检索入口不改变原四工具的名称、描述、参数声明或函数体。
+        # 查询协议调整不改变原四工具的名称、描述或函数体。
         baseline = ast.parse(subprocess.check_output(
             ['git', 'show', 'HEAD:agent/model/tools.py'], cwd=PROJECT_ROOT
         ).decode('utf-8-sig'))

@@ -71,7 +71,7 @@ class ToolResultTests(unittest.TestCase):
             {'path': 'a.py', 'line': 2, 'text': 'two'},
             {'path': 'A.py', 'line': 1, 'text': 'case-sensitive file'},
         ]}
-        self.assertEqual(normalize_result('search_files', value), value)
+        self.assertEqual(normalize_result('retrieve_evidence', value), value)
 
     def test_search_same_location_latest_text_wins_without_mutating_text_whitespace(self):
         value = {'hits': [
@@ -79,7 +79,7 @@ class ToolResultTests(unittest.TestCase):
             {'path': 'b.py', 'line': 2, 'text': 'middle'},
             {'path': 'a.py', 'line': 5, 'text': '\t new  \r\n'},
         ], 'truncated': True, 'files_examined': 21}
-        result = normalize_result('search_files', value, source_version='s1', project='root')
+        result = normalize_result('retrieve_evidence', value, source_version='s1', project='root')
         self.assertEqual(result['hits'], value['hits'][1:])
         self.assertEqual(result['files_examined'], 21)
 
@@ -88,12 +88,12 @@ class ToolResultTests(unittest.TestCase):
             {'source_version': 's1', 'path': 'a.py', 'line': 1, 'text': 'old'},
             {'source_version': 's2', 'path': 'a.py', 'line': 1, 'text': 'new'},
         ]}
-        self.assertEqual(normalize_result('search_files', value, source_version='fallback'), value)
+        self.assertEqual(normalize_result('retrieve_evidence', value, source_version='fallback'), value)
 
     def test_boolean_negative_and_string_line_are_not_valid_natural_keys(self):
         rows = [{'path': 'a.py', 'line': number, 'text': text}
                 for number in (True, -1, '1') for text in ('old', 'new')]
-        self.assertEqual(normalize_result('search_files', {'hits': rows})['hits'], rows)
+        self.assertEqual(normalize_result('retrieve_evidence', {'hits': rows})['hits'], rows)
 
     def test_invalid_path_key_does_not_merge_different_items(self):
         rows = [{'path': path, 'name': name} for path in ('', '../x', 'bad\npath')
@@ -103,7 +103,7 @@ class ToolResultTests(unittest.TestCase):
     def test_calls_and_projects_do_not_share_a_global_seen_index(self):
         value = {'hits': [{'path': 'a.py', 'line': 1, 'text': 'same'}]}
         for project in ('one', 'two', 'one'):
-            self.assertEqual(normalize_result('search_files', value, project=project), value)
+            self.assertEqual(normalize_result('retrieve_evidence', value, project=project), value)
 
     def test_submit_plan_keeps_step_envelopes_and_normalizes_each_search_separately(self):
         hits = [{'path': 'a.py', 'line': 1, 'text': text} for text in ('old', 'new')]
@@ -150,7 +150,7 @@ class ToolResultTests(unittest.TestCase):
                  'new_symbols': [new], 'new_dependencies': []}
         value = {'repository_map': {'source_version': 's1', 'updates': [update, other],
                                     'known_symbols': 30}}
-        result = normalize_result('search_files', value)
+        result = normalize_result('retrieve_evidence', value)
         updates = result['repository_map']['updates']
         self.assertEqual(len(updates), 2)
         self.assertEqual(updates[0]['new_symbols'], [middle, new])
@@ -168,11 +168,11 @@ class ToolResultTests(unittest.TestCase):
             'path': 'consumer.py', 'new_dependencies': [old, other, latest],
         }]}}
         before = deepcopy(value)
-        result = normalize_result('search_files', value)
+        result = normalize_result('retrieve_evidence', value)
         dependencies = result['repository_map']['updates'][0]['new_dependencies']
         self.assertEqual(dependencies, [other, latest])
         self.assertEqual(value, before)
-        self.assertEqual(normalize_result('search_files', result), result)
+        self.assertEqual(normalize_result('retrieve_evidence', result), result)
 
     def test_dependency_without_evidence_only_deduplicates_identical_items(self):
         for evidence in (None, '', ' ', 1, []):
@@ -184,7 +184,7 @@ class ToolResultTests(unittest.TestCase):
                 value = {'repository_map': {'source_version': 's1', 'updates': [{
                     'path': 'consumer.py', 'new_dependencies': [old, other, deepcopy(old)],
                 }]}}
-                result = normalize_result('search_files', value)
+                result = normalize_result('retrieve_evidence', value)
                 dependencies = result['repository_map']['updates'][0]['new_dependencies']
                 self.assertEqual(dependencies, [other, old])
 
@@ -195,7 +195,7 @@ class ToolResultTests(unittest.TestCase):
         updates = [{'path': 'consumer.py', 'source_version': version,
                     'new_dependencies': deepcopy(dependencies)} for version in ('s1', 's2')]
         value = {'repository_map': {'updates': updates}}
-        self.assertEqual(normalize_result('search_files', value), value)
+        self.assertEqual(normalize_result('retrieve_evidence', value), value)
 
     def test_unrecognized_nested_arrays_do_not_gain_implicit_id_keys(self):
         value = {'sources': [{'url': 'a', 'nested': [{'id': 1}, {'id': 1}]}],

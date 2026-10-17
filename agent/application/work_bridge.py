@@ -27,6 +27,7 @@ from agent.task.runner import TaskRunner
 
 _owners = {}
 _owners_lock = RLock()
+# 保留旧记录的未决标记用于只读状态保护，不恢复旧检索执行通道。
 _ACTIVE_OPERATIONS = (
     "running_step", "verification_running", "acceptance_running", "assistant_running",
     "web_running", "rag_running", "rag_request_pending",

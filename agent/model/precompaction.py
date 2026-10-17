@@ -13,7 +13,7 @@ import uuid
 from langchain_core.messages import AIMessage, message_to_dict, messages_from_dict, messages_to_dict
 
 from agent.model import compaction
-from agent.model.client import ConfiguredModel, configure_call
+from agent.model.client import ConfiguredModel, configure_call, request_timeout
 from agent.model.context import fingerprint
 from agent.model.errors import ModelInterrupted, ModelRequestNotSent
 from agent.model.payload import estimate_input_tokens, request_reservation
@@ -249,6 +249,7 @@ def _start(loop, output_cap, force):
     snapshot = compaction.execution_snapshot(loop)
     cap = min(output_cap, compaction.CONFIG['summary_max_tokens'])
     request, cutoff, selected_hash = compaction.select(loop, retain, cap, snapshot)
+    timeout = request_timeout(loop.model, loop.budget.remaining_time())
     ticket = loop.budget.reserve_request(
         request_reservation(request, loop.tools, cap), purpose='compaction'
     )
@@ -262,7 +263,7 @@ def _start(loop, output_cap, force):
         'selected_hash': selected_hash, 'execution_snapshot': snapshot,
         'trigger': 'context-overflow' if force else 'precompaction',
         'call': ticket.call_id, 'reservation': ticket.reserved_tokens, 'output_cap': cap,
-        'timeout': min(90, loop.budget.remaining_time() or 90), 'prefix_guard': True,
+        'timeout': timeout, 'prefix_guard': True,
     }
     try:
         folder = loop.root / 'requests' / ('call-%04d' % ticket.call_id)

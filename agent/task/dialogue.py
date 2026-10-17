@@ -15,11 +15,6 @@ class WebReply:
     calls: list
 
 
-@dataclass(frozen=True)
-class RetrievalReply:
-    calls: list
-
-
 PROGRESS = {
     'model_request_started': ('model', '正在等待模型回复'),
     'model_response_received': ('model_finished', '模型回复已保存'),

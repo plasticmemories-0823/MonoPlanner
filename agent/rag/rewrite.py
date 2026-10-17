@@ -13,12 +13,11 @@ class RewriteUnknown(RuntimeError):
 
 
 def assess(*, intent, missing_entities=(), missing_kinds=(), exact_current_hit=False,
-           vector_ready=False, dual_disagreement=False, rerank_no_winner=False,
+           rerank_no_winner=False,
            single_source=False, temporal_mismatch=False):
     """只解释已有检索事实；数量少和探索词未命中不是付费触发条件。"""
     signals = {
         'required_evidence_missing': bool(missing_entities or missing_kinds),
-        'dual_disagreement': bool(dual_disagreement),
         'rerank_no_winner': bool(rerank_no_winner),
         'single_source': bool(single_source),
         'temporal_mismatch': bool(temporal_mismatch),
@@ -32,8 +31,6 @@ def assess(*, intent, missing_entities=(), missing_kinds=(), exact_current_hit=F
             reason = 'exact_current_version_short_circuit'
         elif name != 'required_evidence_missing' and intent not in {'diagnostic', 'audit'}:
             reason = 'query_intent_not_applicable'
-        elif name == 'dual_disagreement' and not vector_ready:
-            reason = 'vector_route_incomplete'
         if reason:
             suppressed[name] = reason
         else:

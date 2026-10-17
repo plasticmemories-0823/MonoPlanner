@@ -71,13 +71,20 @@ def _collection(value, field, identity):
 
 
 def _version(item, default):
-    return _name(item.get('source_version')) or _name(default)
+    return (_name(item.get('version')) or _name(item.get('source_version'))
+            or _name(default))
 
 
 def _hits(value, source_version, project):
     def identity(item):
         path, line = _path(item.get('path')), _line(item.get('line'))
-        return (project, _version(item, source_version), path, line) if path and line else None
+        if not path or not line:
+            return None
+        ranges = tuple(item.get(key) for key in ('start', 'end', 'match_start', 'match_end'))
+        if any(value is not None and type(value) is not int for value in ranges):
+            return None
+        return (project, _version(item, source_version), path, line,
+                _name(item.get('source_sha256')), *ranges)
 
     _collection(value, 'hits', identity)
 
@@ -117,7 +124,7 @@ def normalize_result(tool_name, value, *, source_version=None, project=None):
         _collection(result, 'sources', lambda item: _name(item.get('url')))
     elif tool_name == 'list_files':
         _collection(result, 'entries', lambda item: _path(item.get('path')))
-    elif tool_name == 'search_files':
+    elif tool_name in {'retrieve_evidence', 'search_files'}:
         _hits(result, source_version, project)
         _repository_map(result, source_version, project)
     elif tool_name == 'submit_plan':

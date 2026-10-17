@@ -17,7 +17,7 @@ from agent.rag.tuning.policy import Config, enumerate_candidates, fingerprint, v
 
 def initial_config():
     return Config.create({
-        'recall_top_k': 100, 'vector_weight': 0.5, 'rewrite_threshold': 0.15,
+        'recall_top_k': 100, 'rewrite_threshold': 0.15,
         'chunk_target': 256, 'memory_limit_bytes': 1024 ** 3, 'message_token_limit': 8192,
         'embedding_revision': 'frozen-model', 'acl_revision': 'frozen-acl',
     })
@@ -94,11 +94,11 @@ class RAGTuningPolicyTests(unittest.TestCase):
         exposed = base.values
         exposed['recall_top_k'] = 500
         self.assertEqual(base.values['recall_top_k'], 100)
-        other = Config.create(base.values | {'recall_top_k': 19, 'vector_weight': 1.0})
+        other = Config.create(base.values | {'recall_top_k': 19, 'rewrite_threshold': 1.0})
         for item in enumerate_candidates(other):
             if item.knob == 'recall_top_k':
                 self.assertLessEqual(abs(item.config.values['recall_top_k'] - 19), 1.9)
-            self.assertLessEqual(item.config.values['vector_weight'], 1.0)
+            self.assertLessEqual(item.config.values['rewrite_threshold'], 1.0)
         with self.assertRaises(ValueError):
             Config.create(base.values | {'recall_top_k': True})
 

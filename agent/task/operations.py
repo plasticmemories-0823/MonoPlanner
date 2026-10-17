@@ -10,7 +10,8 @@ from agent.acceptance.contracts import VerificationSpec
 from agent.acceptance.final import verify_final
 from agent.acceptance import revisions
 from agent.storage.records import digest, save
-from agent.model.errors import ModelRequestNotSent
+from agent.model.errors import ModelInterrupted, ModelRequestNotSent
+from agent.rag.rewrite import RewriteUnknown
 
 
 def execute_pending(self):
@@ -83,6 +84,9 @@ def _execute_pending(self):
                 )
             )
             source_runtime.record_lookup(self, step, row, directory)
+        except (ModelInterrupted, RewriteUnknown):
+            # 未知检索改写和执行中断保留 running_step，不能交回模型后自动续跑。
+            raise
         except SourceStorageError:
             # 宿主源码副本/证据写入失败必须停止，不能作为项目失败交回模型再复制。
             raise

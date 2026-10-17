@@ -108,7 +108,7 @@ class WorkResultNormalizationTests(unittest.TestCase):
         expected = data['repository_map']['updates'][0]['new_dependencies']
         self.assertEqual([row['evidence'] for row in expected],
                          ['import dep.alpha', 'import dep.beta'])
-        self.assertEqual(normalize_result('search_files', data), data)
+        self.assertEqual(normalize_result('retrieve_evidence', data), data)
         row = {'id': 'read-imports', 'op': 'read', 'status': 'succeeded', 'data': data}
         self.loop.state['pending'] = {
             'id': 'p1', 'response': self.response(), 'rows': [row],
@@ -135,17 +135,22 @@ class WorkResultNormalizationTests(unittest.TestCase):
             {'path': f'file-{index}.py', 'line': 10, 'text': str(index)}
             for index in range(6)
         ] + [self.hits()[-1]]
+        raw = b'fixture content'
+        sha = hashlib.sha256(raw).hexdigest()
+        hits = [{**hit, 'version': sha, 'source_sha256': sha} for hit in hits]
         prior = {'find': {'id': 'find', 'op': 'search', 'before': 'b' * 64,
                           'data': {'hits': hits, 'truncated': False}}}
         original = deepcopy(prior)
         reader = OperationExecutor(self.environment, None, self.root)
+        reader.inventory = lambda: {hit['path']: sha for hit in hits}
+        reader.source_bytes = lambda _: raw
         shown = normalize_result(
             'submit_plan', {'steps': [prior['find']]}, source_version='c' * 64,
             project=self.repo,
         )['steps'][0]['data']['hits']
 
         def read(path, offset, limit, repeat, *, budget):
-            return {'path': path, 'offset': offset, 'sha256': 'd' * 64,
+            return {'path': path, 'offset': offset, 'sha256': sha,
                     'text': path, 'visible_ranges': [], 'truncated': False}
 
         with patch.object(reader, 'read_continuation', side_effect=read) as read_call:
@@ -159,17 +164,18 @@ class WorkResultNormalizationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'succeeded')
         self.assertEqual(prior, original)
 
-    def test_from_step_without_source_identity_uses_only_current_result_for_latest_hit(self):
+    def test_from_step_without_source_identity_rejects_before_reading(self):
         prior = {'find': {'data': {'hits': self.hits()}}}
         reader = OperationExecutor(self.environment, None, self.root)
         page = {'path': 'a.py', 'sha256': 'd' * 64, 'text': '',
                 'visible_ranges': [], 'truncated': False}
         with patch.object(reader, 'read_continuation', return_value=page) as read_call:
-            reader.execute(Operation(id='read', op='read', from_step='find'),
-                           prior, self.root, 10)
-        self.assertEqual(read_call.call_count, 2)
+            with self.assertRaisesRegex(ValueError, 'source version'):
+                reader.execute(Operation(id='read', op='read', from_step='find'),
+                               prior, self.root, 10)
+        self.assertEqual(read_call.call_count, 0)
 
-    def test_from_step_keeps_distinct_explicit_source_versions(self):
+    def test_distinct_old_source_versions_remain_visible_but_cannot_drive_new_reads(self):
         hits = [
             {**self.hits()[0], 'source_version': 'b' * 64},
             {**self.hits()[0], 'source_version': 'c' * 64},
@@ -177,13 +183,16 @@ class WorkResultNormalizationTests(unittest.TestCase):
         ]
         prior = {'find': {'before': 'a' * 64, 'data': {'hits': hits}}}
         original = deepcopy(prior)
+        shown = normalize_result('retrieve_evidence', prior['find']['data'])
+        self.assertEqual(len(shown['hits']), 2)
         reader = OperationExecutor(self.environment, None, self.root)
         page = {'path': 'a.py', 'sha256': 'd' * 64, 'text': '',
                 'visible_ranges': [], 'truncated': False}
         with patch.object(reader, 'read_continuation', return_value=page) as read_call:
-            reader.execute(Operation(id='read', op='read', from_step='find'),
-                           prior, self.root, 10)
-        self.assertEqual(read_call.call_count, 2)
+            with self.assertRaisesRegex(ValueError, 'source version'):
+                reader.execute(Operation(id='read', op='read', from_step='find'),
+                               prior, self.root, 10)
+        self.assertEqual(read_call.call_count, 0)
         self.assertEqual(prior, original)
 
     def test_web_original_is_saved_before_normalization_and_pairing_is_unchanged(self):

@@ -1,4 +1,5 @@
 {
+  "additionalProperties": false,
   "properties": {
     "kind": {
       "enum": [
@@ -43,6 +44,44 @@
             "minimum": 1,
             "type": "integer"
           },
+          "mode": {
+            "description": "search mode only; exact uses literal case-sensitive original text.",
+            "enum": [
+              "exact",
+              "semantic"
+            ],
+            "type": "string"
+          },
+          "intent": {
+            "enum": [
+              "locate",
+              "diagnostic",
+              "audit"
+            ],
+            "type": "string"
+          },
+          "required_entities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_kinds": {
+            "items": {
+              "enum": [
+                "code",
+                "document",
+                "tool_result",
+                "log"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cursor": {
+            "description": "Opaque continuation from search or read; empty for an initial request.",
+            "type": "string"
+          },
           "from_step": {
             "type": "string"
           },
@@ -63,6 +102,11 @@
           "query",
           "offset",
           "limit",
+          "mode",
+          "intent",
+          "required_entities",
+          "required_kinds",
+          "cursor",
           "from_step",
           "command",
           "expected_exit"
@@ -74,14 +118,14 @@
     "test_code": {
       "type": "string"
     },
-    "regression_command": {
-      "type": "string"
-    },
     "test_driver": {
-      "type": "array",
       "items": {
         "type": "string"
-      }
+      },
+      "type": "array"
+    },
+    "regression_command": {
+      "type": "string"
     }
   },
   "required": [
@@ -92,6 +136,5 @@
     "test_driver",
     "regression_command"
   ],
-  "type": "object",
-  "additionalProperties": false
+  "type": "object"
 }

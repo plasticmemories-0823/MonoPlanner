@@ -121,7 +121,6 @@ def code_key(root=None):
         'agent/execution/file_actions.py',
         'agent/storage/read_sources.py',
         'agent/source/syntax.py',
-        'agent/source/excerpts.py',
         'agent/acceptance/results.py',
         'agent/execution/executor.py',
         'agent/task/contracts.py',
@@ -213,6 +212,7 @@ def restore(loop, stored, identity):
         loop.environment, loop.evidence, loop.root, versioned_reads=loop.optimize_source
     )
     loop.executor.archive = loop.history_store
+    loop.executor.retrieval_owner = loop
     loop.state, loop.rules = stored, stored['rules']
     from agent.acceptance import revisions
 
@@ -230,6 +230,7 @@ def restore(loop, stored, identity):
             status='execution_unknown', reason='Interrupted assistant operation; no automatic retry'
         )
         return loop.result()
+    # 历史未决记录仍阻止自动恢复；新检索的执行身份属于原有 running_step。
     if stored.get('rag_running') or stored.get('rag_request_pending'):
         pending = stored.get('rag_request_pending')
         if pending:

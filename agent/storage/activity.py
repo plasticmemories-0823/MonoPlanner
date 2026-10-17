@@ -125,6 +125,7 @@ def projection(root, task, seq, record, db):
             'list_files': '正在列出目录',
             'read_file': '正在读取文件',
             'search_files': '正在搜索文件',
+            'retrieve_evidence': '正在检索资料',
             'run_existing': '正在运行已有任务',
             'web_search': '正在搜索网页',
             'web_fetch': '正在读取网页',
@@ -138,7 +139,7 @@ def projection(root, task, seq, record, db):
             run_project_task='正在运行项目任务',
         )
         detail = args.get('path') or args.get('entry') or args.get('query') or args.get('url', '')
-        if name in {'search_files', 'search_file_contents'}:
+        if name in {'search_files', 'search_file_contents', 'retrieve_evidence'}:
             detail += '\n' + args.get('query', '')
         if name in {'run_existing', 'run_project_task'}:
             detail += '\n参数：' + json.dumps(args.get('args', []), ensure_ascii=False)

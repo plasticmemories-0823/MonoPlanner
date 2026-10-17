@@ -6,16 +6,15 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import re
 import sqlite3
 
 from agent.rag.chunks import chunk_document
-from agent.rag.types import Chunk, Document, Query, RagConfig, Scope, TokenCount, canonical
+from agent.rag.types import (
+    CANDIDATE_MEMORY_BYTES, VECTOR_MEMORY_BYTES,
+    Chunk, Document, Query, RagConfig, Scope, TokenCount, canonical,
+)
 from agent.task.control import check_interrupted, current
 
-
-CANDIDATE_MEMORY_BYTES = 32 * 1024 * 1024
-VECTOR_MEMORY_BYTES = 64 * 1024 * 1024
 
 
 def _bounded_rows(cursor):
@@ -23,17 +22,11 @@ def _bounded_rows(cursor):
     estimated = 0
     for row in cursor:
         check_interrupted(pause_only=True)
-        estimated += len(row[0].encode("utf-8")) * 4 + 1024
+        estimated += len((row[0] or "").encode("utf-8")) * 4 + 1024
         if estimated > CANDIDATE_MEMORY_BYTES:
             raise ValueError("Retrieval candidates exceed the reserved memory budget.")
         rows.append(row)
     return rows
-
-
-def _terms(text):
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
-    words = re.findall(r"[A-Za-z0-9]+|[\u3400-\u9fff]", text.lower())
-    return " ".join(words)
 
 
 def _allowed(chunk, query):
@@ -48,7 +41,6 @@ class Index:
     def __init__(self, path, scope: Scope, config: RagConfig, token_count: TokenCount):
         self.path = Path(path)
         self.scope = scope
-        self.terms_table = "terms_" + scope.key
         self.config = config
         self.token_count = token_count
         self.closed = False
@@ -60,6 +52,10 @@ class Index:
                 );
                 CREATE TABLE IF NOT EXISTS documents (
                     scope TEXT, source_id TEXT, version TEXT, sha TEXT,
+                    PRIMARY KEY(scope, source_id, version)
+                );
+                CREATE TABLE IF NOT EXISTS source_headers (
+                    scope TEXT, source_id TEXT, version TEXT, payload TEXT,
                     PRIMARY KEY(scope, source_id, version)
                 );
                 CREATE TABLE IF NOT EXISTS chunks (
@@ -77,9 +73,6 @@ class Index:
                     PRIMARY KEY(scope, chunk_id, model)
                 );
             """)
-            connection.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS {self.terms_table} USING fts5(terms)"
-            )
             settings = canonical(asdict(config))
             old = connection.execute(
                 "SELECT settings FROM configurations WHERE scope=?", (self.scope.key,)
@@ -129,15 +122,12 @@ class Index:
             sql += " AND version=?"
             args.append(version)
         connection.execute(
-            f"DELETE FROM {self.terms_table} WHERE rowid IN "
-            f"(SELECT rowid FROM chunks WHERE {sql})", args
-        )
-        connection.execute(
             f"DELETE FROM chunk_vectors WHERE scope=? AND chunk_id IN "
             f"(SELECT id FROM chunks WHERE {sql})", [self.scope.key, *args]
         )
         connection.execute(f"DELETE FROM chunks WHERE {sql}", args)
         connection.execute(f"DELETE FROM documents WHERE {sql}", args)
+        connection.execute(f"DELETE FROM source_headers WHERE {sql}", args)
         connection.execute(
             "DELETE FROM vectors WHERE NOT EXISTS (SELECT 1 FROM chunk_vectors "
             "WHERE chunk_vectors.model=vectors.model AND chunk_vectors.hash=vectors.hash)"
@@ -163,7 +153,7 @@ class Index:
                     removed += 1
         return removed
 
-    def upsert(self, document: Document):
+    def upsert(self, document: Document, *, exact=False):
         check_interrupted(pause_only=True)
         with self._connection() as connection:
             previous = connection.execute(
@@ -174,28 +164,35 @@ class Index:
                 if previous[0] != document.sha256:
                     raise ValueError("An immutable source version changed its content hash.")
                 return False
-            chunks = chunk_document(document, self.config, self.token_count)
+            chunks = [] if exact else chunk_document(document, self.config, self.token_count)
             connection.execute(
                 "INSERT INTO documents VALUES(?,?,?,?)",
                 (self.scope.key, document.source_id, document.version, document.sha256),
             )
+            header = Chunk(
+                id=hashlib.sha256(f"{document.source_id}\0{document.version}".encode()).hexdigest(),
+                source_id=document.source_id, version=document.version,
+                source_sha256=document.sha256, path=document.path, kind=document.kind,
+                start=0, end=0, parent_start=0, parent_end=len(document.text),
+                line_start=1, line_end=1, text="", run_id=document.run_id,
+                timestamp=document.timestamp,
+            )
+            connection.execute("INSERT INTO source_headers VALUES(?,?,?,?)",
+                               (self.scope.key, document.source_id, document.version, header.render()))
             for chunk in chunks:
                 check_interrupted(pause_only=True)
-                cursor = connection.execute(
+                connection.execute(
                     "INSERT INTO chunks(scope,id,source_id,version,payload) VALUES(?,?,?,?,?)",
                     (self.scope.key, chunk.id, chunk.source_id, chunk.version, chunk.render()),
                 )
-                connection.execute(
-                    f"INSERT INTO {self.terms_table}(rowid,terms) VALUES(?,?)",
-                    (cursor.lastrowid, _terms(f"{chunk.path} {chunk.symbol} {chunk.text}")),
-                )
         return True
 
-    def upsert_documents(self, documents):
+    def upsert_documents(self, documents, *, exact=False):
         count = changed = 0
         for document in documents:
             count += 1
-            changed += self.upsert(document)
+            changed += self.upsert(document, exact=exact)
+            del document
         return {"documents": count, "changed": changed, "chunks": self.stats()["chunks"]}
 
     def stats(self):
@@ -238,50 +235,49 @@ class Index:
                  if _allowed(chunk := Chunk(**json.loads(row[0])), query)}
         return [items[item] for item in ids if item in items]
 
-    def exact(self, query: Query):
-        if not query.exact_path and not query.exact_symbol:
-            return []
-        conditions, arguments = [], []
-        if query.exact_path:
-            conditions.append("AND replace(json_extract(payload,'$.path'),char(92),'/')=?")
-            arguments.append(query.exact_path.replace("\\", "/"))
-        if query.exact_symbol:
-            conditions.append("AND json_extract(payload,'$.symbol')=?")
-            arguments.append(query.exact_symbol)
-        # 先在数据库中缩小精确身份范围，再计算候选内存；无关日志不能阻断小文件定位。
+    def missing_sources(self, query: Query):
         with self._connection() as connection:
-            rows = self._rows(connection, query, " ".join(conditions), tuple(arguments))
-        if len(rows) > 20000:
-            raise ValueError("Exact matches exceed the bounded index scan.")
-        return [chunk for row in rows
-                if _allowed(chunk := Chunk(**json.loads(row[0])), query)]
+            return connection.execute(
+                "SELECT count(*) FROM json_each(?) a WHERE NOT EXISTS "
+                "(SELECT 1 FROM documents d WHERE d.scope=? AND d.source_id=a.key "
+                "AND d.version=a.value)",
+                (canonical(dict(query.source_versions)), self.scope.key),
+            ).fetchone()[0]
 
-    def search(self, query: Query, k=None):
-        k = min(k or self.config.recall_top_k, self.config.recall_top_k)
-        words = list(dict.fromkeys(_terms(query.text).split()))
-        if not words:
-            return []
-        if len(words) > 128:
-            raise ValueError("Retrieval queries may contain at most 128 distinct search terms.")
-        expression = " OR ".join(f'"{word}"' for word in words)
+    def sources(self, query: Query):
+        """每个授权版本只取定位头，不把原文块当成完整检索范围。"""
         with self._connection() as connection:
-            rows = connection.execute(
-                f"SELECT chunks.payload, bm25({self.terms_table}) AS rank FROM {self.terms_table} "
-                f"JOIN chunks ON chunks.rowid={self.terms_table}.rowid "
-                f"WHERE {self.terms_table} MATCH ? "
-                "AND chunks.scope=? AND EXISTS (SELECT 1 FROM json_each(?) a "
-                "WHERE a.key=chunks.source_id AND a.value=chunks.version) ORDER BY rank, chunks.id",
-                (expression, self.scope.key, canonical(dict(query.source_versions))),
-            )
-            result = []
-            for payload, score in rows:
-                check_interrupted(pause_only=True)
-                chunk = Chunk(**json.loads(payload))
-                if _allowed(chunk, query):
-                    result.append((chunk, -score))
-                    if len(result) == k:
-                        break
-        return result
+            rows = _bounded_rows(connection.execute(
+                "SELECT coalesce(h.payload,(SELECT c.payload FROM chunks c "
+                "WHERE c.scope=d.scope AND c.source_id=d.source_id AND c.version=d.version "
+                "ORDER BY c.rowid LIMIT 1)) FROM documents d LEFT JOIN source_headers h "
+                "ON h.scope=d.scope AND h.source_id=d.source_id AND h.version=d.version "
+                "WHERE d.scope=? AND EXISTS (SELECT 1 FROM json_each(?) a "
+                "WHERE a.key=d.source_id AND a.value=d.version) "
+                "ORDER BY d.source_id,d.version",
+                (self.scope.key, canonical(dict(query.source_versions))),
+            ))
+        return [chunk for row in rows if row[0] is not None
+                and _allowed(chunk := Chunk(**json.loads(row[0])), query)]
+
+    def matching_chunk(self, query: Query, source_id: str, start: int, end: int):
+        """字面命中确认后才找引用块；跨块命中由调用方从原件构造范围。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT payload FROM chunks WHERE scope=? AND source_id=? AND version=? "
+                "AND CAST(json_extract(payload,'$.start') AS INTEGER)<=? "
+                "AND CAST(json_extract(payload,'$.end') AS INTEGER)>? "
+                "ORDER BY (CAST(json_extract(payload,'$.end') AS INTEGER)>=?) DESC, "
+                "CAST(json_extract(payload,'$.end') AS INTEGER) "
+                "- CAST(json_extract(payload,'$.start') AS INTEGER),id LIMIT 1",
+                (self.scope.key, source_id, query.source_versions[source_id], start, start, end),
+            ).fetchone()
+        if row is None:
+            return None
+        chunk = Chunk(**json.loads(row[0]))
+        if not _allowed(chunk, query):
+            raise ValueError("The original match is outside the authorized source scope.")
+        return chunk
 
     def vector_cache(self, model_id, chunks):
         result = {}
@@ -300,7 +296,7 @@ class Index:
                 ).fetchone()
                 if row:
                     # JSON 数字解码成 Python float/list 后明显增大，解码前保守计入。
-                    estimated += len(row[0].encode("utf-8")) * 8 + 1024
+                    estimated += len((row[0] or "").encode("utf-8")) * 8 + 1024
                     if estimated > VECTOR_MEMORY_BYTES:
                         raise ValueError("Vector cache exceeds the reserved memory budget.")
                     result[chunk.id] = json.loads(row[0])

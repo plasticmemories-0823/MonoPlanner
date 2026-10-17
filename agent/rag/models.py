@@ -16,9 +16,11 @@ import tempfile
 import threading
 import time
 
+from agent.rag.types import RAG_PARENT_MEMORY_BYTES
+
 
 GIB = 1024 ** 3
-WORKER_BYTES = 3 * GIB // 4
+WORKER_BYTES = GIB - RAG_PARENT_MEMORY_BYTES
 _INFERENCE = threading.Lock()
 _BUILD = ThreadPoolExecutor(max_workers=1, thread_name_prefix='rag-index')
 _BUILD_LOCK = threading.Lock()

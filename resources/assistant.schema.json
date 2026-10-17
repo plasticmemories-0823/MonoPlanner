@@ -34,37 +34,18 @@
       },
       "reread_reason": {
         "type": "string"
+      },
+      "cursor": {
+        "type": "string",
+        "description": "Opaque next_cursor from a partial original source read; empty for a line request."
       }
     },
     "required": [
       "path",
       "offset",
       "limit",
-      "reread_reason"
-    ]
-  },
-  "search_files": {
-    "type": "object",
-    "additionalProperties": false,
-    "properties": {
-      "path": {
-        "type": "string"
-      },
-      "query": {
-        "type": "string"
-      },
-      "offset": {
-        "type": "integer"
-      },
-      "limit": {
-        "type": "integer"
-      }
-    },
-    "required": [
-      "path",
-      "query",
-      "offset",
-      "limit"
+      "reread_reason",
+      "cursor"
     ]
   },
   "run_existing": {
@@ -163,6 +144,83 @@
       "path",
       "destination",
       "content"
+    ]
+  },
+  "retrieve_evidence": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Original query, 1..2000 characters. Exact preserves all whitespace and punctuation."
+      },
+      "path": {
+        "type": "string",
+        "description": "Authorized file or directory scope. Exact may use an authorized absolute path; semantic requires a project-relative scope."
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "exact",
+          "semantic"
+        ],
+        "description": "Default exact: case-sensitive literal text; semantic explicitly requests vector retrieval."
+      },
+      "offset": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Initial hit offset, default 0; use the returned cursor for subsequent pages."
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000,
+        "description": "Maximum hits per page, default 80, range 1..1000. Shared output budget may require continuation."
+      },
+      "cursor": {
+        "type": "string",
+        "description": "Opaque next_cursor; empty for an initial request. Bound to query and source versions."
+      },
+      "intent": {
+        "type": "string",
+        "enum": [
+          "locate",
+          "diagnostic",
+          "audit"
+        ],
+        "description": "Default locate. Diagnostic or audit enables applicable conditional semantic rewrite signals."
+      },
+      "required_entities": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Explicit required evidence entities, at most 16; empty when not required."
+      },
+      "required_kinds": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "code",
+            "document",
+            "tool_result",
+            "log"
+          ]
+        },
+        "description": "Required source types, at most 4; empty when not required."
+      }
+    },
+    "required": [
+      "query",
+      "path",
+      "mode",
+      "offset",
+      "limit",
+      "cursor",
+      "intent",
+      "required_entities",
+      "required_kinds"
     ]
   }
 }

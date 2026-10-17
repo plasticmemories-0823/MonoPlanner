@@ -8,7 +8,7 @@ import math
 from typing import Any, Mapping
 
 
-KNOBS = frozenset({'recall_top_k', 'vector_weight', 'rewrite_threshold', 'chunk_target'})
+KNOBS = frozenset({'recall_top_k', 'rewrite_threshold', 'chunk_target'})
 CHUNK_LEVELS = (256, 384, 512)
 
 
@@ -41,7 +41,9 @@ class Config:
             raise ValueError('recall_top_k must be an integer between 10 and 200')
         if 'rerank_k' in copied and not 1 <= copied['rerank_k'] <= top_k:
             raise ValueError('rerank_k must not exceed recall_top_k')
-        for name in ('vector_weight', 'rewrite_threshold'):
+        if 'vector_weight' in copied:
+            raise ValueError('Obsolete fusion settings require an explicit new configuration')
+        for name in ('rewrite_threshold',):
             if not _number(copied[name]) or not 0 <= copied[name] <= 1:
                 raise ValueError(f'{name} must be a finite number between 0 and 1')
         if type(copied['chunk_target']) is not int or copied['chunk_target'] not in CHUNK_LEVELS:
@@ -79,9 +81,6 @@ def enumerate_candidates(base: Config) -> tuple[Candidate, ...]:
             position = CHUNK_LEVELS.index(old)
             choices = [value for index, value in enumerate(CHUNK_LEVELS)
                        if abs(index - position) == 1]
-        elif name == 'vector_weight':
-            choices = [float(Decimal(str(old)) + delta)
-                       for delta in (Decimal('-0.05'), Decimal('0.05'))]
         else:
             choices = [float(Decimal(str(old)) * scale)
                        for scale in (Decimal('0.95'), Decimal('1.05'))]
