@@ -93,7 +93,12 @@ class Preferences:
             raise ValueError('思考程度必须是 none、low、high 或 max')
         if type(value.get('online')) is not bool:
             raise ValueError('联网设置必须是布尔值')
-        return {name: value[name] for name in DEFAULTS}
+        result = {name: value[name] for name in DEFAULTS}
+        if 'container_read_sources' in value:
+            from agent.rag.container_sources import validate_source_configuration
+
+            result['container_read_sources'] = validate_source_configuration(value['container_read_sources'])
+        return result
 
     def defaults(self):
         return (
@@ -125,10 +130,10 @@ class Preferences:
         }
 
     def update(self, value):
-        if not isinstance(value, dict) or set(value) - {*DEFAULTS, 'api_key'}:
+        if not isinstance(value, dict) or set(value) - {*DEFAULTS, 'api_key', 'container_read_sources'}:
             raise ValueError('配置包含未知字段')
         public = self.validate(
-            {**self.defaults(), **{k: v for k, v in value.items() if k in DEFAULTS}}
+            {**self.defaults(), **{k: v for k, v in value.items() if k != 'api_key'}}
         )
         key = value.get('api_key', '')
         if not isinstance(key, str) or '\n' in key or '\r' in key:

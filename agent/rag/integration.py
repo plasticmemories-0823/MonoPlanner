@@ -70,7 +70,7 @@ def _with_resources(function):
     return retrieve
 
 
-def validate_arguments(arguments, *, absolute=False, records=False):
+def validate_arguments(arguments, *, absolute=False, records=False, containers=False):
     defaults = {'mode': 'exact', 'cursor': '', 'limit': 80, 'offset': 0,
                 'intent': 'locate', 'required_entities': [], 'required_kinds': []}
     allowed = {'query', 'path', *defaults}
@@ -90,7 +90,11 @@ def validate_arguments(arguments, *, absolute=False, records=False):
     normalized = path.replace('\\', '/')
     if '..' in PurePosixPath(normalized).parts:
         raise ValueError('path cannot traverse outside its authorized scope.')
-    if path.startswith('$') and not (records and (path == '$record' or path.startswith('$record/'))):
+    if containers and path.startswith('$container/'):
+        from agent.rag.container_sources import split_path
+
+        split_path(path)
+    elif path.startswith('$') and not (records and (path == '$record' or path.startswith('$record/'))):
         raise ValueError('path is outside the authorized retrieval scope.')
     if not absolute and (Path(path).is_absolute() or ':' in path or normalized.startswith('/')):
         raise ValueError('path must be relative to the bound project.')
@@ -553,7 +557,8 @@ def _retrieve(owner, sources, arguments, *, root, cache_root, repo, task_id, req
     from agent.rag.retrieval import Retriever
     from agent.rag.rewrite import RewriteLedger, assess
 
-    arguments = validate_arguments(arguments, absolute=reader_scope == 'authorized', records=True)
+    arguments = validate_arguments(arguments, absolute=reader_scope == 'authorized', records=True,
+                                   containers=reader_scope == 'container')
     semantic = arguments['mode'] == 'semantic'
     models = _models(owner) if semantic else SimpleNamespace(vector=None, reranker=None)
     actual_model_hash = _model_configuration()['hash'] if semantic else 'exact-originals'
@@ -571,7 +576,8 @@ def _retrieve(owner, sources, arguments, *, root, cache_root, repo, task_id, req
                   original_text=arguments['query'], mode=arguments['mode'], cursor=cursor,
                   limit=arguments['limit'], offset=arguments['offset'],
                   required_entities=tuple(arguments['required_entities']),
-                  required_kinds=tuple(arguments['required_kinds']))
+                  required_kinds=tuple(arguments['required_kinds']),
+                  source_priorities=getattr(sources, 'priorities', {}))
     rewrite_result = {'status': 'not_triggered'}
     facts = {'triggered': []}
     try:
@@ -587,6 +593,8 @@ def _retrieve(owner, sources, arguments, *, root, cache_root, repo, task_id, req
             if (reader_scope in {'work', 'public'} and arguments['path'] in {'.', './'}
                     and not sources.reasons):
                 index.prune_sources(sources.versions)
+            elif reader_scope == 'container' and not sources.reasons:
+                index.prune_sources(sources.versions, source_prefix='container:' + arguments['path'])
             tokenizer = semantic and bool(
                 getattr(models, 'manifest', {}).get('models', {}).get('embedding'))
             if tokenizer and models.vector is not None:
@@ -689,7 +697,9 @@ def _rewrite_text(raw):
 
 @_with_resources
 def retrieve_work(loop, arguments):
-    arguments = validate_arguments(arguments, records=True)
+    arguments = validate_arguments(arguments, records=True, containers=True)
+    if arguments['path'].startswith('$container/'):
+        return _retrieve_container(loop, arguments)
     config = (bind_work(loop) if arguments['mode'] == 'semantic'
               else {'version': 'exact-v1', 'values': asdict(RagConfig())})
     return _retrieve(
@@ -702,6 +712,70 @@ def retrieve_work(loop, arguments):
         rewrite=lambda query, reasons: _rewrite_text(
             loop.request_model(_rewrite_messages(query, reasons), 'rag_rewrite')),
     )
+
+
+def _retrieve_container(loop, arguments):
+    from agent.rag.container_sources import ContainerSources, ContainerSourceError
+    from agent.rag.container_backend import ContainerReadError
+
+    try:
+        manager = ContainerSources(loop)
+        entries, metadata = manager.scan(arguments)
+        if entries is None:
+            return metadata
+        sources = Sources(bounded=False)
+        sources.priorities = {}
+        by_source = {}
+        for entry in entries:
+            identity = entry['source_id']
+            by_source[identity] = entry
+            sources.add(identity, entry['version'], entry['size'],
+                        lambda entry=entry: manager.cached(entry).decode('utf-8'),
+                        kind=_kind(entry['path']), path=entry['path'], run_id=loop.root.name)
+            sources.priorities[identity] = int(entry['from_build_tree'])
+        selected = dict(arguments)
+        selected['cursor'] = metadata.get('search_cursor', '')
+        config = (bind_work(loop) if arguments['mode'] == 'semantic'
+                  else {'version': 'exact-v1', 'values': asdict(RagConfig())})
+        result = _retrieve(
+            loop, sources, selected, root=data_root(loop), cache_root=loop.root,
+            repo=loop.environment.repo_root, task_id=loop.root.name,
+            request_id=getattr(loop, 'state', {}).get('rag_request_id', 'task:' + loop.root.name),
+            config=config, reader_scope='container',
+            rewrite=lambda query, reasons: _rewrite_text(
+                loop.request_model(_rewrite_messages(query, reasons), 'rag_rewrite')),
+        )
+        delivered = {item['source_id'] for item in result.get('results', [])}
+        for identity in delivered:
+            entry = by_source[identity]
+            manager.raw(entry['path'], metadata['grant'], expected_version=entry['version'],
+                        expected_hash=entry['sha256'], archive=True)
+        for collection in ('results', 'hits'):
+            for item in result.get(collection, []):
+                entry = by_source[item['source_id']]
+                item.update(origin=entry['origin'], namespace=entry['namespace'],
+                            actual_path=entry['actual_path'], temporary=entry['temporary'],
+                            from_build_tree=entry['from_build_tree'])
+        result['container_source'] = {
+            'binding': manager.binding, 'binding_key': manager.binding_key,
+            'scope': arguments['path'], 'temporary': metadata['grant']['temporary'],
+            'excluded_sources': metadata['excluded_sources'], 'cache_ttl_seconds': 600,
+        }
+        # 补充元数据也必须计入原有消息预算，不能把超限正文静默截短。
+        if estimated_tokens(canonical(result)) > 8192:
+            raise ContainerSourceError('container_result_budget_reduce_limit', arguments['path'])
+        manager.finish_scan(metadata['scan_id'])
+        return result
+    except (ContainerSourceError, ContainerReadError) as error:
+        details = getattr(error, 'details', {})
+        result = _unavailable(details.get('reason', details.get('code', 'container_source_unavailable')),
+                              arguments)
+        result.update(source_error=details, requires_authorization=details.get('requires_authorization', False),
+                      rewrite={'status': 'not_triggered'},
+                      notice='No source scope was expanded. If authorization is required, report the '
+                             'exact directory and wait for trusted task configuration; Shell is not '
+                             'a retrieval fallback. Continue other authorized work if possible.')
+        return result
 
 
 @_with_resources
@@ -877,6 +951,12 @@ def _committed_reference(root, source_id, version, public=False):
 
 def audit_work_citations(loop, raw, messages, folder):
     def read(source_id, version):
+        if source_id.startswith('container:'):
+            from agent.rag.container_sources import container_original
+
+            original, _ = container_original(loop, source_id[len('container:'):],
+                                              expected_version=version)
+            return original.decode('utf-8')
         if source_id.startswith('source:'):
             path = source_id[len('source:'):]
             view = loop.evidence.view()

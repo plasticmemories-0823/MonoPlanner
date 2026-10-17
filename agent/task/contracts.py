@@ -7,8 +7,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class Operation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
-    op: Literal["read", "search", "shell"]
-    path: str = "."
+    op: Literal["read", "search", "shell"] = Field(
+        description=(
+            'read: known original ranges; search: locate evidence through RAG; '
+            'shell: editing, execution and runtime diagnostics, never evidence search.'
+        ),
+    )
+    path: str = Field(
+        default=".",
+        description=(
+            'Authorized repository scope, $record path or host-registered '
+            '$container namespace. Never widen the registered scope.'
+        ),
+    )
     query: str = ""
     offset: int = Field(default=0, ge=0)
     limit: int = Field(
@@ -31,7 +42,13 @@ class Operation(BaseModel):
         description='Opaque continuation from search or read; empty for an initial request.',
     )
     from_step: str = ""
-    command: str = Field(default="", max_length=30000)
+    command: str = Field(
+        default="", max_length=30000,
+        description=(
+            'Shell code for editing, execution or runtime diagnostics; '
+            'do not search existing source, documents or saved logs here.'
+        ),
+    )
     expected_exit: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=4)
 
     @model_validator(mode="before")

@@ -622,6 +622,9 @@ class TaskRunner:
 
         if self.work_rules_factory is not None:
             self.rules = self.work_rules_factory(self, text, acceptance, verify_command)
+        from agent.rag.container_sources import source_guidance
+
+        self.rules += source_guidance(self.runtime_settings)
 
         # ========================================================================
         # 保存原始需求和初始材料，再进入驱动循环
@@ -705,6 +708,9 @@ class TaskRunner:
         except ModelRequestNotSent as exc:
             self.state.update(status=exc.status, reason=exc.reason)
         source_runtime.close(self)
+        from agent.rag.container_sources import expire_container_sources
+
+        expire_container_sources(self)
         self.persist("task_returned", {"status": self.state["status"]})
         report = f"{self.state['status']}: {self.state.get('reason', '')}"
         from agent.storage.usage import summarize

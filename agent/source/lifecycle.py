@@ -78,11 +78,18 @@ def readonly(loop, plan, step):
 
 def configure_lookups(loop):
     from agent.model.compaction import history
+    from agent.rag.container_sources import is_container_path
     from agent.source.paging import visible_reads
     from agent.source.exploration import ExplorationMap
 
+    def source_identity(page):
+        if is_container_path(page['path']):
+            # 相同正文在不同容器绑定中也不能继承可见行；旧无版本记录不用于跳读。
+            return (page['path'], page['version']) if page.get('version') else None
+        return page['path'], page['sha256']
+
     loop.executor.visible_reads = visible_reads(
-        history(loop.state, loop.root), loop.state['pending']['rows']
+        history(loop.state, loop.root), loop.state['pending']['rows'], key=source_identity,
     )
     from pathlib import Path
 
@@ -103,8 +110,16 @@ def configure_lookups(loop):
 def record_lookup(loop, step, row, directory):
     if row['status'] != 'succeeded' or step.op not in {'read', 'search'}:
         return
+    from agent.rag.container_sources import is_container_path
+    from agent.source.paging import read_pages
     from agent.storage.records import save
 
+    paths = [page['path'] for page in read_pages(row['data'])]
+    paths.extend(hit['path'] for hit in row['data'].get('hits', []))
+    if ((paths and all(is_container_path(path) for path in paths))
+            or (not paths and is_container_path(getattr(step, 'path', '')))):
+        # 容器原件由只读适配器归档，不以项目版本生成误导性的仓库映射。
+        return
     result = loop.executor.exploration.observe(row['data'])
     path = directory / 'repository-map.json'
     save(path, {'source_version': result['source_version'], 'files': loop.state['source_map']})

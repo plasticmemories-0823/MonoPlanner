@@ -138,13 +138,16 @@ class Index:
         with self._connection() as connection:
             self._delete(connection, source_id, version)
 
-    def prune_sources(self, authorized_versions):
+    def prune_sources(self, authorized_versions, *, source_prefix='source:'):
         """移除当前 scope 失效的源码派生缓存；操作记录及原件始终不动。"""
         removed = 0
+        descendant_prefix = (source_prefix if source_prefix.endswith(':')
+                             else source_prefix.rstrip('/') + '/')
         with self._connection() as connection:
             versions = connection.execute(
                 "SELECT source_id,version FROM documents WHERE scope=? "
-                "AND substr(source_id,1,7)='source:'", (self.scope.key,),
+                "AND (source_id=? OR substr(source_id,1,?)=?)",
+                (self.scope.key, source_prefix, len(descendant_prefix), descendant_prefix),
             ).fetchall()
             for source_id, version in versions:
                 check_interrupted(pause_only=True)

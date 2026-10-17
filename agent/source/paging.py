@@ -209,7 +209,7 @@ def read_pages(value):
             yield from read_pages(item)
 
 
-def visible_reads(history, rows):
+def visible_reads(history, rows, *, key=None):
     """仅采纳实际工具结果和初始材料，不采纳助手声明或本地文件。"""
     values = []
     for index, message in enumerate(history):
@@ -237,8 +237,9 @@ def visible_reads(history, rows):
     seen = {}
     for value in values:
         for page in read_pages(value):
-            key = (page['path'], page['sha256'])
-            seen[key] = merged([*seen.get(key, []), *page['visible_ranges']])
+            identity = key(page) if key else (page['path'], page['sha256'])
+            if identity is not None:
+                seen[identity] = merged([*seen.get(identity, []), *page['visible_ranges']])
     return seen
 
 

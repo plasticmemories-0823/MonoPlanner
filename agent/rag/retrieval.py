@@ -71,6 +71,7 @@ class Retriever:
             "query": query.original_text if query.original_text is not None else query.text,
             "effective_query": query.text, "mode": query.mode,
             "source_versions": dict(query.source_versions),
+            "source_priorities": dict(query.source_priorities),
             "excluded_paths": query.excluded_paths, "snapshot": snapshot,
         }
         return hashlib.sha256(canonical(payload).encode("utf-8")).hexdigest()
@@ -159,7 +160,8 @@ class Retriever:
                     count + 1.2 * (0.25 + 0.75 * length / max(1, average_length))
                 )
                 ranked.append((header, count, score))
-        ranked.sort(key=lambda item: (-item[2], item[0].path, item[0].source_id))
+        ranked.sort(key=lambda item: (-item[2], query.source_priorities.get(item[0].source_id, 0),
+                                      item[0].path, item[0].source_id))
         records, skipped, records_bytes, page_full = [], 0, 0, False
         text = None
         for header, count, score in ranked:
@@ -255,7 +257,8 @@ class Retriever:
                                           len(candidates) + 1))
                     if len(values) != len(candidates) or not all(math.isfinite(v) for v in values):
                         raise ValueError("Reranker returned invalid scores.")
-                    ranked = sorted(zip(candidates, values), key=lambda item: (-item[1], item[0].id))
+                    ranked = sorted(zip(candidates, values), key=lambda item: (
+                        -item[1], query.source_priorities.get(item[0].source_id, 0), item[0].id))
                     ordered = [item[0] for item in ranked] + ordered[len(candidates):]
                     scores = tuple(item[1] for item in ranked)
                 except ModelInterrupted:

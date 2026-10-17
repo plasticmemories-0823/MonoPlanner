@@ -26,10 +26,12 @@
               "search",
               "shell"
             ],
-            "type": "string"
+            "type": "string",
+            "description": "read: known original ranges; search: locate evidence through RAG; shell: editing, execution and runtime diagnostics, never evidence search."
           },
           "path": {
-            "type": "string"
+            "type": "string",
+            "description": "Authorized repository scope, $record path or host-registered $container namespace. Never widen the registered scope."
           },
           "query": {
             "type": "string"
@@ -86,7 +88,8 @@
             "type": "string"
           },
           "command": {
-            "type": "string"
+            "type": "string",
+            "description": "Shell code for editing, execution or runtime diagnostics; do not search existing source, documents or saved logs here."
           },
           "expected_exit": {
             "items": {

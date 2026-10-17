@@ -107,6 +107,13 @@ class OperationExecutor:
 
     def read(self, name, offset, limit, *, budget=None, cursor=None):
         name = PurePosixPath(name.replace('\\', '/')).as_posix()
+        from agent.rag.container_sources import is_container_path, read_container
+
+        if is_container_path(name):
+            return read_container(
+                getattr(self, 'retrieval_owner', self), name, offset, limit,
+                budget=budget, cursor=cursor,
+            )
         from agent.model.tool_payloads import read, readable
 
         archive = getattr(self, 'archive', None)
@@ -147,6 +154,13 @@ class OperationExecutor:
         budget = budget if budget is not None else ReadBudget()
         ranges(offset, limit)  # 即使不需要补读，也必须检查参数限制。
         path = PurePosixPath(path.replace('\\', '/')).as_posix()
+        from agent.rag.container_sources import is_container_path, read_container
+
+        if is_container_path(path):
+            return read_container(
+                getattr(self, 'retrieval_owner', self), path, offset, limit,
+                budget=budget, cursor=cursor, repeat=repeat,
+            )
         if cursor:
             return read_range(self, path, offset, limit, budget, cursor=cursor)
         if path.startswith('$record/'):
@@ -234,9 +248,22 @@ class OperationExecutor:
         version = hit.get('version')
         if not expected or not version:
             raise ValueError('Search hit has no verified source version.')
-        if not path.startswith('$record/') and self.inventory().get(path) != version:
-            raise ValueError('Search hit source version changed; repeat the search.')
-        raw = self.path(path).read_bytes() if path.startswith('$record/') else self.source_bytes(path)
+        from agent.rag.container_sources import (
+            container_original, container_read_cursor, is_container_path, read_container,
+        )
+
+        container = is_container_path(path)
+        metadata = {}
+        if container:
+            owner = getattr(self, 'retrieval_owner', self)
+            raw, metadata = container_original(
+                owner, path, expected_version=version, expected_hash=expected,
+            )
+        else:
+            if not path.startswith('$record/') and self.inventory().get(path) != version:
+                raise ValueError('Search hit source version changed; repeat the search.')
+            raw = (self.path(path).read_bytes() if path.startswith('$record/')
+                   else self.source_bytes(path))
         if hashlib.sha256(raw).hexdigest() != expected:
             raise ValueError('Search hit source changed; repeat the search.')
         from agent.source.paging import read_pages, source_cursor
@@ -256,11 +283,20 @@ class OperationExecutor:
                 stop = len(text[:line_end].encode('utf-8'))
                 result = budget.source(raw, hit['line'] - 1, step.limit,
                                        cursor=source_cursor(expected, start, stop))
-                return {'path': path, **result}
-        result = self.read_continuation(
-            path, max(0, hit['line'] - 1 - step.limit // 2), step.limit,
-            step.query.startswith('reread:'), budget=budget,
-        )
+                if container and result.get('next_cursor'):
+                    result['next_cursor'] = container_read_cursor(metadata, result['next_cursor'])
+                return {**metadata, 'path': path, **result}
+        offset = max(0, hit['line'] - 1 - step.limit // 2)
+        if container:
+            result = read_container(
+                owner, path, offset, step.limit, budget=budget,
+                repeat=step.query.startswith('reread:'),
+                expected_version=version, expected_hash=expected,
+            )
+        else:
+            result = self.read_continuation(
+                path, offset, step.limit, step.query.startswith('reread:'), budget=budget,
+            )
         if any(page['sha256'] != expected for page in read_pages(result)):
             raise ValueError('Search hit source changed while reading; no new text was delivered.')
         return result

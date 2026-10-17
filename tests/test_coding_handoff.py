@@ -3,7 +3,17 @@
 import ast
 import json
 import subprocess
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+
+from langchain_core.messages import SystemMessage
+
+from agent.execution.executor import OperationExecutor
+from agent.task.contracts import Operation
+from agent.task.instructions import TASK_RULES
 
 from agent.model.tools import CHAT_TOOLS, CODING_TOOLS, WORK_TOOLS
 from agent.model.payload import wire_input
@@ -24,6 +34,17 @@ class CodingHandoffTests(unittest.TestCase):
                 expected['properties']['steps']['items']['properties']['limit'][
                     'description'
                 ] = 'read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.'
+                for field, description in {
+                    'op': 'read: known original ranges; search: locate evidence through RAG; '
+                          'shell: editing, execution and runtime diagnostics, never evidence search.',
+                    'path': 'Authorized repository scope, $record path or host-registered '
+                            '$container namespace. Never widen the registered scope.',
+                    'command': 'Shell code for editing, execution or runtime diagnostics; '
+                               'do not search existing source, documents or saved logs here.',
+                }.items():
+                    expected['properties']['steps']['items']['properties'][field][
+                        'description'
+                    ] = description
             actual = json.loads((PROJECT_ROOT / 'resources' / name).read_bytes())
             if name == 'plan.schema.json':
                 step = actual['properties']['steps']['items']
@@ -49,7 +70,7 @@ class CodingHandoffTests(unittest.TestCase):
             'All full plans, responses and logs remain on disk. Large tool text may be offloaded: a monoplanner-tool-payload-v1 reference identifies the exact record path, SHA-256, full size and line count; preview is partial, not the full result. Identical text already visible in this context may return only its hash and record reference. Read the required original ranges with read path=$record/<relative record path>, offset and limit; use continuation.next_offset when present. For an oversized payload line, follow its next_query with read query=payload_bytes:<raw byte offset>, offset=0 and limit=2000; this mode returns a bounded byte window, not complete source lines. Source-file reads retain their normal paging limits.',
         )
         lookup_prefixes = ('submit_plan fields are required.', 'read uses repository-relative',
-                           'A read may use from_step=')
+                           'A read may use from_step=', 'Evidence lookup:', 'Container evidence:')
         unchanged = lambda text: [line for line in text.splitlines()
                                   if not line.startswith(lookup_prefixes)]
         self.assertEqual(unchanged(rules), unchanged(expected))
@@ -70,6 +91,42 @@ class CodingHandoffTests(unittest.TestCase):
         for tool in WORK_TOOLS:
             self.assertEqual(definitions(baseline)[tool.name], definitions(current)[tool.name])
         self.assertNotIn('submit_plan', [t.name for t in CHAT_TOOLS])
+
+    def test_model_visible_lookup_policy_keeps_execution_and_explicit_scopes(self):
+        request = wire_input([SystemMessage(content=TASK_RULES)], WORK_TOOLS)
+        rules = request['messages'][0]['content']
+        self.assertIn('must use search to locate relevant content', rules)
+        self.assertIn('Do not use shell commands or scripts as a substitute', rules)
+        self.assertIn('Use read for a known path and range', rules)
+        self.assertIn('Shell remains available for compilation, tests, execution', rules)
+        self.assertIn('runtime or binary diagnostics, candidate edits', rules)
+        self.assertIn('processing output from the command being executed', rules)
+        self.assertIn('never expand the authorized scope yourself', rules)
+        self.assertIn('$container/system_include/usr/include/', rules)
+        self.assertIn('$container/toolchain_src/build/gcc', rules)
+        frontdesk = (PROJECT_ROOT / 'resources/prompts/frontdesk.txt').read_text('utf-8')
+        self.assertIn('Do not run project scripts to search existing source', frontdesk)
+
+    def test_lookup_policy_does_not_intercept_or_rewrite_shell_execution(self):
+        # 工作模型应遵循检索分工，但程序不根据命令词汇阻断或改写已提交命令。
+        commands = (
+            'grep -rn needle src',
+            'cc --version',
+            'readelf -Ws ./program | grep target_symbol',
+            'python -m pytest tests',
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            environment = SimpleNamespace(repo_root=root)
+            executor = OperationExecutor(environment, SimpleNamespace(current='v1'), root)
+            for command in commands:
+                with self.subTest(command=command):
+                    step = Operation(id='probe', op='shell', command=command)
+                    observed = {'exit_code': 0, 'stdout': 'observed', 'stderr': ''}
+                    with patch('agent.execution.probe.run_probe', return_value=observed) as probe:
+                        result = executor.execute(step, {}, root / 'probe', 30, isolated=True)
+                    self.assertEqual(result['status'], 'succeeded')
+                    self.assertEqual(probe.call_args.args[1], command)
 
 
 class SignalSequenceTests(unittest.TestCase):

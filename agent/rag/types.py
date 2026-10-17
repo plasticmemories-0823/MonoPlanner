@@ -89,6 +89,7 @@ class Query:
     required_kinds: tuple[str, ...] = ()
     excluded_paths: tuple[str, ...] = ()
     original_text: str | None = None
+    source_priorities: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
