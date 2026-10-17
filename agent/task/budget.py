@@ -30,6 +30,17 @@ class RequestReservation:
 
 
 @dataclass
+class ServiceReservation:
+    """按次计费的工具服务凭证，与模型 Token 和调用次数分开。"""
+
+    owner: int
+    call_id: int
+    purpose: str
+    reserved_cost_micros: int
+    active: bool = True
+
+
+@dataclass
 class StepBudget:
     max_steps: int = 1000
     used_steps: int = 0
@@ -44,6 +55,12 @@ class StepBudget:
     unknown_reserved_tokens: int = 0
     inflight_reserved_tokens: int = 0
     request_sequence: int = 0
+    service_calls: int = 0
+    service_sequence: int = 0
+    service_cost_micros: int = 0
+    unknown_service_cost_micros: int = 0
+    inflight_service_cost_micros: int = 0
+    max_service_cost_micros: int | None = None
     transport_retries: int = 0
     transport_retry_limit: int = 2
     admission_events: list = field(default_factory=list)
@@ -60,6 +77,10 @@ class StepBudget:
             raise ValueError("max_steps 必须大于 0")
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError("max_tokens 必须大于 0")
+        if self.max_service_cost_micros is not None and (
+            type(self.max_service_cost_micros) is not int or self.max_service_cost_micros < 0
+        ):
+            raise ValueError('max_service_cost_micros must be a non-negative integer')
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds 必须大于 0")
         if not 0 < self.normal_fraction < 1:
@@ -194,6 +215,46 @@ class StepBudget:
     def _check_ticket(self, ticket):
         if ticket.owner != id(self) or not ticket.active:
             raise ValueError("请求凭证不属于本预算，或已完成记账")
+
+    def reserve_service(self, purpose, cost_micros=5000):
+        """独立预留服务费用；不伪造零 Token 的模型调用。金额单位为百万分之一元。"""
+        if type(cost_micros) is not int or cost_micros < 0:
+            raise ValueError('Service reservation must be non-negative integer micro-CNY')
+        with _BUDGET_LOCK:
+            if self.cancelled:
+                raise ModelRequestNotSent('task_cancelled', self.cancel_reason)
+            remaining = self.remaining_time()
+            if remaining is not None and remaining <= 0:
+                raise ModelRequestNotSent('task_timeout', 'Task time budget exhausted')
+            occupied = (self.service_cost_micros + self.unknown_service_cost_micros
+                        + self.inflight_service_cost_micros + cost_micros)
+            if self.max_service_cost_micros is not None and occupied > self.max_service_cost_micros:
+                raise ModelRequestNotSent('service_budget_exhausted',
+                                          'Tool service cost budget cannot cover this request')
+            self.service_calls += 1
+            self.service_sequence += 1
+            self.inflight_service_cost_micros += cost_micros
+            return ServiceReservation(id(self), self.service_sequence, purpose, cost_micros)
+
+    def settle_service(self, ticket, outcome):
+        """失败或空结果不收费；结果未知保留费用额度，不能自动释放或重发。"""
+        if outcome not in {'succeeded', 'empty', 'failed', 'unknown', 'not_sent'}:
+            raise ValueError('Unknown tool service settlement status')
+        with _BUDGET_LOCK:
+            self._check_ticket(ticket)
+            self.inflight_service_cost_micros -= ticket.reserved_cost_micros
+            cost = ticket.reserved_cost_micros if outcome == 'succeeded' else 0
+            reserved = ticket.reserved_cost_micros if outcome == 'unknown' else 0
+            self.service_cost_micros += cost
+            self.unknown_service_cost_micros += reserved
+            if outcome == 'not_sent':
+                self.service_calls -= 1
+            ticket.active = False
+            return {
+                'kind': 'service', 'call': ticket.call_id, 'purpose': ticket.purpose,
+                'status': outcome, 'cost_micros': None if outcome == 'unknown' else cost,
+                'reserved_cost_micros': reserved,
+            }
 
     def reserve_tokens(self, ticket: RequestReservation, reservation: int):
         """允许调用方发送 HTTP 请求前，先计入进行中的请求额度。"""

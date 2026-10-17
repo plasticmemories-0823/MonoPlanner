@@ -1,4 +1,4 @@
 {
-  "search": {"type": "object", "additionalProperties": false, "properties": {"query": {"type": "string"}}, "required": ["query"]},
-  "fetch": {"type": "object", "additionalProperties": false, "properties": {"url": {"type": "string"}}, "required": ["url"]}
+  "search": {"type": "object", "additionalProperties": false, "properties": {"query": {"type": "string", "description": "Exact web query, 1..128 characters. No automatic rewriting."}}, "required": ["query"]},
+  "fetch": {"type": "object", "additionalProperties": false, "properties": {"url": {"type": "string", "description": "One public HTTP(S) URL, at most 8192 characters; no embedded credentials or private host."}}, "required": ["url"]}
 }

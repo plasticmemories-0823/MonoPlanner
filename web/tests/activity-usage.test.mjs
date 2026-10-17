@@ -37,3 +37,18 @@ test("progress and title costs accumulate without replacing the active main cont
   assert.equal(conversationUsage(groups, true).calls, 6);
   assert.equal(conversationUsage({ chat: groups.chat }, true).context, null);
 });
+
+test("web service fees and unknown reservations do not become model requests", () => {
+  const result = conversationUsage({
+    chat: { calls: 2, total_tokens: 50, service_calls: 1, service_cost_micros: 5000 },
+    work: { calls: 3, total_tokens: 100, service_calls: 2, service_cost_micros: 5000,
+      service_reserved_cost_micros: 5000, service_unknown_calls: 1 },
+  }, false);
+  assert.equal(result.calls, 5);
+  assert.equal(result.total_tokens, 150);
+  assert.equal(result.service_calls, 3);
+  assert.equal(result.service_cost_micros, 10000);
+  assert.equal(result.service_reserved_cost_micros, 5000);
+  assert.equal(result.service_unknown_calls, 1);
+  assert.equal(result.unknown_calls, 0);
+});

@@ -479,17 +479,22 @@ class Chatbot:
         def persist(event, payload=None):
             self.store.record_event(conversation, 'chat_tool',
                                     {'event': event, 'operation': operation})
-            if event == 'web_search_request_started':
+            if event == 'web_request_started':
                 call = self.store.begin_call(conversation, 'chat',
-                                              {'purpose': 'web_search', 'operation': operation})
+                                              {'kind': 'service', 'purpose': payload['purpose'],
+                                               'reserved_cost_micros':
+                                                   payload['reserved_cost_micros'],
+                                               'operation': operation})
                 self.store.mark_sent(call)
                 web_calls[payload['call']] = call
-            elif event in {'web_search_result_unknown', 'web_search_response_saved'}:
+            elif event in {'web_result_unknown', 'web_response_saved', 'web_request_not_sent'}:
                 call = web_calls[payload['call']]
                 row = next((item for item in context.state.get('web_usage', [])
                             if item['call'] == payload['call']), {})
-                self.store.finish_call(call, response_id=operation if row else None,
-                                       usage=row.get('usage'), seconds=row.get('seconds', 0))
+                known = row and row.get('status') not in {'unknown', 'not_sent'}
+                self.store.finish_call(call, response_id=operation if known else None,
+                                       usage=row or None, seconds=row.get('seconds', 0),
+                                       not_sent=event == 'web_request_not_sent')
 
         context.persist = persist
         history = [row[1] for row in self.store.model_history(conversation)]

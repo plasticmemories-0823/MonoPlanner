@@ -71,7 +71,7 @@ pnpm --dir web build
 
 ## 执行与验收边界
 
-`agent/execution/managed_plan.py` 只读解析项目依赖；`managed.py` 管理过滤副本、下载、安装及镜像缓存；`managed_proxy.py` 和 `managed_setup.py` 在独立准备容器内运行，`download_relay.py` 提供仅在准备期间运行的宿主网络转发。`agent/model/network.py` 按请求解析当前系统代理与 PAC；网页读取及下载转发各自保留公网地址检查。`preparation.py` 对同一项目合并准备请求，并限制同时准备的项目数。认证接口 `/workspace/environment` 的 GET 只读，POST 接受 prepare、automatic、cancel。准备与重试不调用模型，不执行候选修改。
+`agent/execution/managed_plan.py` 只读解析项目依赖；`managed.py` 管理过滤副本、下载、安装及镜像缓存；`managed_proxy.py` 和 `managed_setup.py` 在独立准备容器内运行，`download_relay.py` 提供仅在准备期间运行的宿主网络转发。`agent/model/network.py` 按请求解析当前系统代理与 PAC；网页搜索和抓取只连接 DeepSeek 工具 API，下载转发继续保留公网地址检查。`preparation.py` 对同一项目合并准备请求，并限制同时准备的项目数。认证接口 `/workspace/environment` 的 GET 只读，POST 接受 prepare、automatic、cancel。准备与重试不调用模型，不执行候选修改。
 
 选择目录只保存会话的授权工作区 `repo`。Chatbot 在开工询问中说明项目位置，确认后用 `start_work(project_path, create)` 保存相对路径；工作记录的 `repo` 指向实际项目，公开快照的 `work.repo` 用于展示及环境操作。新目录在后台首次开工时排他创建，意图和完成凭据分开保存；未知结果不重放。目录创建与范围核对完成后才准备环境并绑定镜像、容器。普通聊天、目录浏览和预览不启动准备或工作容器。手动或正式评测的显式镜像配置继续优先。项目依赖配置变化会使自动环境缓存失效；已绑定任务仍使用原环境。无依赖声明的新项目使用通用 Python/Node 基础环境，不猜测第三方依赖。
 
@@ -81,7 +81,7 @@ pnpm --dir web build
 - `start_work` 只提交已确认的 `project_path`（工作区相对路径，根目录为 `.`）及 `create` 布尔值；旧的无参数入口拒绝。现有任务的补充必须沿用原项目，不能改变根目录。`repair_work` 只修正拒收稿件列出的字段。
 - 编码 `read` 默认及单次上限为2,000行，允许较小窗口；内部按200行分页。同一步的所有页及 `from_step` 区间共享50KiB UTF-8正文预算。按原文顺序截断，使用 `continuation.next_offset` 续读；超长单行会明确标记，部分行不计入已读区间。搜索限额及普通聊天 `read_file` 不变。
 - 完整但参数非法的助手回复仍按原件追加：保留公开文字、思考、工具调用身份及原始参数字符串，每个调用配对一个未执行的拒收结果。追加与配对状态写入检查点，恢复先完成配对，不重发请求。损坏JSON可以作为拒收原件续接；不完整回复或调用身份不可信则停止并保留现场。
-- 编码与 Chatbot 都有 `web_search` 和 `web_fetch`。联网开关不改变工具定义；网络执行由程序根据当前任务快照检查。
+- 编码与 Chatbot 共用 `agent/execution/web.py` 的 `web_search`／`web_fetch`，分别 POST `/v1/tools/search`／`/v1/tools/fetch`。查询原文不改写，网页 Markdown 原样归档；已删除 Anthropic 聊天搜索和本机 HTML 抓取。联网开关不改变工具定义；网络执行由程序根据当前任务快照检查。按次费用、未知预留与模型 Token 独立记账。
 - Chatbot 提供 `list_files`、`read_file`、`retrieve_evidence`、`run_existing`。工具参数存于 `resources/assistant.schema.json`，资料查询不初始化编码任务。
 - `run_existing` 仅接收已有入口和 argv，由后台工作队列在 Docker 中执行一次；请求及结果保存在任务目录 `existing/`，不触发编码规划。子任务可提供本次生成的四项 Token JSON，来源、哈希及未知用量单独保存，不混入助手用量。
 - 首次 `candidate` 必须提交完整 `test_code`，在保留的原始源码上试跑并明确冻结后才执行修改。调查中的只读局部检查无需完整验收；固定用户验收仍走原分支。冻结的代码、驱动、回归命令及用户固定验收不能被普通聊天改写。

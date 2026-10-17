@@ -1,8 +1,6 @@
 """攻击用例验证生产门控；不调用模型或外部服务。"""
 
-from unittest.mock import patch
 
-import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -11,7 +9,6 @@ from starlette.routing import Route
 from starlette.testclient import TestClient as RawClient
 
 from agent.server.access import InstanceAccess, MAX_BODY
-from agent.execution.public_http import PublicTransport
 from agent.acceptance.runner import AcceptanceRun
 from agent.acceptance.contracts import VerificationSpec
 
@@ -122,38 +119,6 @@ def test_stream_is_not_buffered_or_rewritten_by_backend_gate(guarded):
     response = guarded[0].get('/stream', headers={'X-MonoPlanner-Service': TOKEN})
     assert response.status_code == 200
     assert response.text == 'first\nsecond\n'
-
-
-def test_public_connection_is_pinned_with_original_tls_identity():
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        return httpx.Response(200, text='page')
-
-    dns = [(0, 0, 0, '', ('93.184.216.34', 443))]
-    with patch('agent.execution.public_http.socket.getaddrinfo', return_value=dns) as resolve:
-        with httpx.Client(transport=PublicTransport(httpx.MockTransport(respond))) as client:
-            assert client.get('https://example.com/path').text == 'page'
-    assert resolve.call_count == 1
-    assert requests[0].url.host == '93.184.216.34'
-    assert requests[0].headers['host'] == 'example.com'
-    assert requests[0].extensions['sni_hostname'] == 'example.com'
-    assert 'x-api-key' not in requests[0].headers
-
-
-def test_rebinding_or_mixed_private_dns_never_connects():
-    requests = []
-    with patch(
-        'agent.execution.public_http.socket.getaddrinfo',
-        return_value=[(0, 0, 0, '', ('93.184.216.34', 443)), (0, 0, 0, '', ('127.0.0.1', 443))],
-    ):
-        with httpx.Client(
-            transport=PublicTransport(httpx.MockTransport(lambda r: requests.append(r)))
-        ) as client:
-            with pytest.raises(ValueError, match='Private'):
-                client.get('https://example.com')
-    assert not requests
 
 
 def test_acceptance_cannot_default_to_host_execution(tmp_path):

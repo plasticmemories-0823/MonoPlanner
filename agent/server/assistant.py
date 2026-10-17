@@ -2,7 +2,7 @@
 
 from agent.execution.assistant_files import AssistantFiles
 from agent.execution import existing
-from agent.execution.web import WEB_NAMES, WebProvider
+from agent.execution.web import WEB_NAMES, WebProvider, validate_web_args
 from agent.model.tools import ASSISTANT_SCHEMA
 
 OPEN_NAMES = {'open_file', 'launch_application', 'request_file_operation'}
@@ -49,19 +49,12 @@ def invoke(loop, call, folder, history):
     if name in WEB_NAMES:
         if not loop.runtime_settings.get('online'):
             raise ValueError('Networking is disabled for this task')
-        field = 'query' if name == 'web_search' else 'url'
-        if (
-            not isinstance(args, dict)
-            or set(args) != {field}
-            or not isinstance(args[field], str)
-            or not 1 <= len(args[field]) <= 2000
-        ):
-            raise ValueError(field + ': 要求一个非空文本参数，最多 2000 字符')
+        value = validate_web_args(name, args)
         provider = WebProvider()
         return (
-            provider.search(args[field], loop, folder)
+            provider.search(value, loop, folder)
             if name == 'web_search'
-            else provider.fetch(args[field], loop, folder)
+            else provider.fetch(value, loop, folder)
         )
     if name == 'read_file':
         args = {'cursor': '', **args}

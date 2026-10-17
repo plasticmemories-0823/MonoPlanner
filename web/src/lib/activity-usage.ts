@@ -8,6 +8,10 @@ export type ActivityUsage = {
   calls: number;
   unknown_calls: number;
   model_seconds: number;
+  service_calls?: number;
+  service_cost_micros?: number;
+  service_reserved_cost_micros?: number;
+  service_unknown_calls?: number;
   purpose?: string;
   context?: {
     used_tokens: number;
@@ -29,6 +33,10 @@ export function combineUsage(rows: ActivityUsage[]) {
     calls: 0,
     unknown_calls: 0,
     model_seconds: 0,
+    service_calls: 0,
+    service_cost_micros: 0,
+    service_reserved_cost_micros: 0,
+    service_unknown_calls: 0,
     context: null,
   };
   for (const value of rows) {
@@ -42,8 +50,12 @@ export function combineUsage(rows: ActivityUsage[]) {
       "calls",
       "unknown_calls",
       "model_seconds",
+      "service_calls",
+      "service_cost_micros",
+      "service_reserved_cost_micros",
+      "service_unknown_calls",
     ] as const) {
-      totals[key] += value[key] || 0;
+      totals[key] = (totals[key] || 0) + (value[key] || 0);
     }
     if (value.purpose !== "title") totals.context = value.context || null;
   }

@@ -563,10 +563,12 @@ class ApplicationStore:
         with self.connection() as db:
             db.execute("UPDATE app_calls SET state='sent' WHERE id=? AND state='reserved'", (call,))
 
-    def finish_call(self, call, *, response_id=None, usage=None, seconds=0, error=None):
+    def finish_call(self, call, *, response_id=None, usage=None, seconds=0, error=None,
+                    not_sent=False):
         with self.connection() as db:
             old = db.execute('SELECT state FROM app_calls WHERE id=?', (call,)).fetchone()
-            state = 'complete' if response_id else ('unknown' if old and old[0] == 'sent' else 'not_sent')
+            state = ('not_sent' if not_sent else 'complete' if response_id else
+                     'unknown' if old and old[0] == 'sent' else 'not_sent')
             db.execute('UPDATE app_calls SET state=?,response_id=?,usage=?,seconds=?,error=? WHERE id=?',
                        (state, response_id,
                         encode(usage) if usage else None, seconds, error, call))
@@ -574,13 +576,24 @@ class ApplicationStore:
     def usage(self, conversation):
         result = {}
         with self.connection() as db:
-            rows = db.execute("SELECT lane,usage,seconds FROM app_calls WHERE conversation=? "
+            rows = db.execute("SELECT lane,usage,seconds,request FROM app_calls WHERE conversation=? "
                               "AND state IN ('sent','complete','unknown')",
                               (conversation,)).fetchall()
         for lane in ('chat', 'progress', 'title'):
-            result[lane] = summarize({'model_usage': [
-                {'usage': json.loads(row['usage']) if row['usage'] else None,
-                 'seconds': row['seconds'] or 0} for row in rows if row['lane'] == lane]})
+            records = []
+            for row in rows:
+                if row['lane'] != lane:
+                    continue
+                request = json.loads(row['request'])
+                usage = json.loads(row['usage']) if row['usage'] else None
+                if request.get('kind') == 'service':
+                    records.append(usage or {
+                        'kind': 'service', 'cost_micros': None,
+                        'reserved_cost_micros': request['reserved_cost_micros'],
+                    })
+                else:
+                    records.append({'usage': usage, 'seconds': row['seconds'] or 0})
+            result[lane] = summarize({'model_usage': records})
             result[lane]['purpose'] = lane
         result['chat']['context'] = self.context(conversation).get('context_usage')
         work_usage = summarize({'model_usage': []})
@@ -591,7 +604,9 @@ class ApplicationStore:
             saved = work.get('usage') or {}
             for key in ('input_tokens', 'output_tokens', 'total_tokens', 'cached_input_tokens',
                         'cache_known_input_tokens', 'cache_unknown_calls', 'uncached_input_tokens',
-                        'calls', 'unknown_calls', 'model_seconds', 'elapsed_seconds'):
+                        'calls', 'unknown_calls', 'model_seconds', 'elapsed_seconds',
+                        'service_calls', 'service_cost_micros', 'service_reserved_cost_micros',
+                        'service_unknown_calls', 'service_seconds'):
                 work_usage[key] += saved.get(key, 0)
             if saved.get('context'):
                 work_usage['context'] = saved['context']

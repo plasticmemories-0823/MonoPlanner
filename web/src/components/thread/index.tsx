@@ -544,7 +544,7 @@ export function Thread() {
                           <>
                             {" · "}已记录 Token：
                             {activity.usage.total_tokens.toLocaleString()}
-                            {" · "}请求：{activity.usage.calls}
+                            {" · "}模型请求：{activity.usage.calls}
                             {activity.usage.unknown_calls > 0 &&
                               ` · ${activity.usage.unknown_calls} 次用量未知`}
                           </>
@@ -569,6 +569,14 @@ export function Thread() {
                             {activity.groups[kind]?.unknown_calls ? "（含未知用量）" : ""}
                           </span>
                         ))}
+                        {(activity.usage.service_calls ?? 0) > 0 && (
+                          <span>
+                            联网服务：{activity.usage.service_calls} 次 · 已知费用 ¥
+                            {((activity.usage.service_cost_micros ?? 0) / 1000000).toFixed(3)}
+                            {(activity.usage.service_unknown_calls ?? 0) > 0 &&
+                              ` · ${activity.usage.service_unknown_calls} 次结果待核对，费用预留 ¥${((activity.usage.service_reserved_cost_micros ?? 0) / 1000000).toFixed(3)}`}
+                          </span>
+                        )}
                       </div>
                     </details>
                     {(isLoading || stream.values.status) && (

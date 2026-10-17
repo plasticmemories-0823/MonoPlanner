@@ -3,6 +3,13 @@
 
 def summarize(state):
     rows = [*state.get('model_usage', []), *state.get('web_usage', [])]
+    services = [row for row in rows
+                if row.get('kind') == 'service' and row.get('status') != 'not_sent']
+    rows = [row for row in rows if row.get('kind') != 'service']
+    pending = state.get('web_request_pending') or {}
+    if (pending.get('kind') == 'service'
+            and not any(row.get('call') == pending.get('call') for row in services)):
+        services.append({**pending, 'status': 'unknown', 'cost_micros': None})
     total = {
         'input_tokens': 0,
         'output_tokens': 0,
@@ -16,6 +23,12 @@ def summarize(state):
         'cache_known_input_tokens': 0,
         'cache_unknown_calls': 0,
         'context': state.get('context_usage'),
+        'service_calls': len(services),
+        'service_cost_micros': sum(row.get('cost_micros') or 0 for row in services),
+        'service_reserved_cost_micros': sum(
+            row.get('reserved_cost_micros', 0) for row in services),
+        'service_unknown_calls': sum(row.get('cost_micros') is None for row in services),
+        'service_seconds': sum(row.get('seconds', 0) for row in services),
     }
     for row in rows:
         total['model_seconds'] += row.get('seconds', 0)

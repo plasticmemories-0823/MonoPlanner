@@ -2,21 +2,16 @@
 
 import asyncio
 from contextlib import contextmanager
-import ctypes
-from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ctypes
 import os
-import socket
-import ssl
 from threading import Event, Thread
 import time
 from unittest.mock import Mock, patch
 
-import httpcore
 import httpx
 import pytest
 
-from agent.execution.public_http import PublicTransport
 from agent.model import network
 
 
@@ -31,6 +26,7 @@ def local_server(handler):
         server.shutdown()
         server.server_close()
         thread.join(2)
+
 
 
 def test_windows_pac_is_resolved_for_each_original_url_and_never_uses_old_environment():
@@ -187,181 +183,3 @@ def test_only_absent_wpad_may_use_current_manual_route(error, explicit, allowed)
             with pytest.raises(httpx.ProxyError):
                 network._windows_resolve_auto_proxy(httpx.URL('https://example.com'), settings)
     winhttp.WinHttpCloseHandle.assert_called_once_with(123)
-
-
-def test_real_proxy_connect_pins_public_ip_but_tls_and_http_keep_original_host(tmp_path):
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'example.com')])
-    now = datetime.now(timezone.utc)
-    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
-            .public_key(key.public_key()).serial_number(x509.random_serial_number())
-            .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName('example.com')]), False)
-            .sign(key, hashes.SHA256()))
-    cert_path, key_path = tmp_path / 'test-cert.pem', tmp_path / 'test-key.pem'
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
-                                         serialization.PrivateFormat.PKCS8,
-                                         serialization.NoEncryption()))
-    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_tls.load_cert_chain(cert_path, key_path)
-    observed = {'connect': [], 'sni': [], 'request': []}
-    server_tls.set_servername_callback(lambda sock, name, context: observed['sni'].append(name))
-    client_tls = ssl.create_default_context(cafile=str(cert_path))
-
-    class Proxy(BaseHTTPRequestHandler):
-        def do_CONNECT(self):
-            observed['connect'].append((self.path, dict(self.headers)))
-            self.send_response(200)
-            self.end_headers()
-            with server_tls.wrap_socket(self.connection, server_side=True) as connection:
-                body = b''
-                while b'\r\n\r\n' not in body:
-                    body += connection.recv(4096)
-                observed['request'].append(body)
-                connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n'
-                                   b'Connection: close\r\n\r\npage')
-
-        def log_message(self, *args):
-            pass
-
-    native_proxy = httpcore.HTTPProxy
-    dns = socket.getaddrinfo
-
-    def pinned_dns(host, port, *args, **kwargs):
-        if host == 'example.com':
-            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '',
-                     ('93.184.216.34', port))]
-        return dns(host, port, *args, **kwargs)
-
-    with local_server(Proxy) as server, patch(
-        'agent.execution.public_http.socket.getaddrinfo', side_effect=pinned_dns
-    ), patch('agent.execution.public_http.system_proxy_for', return_value=(
-        f'http://offline-user:offline-password@127.0.0.1:{server.server_port}'
-    )) as route, patch('agent.execution.public_http.proxy_public_addresses', side_effect=(
-        lambda host, port, proxy: pinned_dns(host, port)
-    )), patch('agent.execution.public_http.httpcore.HTTPProxy', side_effect=(
-        lambda **kwargs: native_proxy(**kwargs, ssl_context=client_tls)
-    )):
-        with httpx.Client(transport=PublicTransport(), trust_env=False, timeout=2) as client:
-            assert client.get('https://example.com/test').text == 'page'
-    assert str(route.call_args.args[0]) == 'https://example.com/test'
-    assert observed['connect'][0][0] == '93.184.216.34:443'
-    assert 'Proxy-Authorization' in observed['connect'][0][1]
-    assert observed['sni'] == ['example.com']
-    assert b'GET /test HTTP/1.1\r\n' in observed['request'][0]
-    assert b'Host: example.com\r\n' in observed['request'][0]
-    assert b'Proxy-Authorization' not in observed['request'][0]
-    assert b'Authorization' not in observed['request'][0]
-
-
-def test_page_redirect_is_revalidated_before_proxy_gets_private_target():
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        return httpx.Response(302, headers={'Location': 'http://localhost/private'})
-
-    def dns(host, port, **kwargs):
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '',
-                 ('93.184.216.34' if host == 'example.com' else '127.0.0.1', port))]
-
-    with patch('agent.execution.public_http.socket.getaddrinfo', side_effect=dns), patch(
-        'agent.execution.public_http.system_proxy_for', return_value='http://127.0.0.1:8123'
-    ), patch('agent.execution.public_http.proxy_public_addresses', side_effect=(
-        lambda host, port, proxy: dns(host, port)
-    )), patch('agent.execution.public_http._PinnedProxyTransport',
-             return_value=httpx.MockTransport(respond)):
-        with httpx.Client(transport=PublicTransport(), follow_redirects=True) as client:
-            with pytest.raises(ValueError, match='Private'):
-                client.get('https://example.com')
-    assert len(requests) == 1
-    assert requests[0].url.host == '93.184.216.34'
-
-
-def test_https_proxy_identity_is_preserved_even_when_its_ip_matches_target():
-    from agent.execution.public_http import _OriginTLSStream
-
-    raw = Mock()
-    raw.start_tls.return_value = raw
-    stream = _OriginTLSStream(raw, '93.184.216.34', 'example.com', proxy_tls=True)
-    context = ssl.create_default_context()
-    stream.start_tls(context, '93.184.216.34', 2)
-    stream.start_tls(context, '93.184.216.34', 2)
-    assert [call.args[1] for call in raw.start_tls.call_args_list] == [
-        '93.184.216.34', 'example.com'
-    ]
-
-
-def test_proxy_page_resolves_with_selected_route_and_never_uses_polluted_system_dns():
-    requests = []
-    proxy = 'http://127.0.0.1:8123'
-    addresses = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '',
-                  ('93.184.216.34', 443))]
-
-    def respond(request):
-        requests.append(request)
-        return httpx.Response(200, text='public page')
-
-    with patch('agent.execution.public_http.socket.getaddrinfo',
-               side_effect=AssertionError('polluted system DNS must not select target')), patch(
-        'agent.execution.public_http.system_proxy_for', return_value=proxy
-    ) as route, patch('agent.execution.public_http.proxy_public_addresses',
-                     return_value=addresses, create=True) as resolve, patch(
-        'agent.execution.public_http._PinnedProxyTransport',
-        return_value=httpx.MockTransport(respond),
-    ) as transport:
-        with httpx.Client(transport=PublicTransport(), trust_env=False) as client:
-            assert client.get('https://example.com/page').text == 'public page'
-    route.assert_called_once_with(httpx.URL('https://example.com/page'))
-    resolve.assert_called_once_with('example.com', 443, proxy)
-    transport.assert_called_once_with(proxy, '93.184.216.34', 'example.com')
-    assert requests[0].url.host == '93.184.216.34'
-    assert requests[0].headers['Host'] == 'example.com'
-    assert requests[0].extensions['sni_hostname'] == 'example.com'
-
-
-def test_proxy_dns_private_redirect_answer_is_rejected_before_second_dispatch():
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        return httpx.Response(302, headers={'Location': 'https://changed.example/private'})
-
-    def addresses(host, port, proxy):
-        ip = '93.184.216.34' if host == 'example.com' else '127.0.0.1'
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', (ip, port))]
-
-    with patch('agent.execution.public_http.socket.getaddrinfo',
-               side_effect=AssertionError('no local target resolution')), patch(
-        'agent.execution.public_http.system_proxy_for', return_value='http://127.0.0.1:8123'
-    ), patch('agent.execution.public_http.proxy_public_addresses',
-             side_effect=addresses, create=True), patch(
-        'agent.execution.public_http._PinnedProxyTransport',
-        return_value=httpx.MockTransport(respond),
-    ):
-        with httpx.Client(transport=PublicTransport(), follow_redirects=True) as client:
-            with pytest.raises(ValueError, match='Private'):
-                client.get('https://example.com')
-    assert len(requests) == 1
-
-
-def test_page_proxy_dns_failure_never_falls_back_to_local_dns_or_direct_http():
-    with patch('agent.execution.public_http.system_proxy_for',
-               return_value='http://127.0.0.1:8123'), patch(
-        'agent.execution.public_http.proxy_public_addresses',
-        side_effect=OSError('public resolution unavailable'),
-    ), patch('agent.execution.public_http.socket.getaddrinfo') as local_dns, patch(
-        'agent.execution.public_http._PinnedProxyTransport'
-    ) as proxy_transport, patch('agent.execution.public_http.httpx.HTTPTransport') as direct:
-        with httpx.Client(transport=PublicTransport(), trust_env=False) as client:
-            with pytest.raises(OSError, match='public resolution unavailable'):
-                client.get('https://example.com/page')
-        local_dns.assert_not_called()
-        proxy_transport.assert_not_called()
-        direct.return_value.handle_request.assert_not_called()

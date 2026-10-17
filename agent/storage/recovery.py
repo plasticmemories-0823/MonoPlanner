@@ -80,7 +80,6 @@ def code_key(root=None):
         'resources/plan.schema.json',
         'agent/version.py',
         'agent/server/access.py',
-        'agent/execution/public_http.py',
         'agent/execution/projects.py',
         'agent/execution/task_docker.py',
         'agent/execution/preparation.py',
@@ -252,6 +251,20 @@ def restore(loop, stored, identity):
         )
         return loop.result()
     if stored.get('web_running') or stored.get('web_request_pending'):
+        pending = stored.get('web_request_pending') or {}
+        records = stored.setdefault('web_usage', [])
+        if (pending.get('kind') == 'service'
+                and not any(row.get('call') == pending['call'] for row in records)):
+            # 只把未结算的预留转为未知一次；重启不能释放费用或重复增加次数。
+            reserved = pending['reserved_cost_micros']
+            loop.budget.inflight_service_cost_micros = max(
+                0, loop.budget.inflight_service_cost_micros - reserved)
+            loop.budget.unknown_service_cost_micros += reserved
+            records.append({**pending, 'status': 'unknown', 'cost_micros': None})
+            stored['budget'] = {
+                field.name: getattr(loop.budget, field.name) for field in fields(loop.budget)
+            }
+            loop.persist('web_result_unknown', {'call': pending['call']})
         stored.update(
             status='web_request_unknown', reason='Interrupted web request; no automatic retry'
         )
@@ -317,6 +330,7 @@ def restore_budget(loop, stored):
     policy = (
         'max_steps',
         'max_tokens',
+        'max_service_cost_micros',
         'timeout_seconds',
         'report_reserve',
         'report_token_reserve',
