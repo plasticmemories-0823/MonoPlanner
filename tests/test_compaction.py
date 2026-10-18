@@ -112,6 +112,7 @@ class CompactionTests(unittest.TestCase):
 
     def test_default_limits_and_no_change_below_threshold(self):
         self.assertEqual(compaction.limits(65536), (800000, 149514))
+        self.assertEqual(compaction.limits(256000), (678464, 119040))
         before = wire_input(compaction.messages(self.loop), WORK_TOOLS)
         compaction.prepare(self.loop, 65536)
         self.assertEqual(before, wire_input(compaction.messages(self.loop), WORK_TOOLS))
@@ -342,6 +343,13 @@ class CompactionTests(unittest.TestCase):
             self.compress()
         self.assertEqual(len(self.loop.calls), 2)
 
+    def test_forced_overflow_never_discards_the_protected_recent_history(self):
+        original = copy.deepcopy(self.loop.state['history'])
+        with self.assertRaisesRegex(ModelRequestNotSent, 'No complete old span'):
+            compaction.prepare(self.loop, 256000, force=True)
+        self.assertFalse(self.loop.calls)
+        self.assertEqual(self.loop.state['history'], original)
+
     def test_pending_operation_prevents_compaction(self):
         self.loop.state['pending'] = {'cursor': 0}
         with self.assertRaisesRegex(ModelRequestNotSent, 'unfinished'):
@@ -456,6 +464,34 @@ class DurableCompactionTests(unittest.TestCase):
         again = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.assertTrue(again['result_reused'])
         self.assertEqual(len(self.sdk.calls), 5)
+
+    def test_summary_uses_policy_timeout_and_stores_only_message_references(self):
+        from agent.model.client import ModelPolicy
+        from agent.storage.history import LocalHistory
+
+        self.model = ConfiguredModel(self.sdk, ModelPolicy(api_timeout=180))
+        self.sdk.plans = iter([{'kind': 'blocked', 'note': 'fixture complete'}])
+        with patch.dict(compaction.CONFIG, self.policy), \
+                patch.object(StepBudget, 'remaining_time', return_value=160):
+            result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
+        self.assertEqual(result['status'], 'task_blocked')
+        summaries = [options for _, options in self.sdk.calls if options.get('tool_choice') == 'none']
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]['timeout'], 160)
+        checkpoints = list((self.root / 'state/history/checkpoints').glob('*.json'))
+        saved = [json.loads(path.read_text(encoding='utf-8'))['state'] for path in checkpoints]
+        response = next(state['compaction_pending'] for state in saved
+                        if (state.get('compaction_pending') or {}).get('response_ref'))
+        self.assertNotIn('response', response)
+        self.assertTrue(response['response_ref']['sha256'])
+        store = LocalHistory(self.root / 'state')
+        try:
+            with store.lease():
+                restored = store.load()
+        finally:
+            store.close()
+        self.assertEqual(restored['status'], 'task_blocked')
+        self.assertEqual(len(restored['compactions']), 1)
 
     def test_unknown_summary_request_is_not_resent(self):
         original = TaskRunner.persist

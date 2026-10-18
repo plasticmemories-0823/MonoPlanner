@@ -1,10 +1,8 @@
-"""模型超时配置必须贯穿主请求、归档包装与预压缩，完全离线。"""
-
-from unittest.mock import patch
+"""模型超时配置必须贯穿主请求、归档包装与同步摘要，完全离线。"""
 
 import pytest
 
-from agent.model import client, precompaction
+from agent.model import client
 from agent.model.errors import ModelRequestNotSent
 from eval.recording import RecordingModel
 
@@ -29,18 +27,6 @@ def test_explicit_request_override_and_wrapper_are_preserved():
 def test_exhausted_task_is_not_dispatched(remaining):
     with pytest.raises(ModelRequestNotSent, match='time'):
         client.request_timeout(client.ConfiguredModel(object()), remaining)
-
-
-def test_precompaction_snapshot_uses_policy_timeout(tmp_path):
-    from test_precompaction import Loop
-
-    loop = Loop(tmp_path)
-    loop.model = client.ConfiguredModel(object(), client.ModelPolicy(api_timeout=180))
-    with patch.object(loop.budget, 'remaining_time', return_value=160), \
-         patch.object(precompaction.compaction, 'select', return_value=([], 1, 'selected')), \
-         patch.object(precompaction, 'Job'):
-        precompaction._start(loop, 256000, False)
-    assert loop.state['precompaction_pending']['timeout'] == 160
 
 
 @pytest.mark.parametrize('task_seconds', [None, 60])

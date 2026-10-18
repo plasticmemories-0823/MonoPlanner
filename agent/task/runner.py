@@ -26,7 +26,7 @@ from agent.task.contracts import WorkRequest
 from agent.task.instructions import TASK_RULES
 from agent.task import control, dialogue, operations, repair
 from agent.model.context import admit, CONTEXT_WINDOW_TOKENS
-from agent.model import compaction, precompaction
+from agent.model import compaction
 from agent.source import lifecycle as source_runtime
 from agent.acceptance import revisions
 
@@ -151,7 +151,7 @@ class TaskRunner:
         )
         cap = getattr(selected, "max_output_tokens", 256000)
         cap = cap if type(cap) is int else 256000
-        precompaction.prepare(self, cap)
+        compaction.prepare(self, cap)
         for attempt in range(compaction.CONFIG['max_overflow_retries'] + 1):
             messages = self.planner_messages()
             admit(self.state, messages, self.tools, getattr(selected, "context_envelope", {}))
@@ -163,7 +163,7 @@ class TaskRunner:
                     or attempt == compaction.CONFIG['max_overflow_retries']
                 ):
                     raise
-                precompaction.prepare(self, cap, force=True)
+                compaction.prepare(self, cap, force=True)
                 continue
             return self.decode_plan(raw)
 
@@ -703,10 +703,6 @@ class TaskRunner:
     # 结果汇总与验证证据
     # ========================================================================
     def result(self):
-        try:
-            precompaction.close(self)
-        except ModelRequestNotSent as exc:
-            self.state.update(status=exc.status, reason=exc.reason)
         source_runtime.close(self)
         from agent.rag.container_sources import expire_container_sources
 

@@ -175,7 +175,7 @@ class LocalHistory:
 
     def _audit_messages(self, packed):
         references = packed['history_refs'] + packed.get('chat_history_refs', [])
-        for name in ('pending', 'compaction_pending', 'precompaction_pending'):
+        for name in ('pending', 'compaction_pending'):
             reference = (packed.get(name) or {}).get('response_ref')
             if reference:
                 references.append(reference)
@@ -204,12 +204,11 @@ class LocalHistory:
         packed['history_refs'] = [self._message(m) for m in packed.pop('history')]
         if 'chat_history' in packed:
             packed['chat_history_refs'] = [self._message(m) for m in packed.pop('chat_history')]
-        for name in ('compaction_pending', 'precompaction_pending'):
-            compaction = packed.get(name)
-            if compaction and compaction.get('response'):
-                compaction = dict(compaction)
-                compaction['response_ref'] = self._message(compaction.pop('response'))
-                packed[name] = compaction
+        compaction = packed.get('compaction_pending')
+        if compaction and compaction.get('response'):
+            compaction = dict(compaction)
+            compaction['response_ref'] = self._message(compaction.pop('response'))
+            packed['compaction_pending'] = compaction
         pending = packed.get('pending')
         if pending:
             pending = dict(pending)
@@ -254,20 +253,12 @@ class LocalHistory:
                 'model_request_started',
                 'model_response_received',
                 'model_request_interrupted',
-                'precompaction_started',
-                'precompaction_response_saved',
             }:
                 call = payload['call']
                 folder = self.root / 'requests' / ('call-%04d' % call)
                 for name in ('request.json', 'response.json', 'interruption.json'):
                     if (folder / name).is_file():
                         self._register(self._reference(folder / name), 'model_record')
-                if event.startswith('precompaction_'):
-                    pending_summary = state['precompaction_pending']
-                    for name in ('job.json', 'outcome.json', 'stop-unconfirmed.json'):
-                        path = self.root / pending_summary['directory'] / name
-                        if path.is_file():
-                            self._register(self._reference(path), 'compaction_record')
             if event == 'plan_accepted':
                 self._register(
                     self._reference(self.root / 'plans' / state['pending']['id'] / 'plan.json'),
@@ -304,10 +295,9 @@ class LocalHistory:
         value['history'] = [self._checked(r) for r in value.pop('history_refs')]
         if 'chat_history_refs' in value:
             value['chat_history'] = [self._checked(r) for r in value.pop('chat_history_refs')]
-        for name in ('compaction_pending', 'precompaction_pending'):
-            compaction = value.get(name)
-            if compaction and compaction.get('response_ref'):
-                compaction['response'] = self._checked(compaction.pop('response_ref'))
+        compaction = value.get('compaction_pending')
+        if compaction and compaction.get('response_ref'):
+            compaction['response'] = self._checked(compaction.pop('response_ref'))
         pending = value.get('pending')
         if pending:
             pending['response'] = self._checked(pending.pop('response_ref'))
