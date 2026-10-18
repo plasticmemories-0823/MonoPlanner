@@ -34,7 +34,8 @@
             "description": "Authorized repository scope, $record path or host-registered $container namespace. Never widen the registered scope."
           },
           "query": {
-            "type": "string"
+            "type": "string",
+            "description": "Search text: a complete literal string for exact, or a natural-language description for semantic."
           },
           "offset": {
             "minimum": 0,
@@ -47,7 +48,7 @@
             "type": "integer"
           },
           "mode": {
-            "description": "search mode only; exact uses literal case-sensitive original text.",
+            "description": "Search only. exact: case-sensitive literal matching with BM25 ranking. semantic: vector retrieval and reranking by meaning; requires an available index of the bound current project.",
             "enum": [
               "exact",
               "semantic"
