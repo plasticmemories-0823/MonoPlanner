@@ -99,7 +99,8 @@ def test_source_lookup_evidence_write_failure_is_infrastructure_error(tmp_path, 
     from agent.source.errors import SourceStorageError
 
     observe = Mock(return_value={'source_version': 'v1', 'files': {}})
-    loop = SimpleNamespace(executor=SimpleNamespace(exploration=SimpleNamespace(observe=observe)),
+    loop = SimpleNamespace(executor=SimpleNamespace(exploration=SimpleNamespace(
+        observe=observe, coverage=lambda: {})),
                            state={'source_map': {}}, root=tmp_path, history_store=None)
     monkeypatch.setattr('agent.storage.records.save', Mock(
         side_effect=OSError(errno.ENOSPC, 'fixture')))

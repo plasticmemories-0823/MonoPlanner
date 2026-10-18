@@ -170,7 +170,7 @@ def test_semantic_rewrite_cursor_preserves_original_and_does_not_rewrite_again(t
         return integration._retrieve(SimpleNamespace(), sources, args,
             root=tmp_path, cache_root=tmp_path / 'tasks/task', repo=tmp_path / 'repo',
             task_id='task', request_id='same-request',
-            config=integration.task_configuration(tmp_path, 'task'),
+            config=integration.retrieval_configuration(),
             rewrite=lambda query, reasons: rewrites.append((query, reasons)) or 'expanded')
     first = retrieve(arguments)
     assert first['query'] == 'answer' and first['effective_query'] == 'expanded'
@@ -341,3 +341,33 @@ def test_only_complete_project_scope_prunes_other_vector_cache(
     assert vector.misses[-1] == []
     retrieve(['sub/a.py', 'b.py'], '.')
     assert vector.misses[-1] == (['b.py'] if removed else [])
+
+
+def test_authorized_search_prunes_private_state_and_rejects_hardlinks(tmp_path, monkeypatch):
+    import os
+
+    project = tmp_path / 'project'
+    project.mkdir()
+    state = project / 'private-state'
+    state.mkdir()
+    (state / 'secret.txt').write_text('secret evidence', encoding='utf-8')
+    ordinary = project / 'ordinary.txt'
+    ordinary.write_text('ordinary evidence', encoding='utf-8')
+    linked = project / 'linked.txt'
+    os.link(ordinary, linked)
+    (project / 'allowed.txt').write_text('allowed evidence', encoding='utf-8')
+    monkeypatch.setenv('MONOPLANER_STATE_DIR', str(state))
+    walk = os.walk
+    visited = []
+
+    def observed_walk(*args, **kwargs):
+        for row in walk(*args, **kwargs):
+            visited.append(Path(row[0]))
+            yield row
+
+    from pathlib import Path
+    monkeypatch.setattr(integration.os, 'walk', observed_walk)
+    sources = integration.authorized_chat_sources(str(project), [], '.')
+    assert state not in visited
+    assert len(sources.entries) == 1
+    assert next(iter(sources.entries.values()))[3].endswith('allowed.txt')

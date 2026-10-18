@@ -112,27 +112,98 @@ def test_overlapping_occurrences_page_by_hit_count_not_merged_excerpt_count(corp
     assert seen == list(range(129))
 
 
-def test_same_line_distinct_matches_refer_to_one_verbatim_excerpt(corpus):
+@pytest.mark.parametrize("text,query", [
+    ("prefix term middle term suffix term\n", "term"),
+    ("中文\r\n  foo.bar AND OR\t\n" * 3, "  foo.bar AND OR"),
+    ("x" * 1200 + "needle" + "y" * 1200 + "\n", "needle"),
+])
+def test_model_view_preserves_matches_and_originals_without_repeating_source(corpus, text, query):
+    from copy import deepcopy
+    from agent.model.tool_results import model_result
+
     _, _, add, _, retrieve = corpus
-    document = add("prefix term middle term suffix term\n")
-    body = retrieve("term")
-    assert len(body["hits"]) == 3 and len(body["results"]) == 1
-    assert len({hit["result_id"] for hit in body["hits"]}) == 1
-    assert [hit["match_start"] for hit in body["hits"]] == [7, 19, 31]
-    for hit in body["hits"]:
-        checked_excerpt(body, hit, document)
+    document = add(text)
+    original = retrieve(query, limit=2)
+    before = deepcopy(original)
+    body = model_result("retrieve_evidence", original)
+    assert original == before
+    assert body["query"] == query and body["mode"] == "exact"
+    assert body["next_cursor"] == original["next_cursor"]
+    assert len(body["hits"]) == len(original["hits"])
+    assert len(body["results"]) == len(original["results"])
+    assert body["sources"] == [{"path": document.path, "sha256": document.sha256,
+                                "version": "v1", "kind": "code"}]
+    for hit, old in zip(body["hits"], original["hits"]):
+        excerpt = body["results"][hit["result"]]
+        assert excerpt["id"] == old["result_id"]
+        assert excerpt["text"] == text[excerpt["start"]:excerpt["end"]]
+        assert body["sources"][excerpt["source"]]["path"] == old["path"]
+        for field in ("line", "line_end", "match_start", "match_end",
+                      "column_start", "column_end", "truncated"):
+            assert hit[field] == old[field]
+    serialized = json.dumps(body)
+    assert serialized.count(document.path) == serialized.count(document.sha256) == 1
+    assert len(serialized) < len(json.dumps(original))
+    assert "ranking" not in body and "effective_query" not in body
+    assert model_result("retrieve_evidence", body) == body
 
 
-def test_wire_body_contains_excerpt_text_once_and_omits_internal_parent_metadata(corpus):
+@pytest.mark.parametrize("source,path", [
+    ("source:sample.py", "sample.py"),
+    ("record:plans/p1/p1-s1/stdout.log", "$record/plans/p1/p1-s1/stdout.log"),
+    ("container:$container/system_include/x.h", "$container/system_include/x.h"),
+])
+def test_shared_source_metadata_still_verifies_citations(corpus, source, path):
+    from langchain_core.messages import ToolMessage, AIMessage, message_to_dict
+    from agent.model.tool_results import model_result
+    from agent.rag.integration import _audit_markers
+
+    index, documents, add, _, retrieve = corpus
+    document = add("needle first\nneedle second\n", source=source, path=path)
+    document = replace(document, version=document.sha256)
+    documents[source] = document
+    index.upsert(document, exact=True)
+    body = model_result("retrieve_evidence", retrieve("needle"))
+    assert len(body["sources"]) == 1 and "version" not in body["sources"][0]
+    assert json.dumps(body).count(document.sha256) == 1
+    raw = message_to_dict(AIMessage(content=f"[evidence:{body['results'][1]['id']}]"))
+    tool = ToolMessage(content=json.dumps(body), name="retrieve_evidence", tool_call_id="lookup")
+    observed = []
+
+    def read(identity, version):
+        observed.append((identity, version))
+        return document.text
+
+    assert _audit_markers(raw, [tool], read)[0]["status"] == "source_verified"
+    assert observed == [(source, document.version)]
+
+
+def test_projected_original_still_offloads_and_can_be_read_after_restart(corpus, tmp_path):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from agent.model.tool_results import model_result
+    from agent.model import tool_payloads
+
     _, _, add, _, retrieve = corpus
-    original = "START_MARKER needle END_MARKER"
-    document = add(original + "\n")
-    body = retrieve("needle")
-    excerpt = checked_excerpt(body, body["hits"][0], document)
-    assert json.dumps(body).count(original) == 1
-    assert "parent_start" not in excerpt and "parent_end" not in excerpt
-    for name in ("symbol", "run_id", "timestamp"):
-        assert name not in excerpt
+    original = "中文" * 2500
+    add(original)
+    # 长查询本身不能截断；正文沿用现有按哈希卸载及字节续读。
+    raw = retrieve(original[:2900], limit=1)
+    view = model_result("retrieve_evidence", raw)
+    loop = SimpleNamespace(root=tmp_path, state={"history": []})
+    first = tool_payloads.project(loop, view)
+    reference = first["results"][0]["text"]
+    assert isinstance(reference, dict) and reference["path"].startswith("$record/tool-payloads/")
+    before = deepcopy(first)
+    loop = SimpleNamespace(root=tmp_path, state={"history": [{
+        "type": "tool", "data": {"tool_call_id": "previous", "content": json.dumps(first)},
+    }]})
+    second = tool_payloads.project(loop, view)
+    assert second["results"][0]["text"]["duplicate_of"]["tool_call_id"] == "previous"
+    assert first == before
+    restored = tool_payloads.read_bytes(tmp_path, reference["path"], 0)
+    assert restored["text"] == raw["results"][0]["text"]
+    assert second["hits"] == first["hits"] and second["sources"] == first["sources"]
 
 
 def test_semantic_selected_child_does_not_expand_its_parent(corpus):

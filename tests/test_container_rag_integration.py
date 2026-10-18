@@ -131,6 +131,8 @@ def test_container_exact_case_mismatch_has_no_implicit_expansion(container_work)
 
 
 def test_container_search_reads_from_step_and_verifies_delivered_citation(container_work):
+    from agent.model.tool_results import model_result
+
     raw = '\ufeffprefix\r\n函数 NEEDLE\r\n尾行\r\n'.encode()
     container_work.environment.container_files['/usr/include/source.h'] = raw
     result = search(container_work, 'NEEDLE')
@@ -144,9 +146,10 @@ def test_container_search_reads_from_step_and_verifies_delivered_citation(contai
     assert page['text'] == '1: prefix\n2: 函数 NEEDLE\n3: 尾行'
     assert page['version'] == result['hits'][0]['version']
     chunk = result['results'][0]
+    delivered = model_result('submit_plan', {'steps': [{'op': 'search', 'data': result}]})
     messages = [{'type': 'tool', 'data': {
         'name': 'submit_plan', 'tool_call_id': 'find',
-        'content': json.dumps({'steps': [{'op': 'search', 'data': result}]}, ensure_ascii=False),
+        'content': json.dumps(delivered, ensure_ascii=False),
     }}]
     response = {'data': {'content': '[evidence:' + chunk['id'] + ']'}}
     folder = container_work.root / 'checks'

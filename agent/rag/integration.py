@@ -120,13 +120,11 @@ def data_root(loop):
     return root.parent.parent if root.parent.name == 'tasks' else root.parent
 
 
-def task_configuration(root, task_id):
-    from agent.rag.tuning.controller import TuningController
-    from agent.rag.tuning.policy import Config
-
-    initial = Config.create(asdict(RagConfig()))
-    selected = TuningController(Path(root) / 'rag' / 'tuning.sqlite3', initial).bind_task(task_id)
-    return {'version': selected.version, 'values': dict(selected.values)}
+def retrieval_configuration():
+    """固定检索参数；指纹仅用于索引与任务一致性核验。"""
+    values = asdict(RagConfig())
+    version = hashlib.sha256(canonical(values).encode('utf-8')).hexdigest()
+    return {'version': version, 'values': values}
 
 
 def _model_configuration():
@@ -178,8 +176,8 @@ def _bind_models(root, task_id):
 
 
 def bind_work(loop):
-    """新任务只绑定一次；恢复沿用检查点及调参台账中的配置。"""
-    selected = task_configuration(data_root(loop), loop.root.name)
+    """任务绑定固定参数与模型原件；恢复仍须逐项核验。"""
+    selected = retrieval_configuration()
     previous = loop.state.get('rag_config')
     if previous is not None and previous != selected:
         raise ValueError('The task retrieval configuration changed; no query was dispatched.')
@@ -440,8 +438,16 @@ def authorized_chat_sources(workspace, read_sources, path):
             return
         for directory, directories, names in os.walk(scope, followlinks=False):
             control.check_interrupted()
-            directories[:] = sorted(name for name in directories
-                if not _link(Path(directory) / name) and _reason(Path(name) / '_') is None)
+            allowed = []
+            for name in sorted(directories):
+                if _reason(Path(name) / '_') is not None:
+                    continue
+                try:
+                    files.path(str(Path(directory) / name), directory=True)
+                except (ValueError, OSError):
+                    continue
+                allowed.append(name)
+            directories[:] = allowed
             for name in sorted(names):
                 yield Path(directory) / name
 
@@ -567,7 +573,7 @@ def _retrieve(owner, sources, arguments, *, root, cache_root, repo, task_id, req
     if semantic and getattr(models, 'unavailable_reason', None):
         sources.reasons.append(models.unavailable_reason)
     token_count = estimated_tokens
-    selected = RagConfig(**config['values'])
+    selected = RagConfig()
     selected = replace(selected, message_token_limit=selected.message_token_limit - 1024)
     scope = Scope(str(Path(repo).resolve()) if repo else '', task_id,
                   config['version'] + ':' + reader_scope + ':tokens-v3:' + actual_model_hash)
@@ -801,7 +807,7 @@ def retrieve_chat(bot, conversation, request_id, arguments):
                 'hits': [], 'mode': 'semantic', 'query': arguments['query'],
                 'scan_complete': False, 'complete': False, 'next_cursor': '',
                 'notice': 'Confirm an actual project before using project evidence retrieval.'}
-    config = task_configuration(bot.store.root, work['task_id'])
+    config = retrieval_configuration()
     config['model_config_hash'] = _bind_models(bot.store.root, work['task_id'])['hash']
 
     def rewrite(query, reasons):
@@ -904,16 +910,26 @@ def _audit_markers(raw, messages, read_source):
             continue
         if not isinstance(body, dict):
             continue
-        chunks = body.get('results', [])
-        if data.get('name') in {'submit_plan', 'repair_work'}:
-            chunks = [chunk for step in body.get('steps', [])
-                      if isinstance(step, dict) and step.get('op') == 'search'
-                      for chunk in step.get('data', {}).get('results', [])]
-        if not isinstance(chunks, list):
-            continue
-        for chunk in chunks:
-            if isinstance(chunk, dict) and chunk.get('id') in wanted:
-                delivered[chunk['id']] = chunk
+        searches = [body] if data.get('name') == 'retrieve_evidence' else [
+            step.get('data', {}) for step in body.get('steps', [])
+            if isinstance(step, dict) and step.get('op') == 'search'
+        ]
+        for search in searches:
+            for chunk in search.get('results', []):
+                if not isinstance(chunk, dict) or chunk.get('id') not in wanted:
+                    continue
+                # 仅还原本次实际投递的来源与区间，不能从本地未发送材料补证据。
+                sources, index = search.get('sources', []), chunk.get('source')
+                if type(index) is not int or not 0 <= index < len(sources):
+                    continue
+                source = sources[index]
+                kind = source.get('source_type', 'source')
+                path = source['path'][8:] if kind == 'record' else source['path']
+                delivered[chunk['id']] = {
+                    **chunk, 'source_id': source.get('source_id', kind + ':' + path),
+                    'version': source.get('version', source['sha256']),
+                    'source_sha256': source['sha256'],
+                }
     reports = []
     for identity in identifiers[:64]:
         chunk = delivered.get(identity)

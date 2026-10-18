@@ -54,36 +54,9 @@ def memory_limit(process=None, limit=None):
 
 def infer(request):
     spec, payload, role = request['spec'], request['payload'], request['role']
+    if role not in {'embedding', 'reranker'}:
+        raise ValueError('Only embedding and reranker models are supported.')
     root = Path(spec['root'])
-    if role == 'laya':
-        import laya
-        import onnxruntime as ort
-        from laya.common import build_sequence, encode_text, render_options
-
-        if set(ort.get_available_providers()) - {'CPUExecutionProvider', 'AzureExecutionProvider'}:
-            raise ValueError('Laya qualification requires a CPU-only ONNX Runtime installation.')
-        model = laya.load(str(root), backend='onnx', onnx_path=str(root / spec['model']),
-                          expected_sha256=spec['sha256'])
-        state, questions = payload['state'], payload['questions']
-        head_max = spec.get('head_max_tokens', 192)
-        for definition in questions.values():
-            internal = {'t': definition['type'], 'ins': definition['instructions'],
-                        'crit': definition.get('criteria')}
-            _, markers, stats, state_stats = build_sequence(
-                model.tok, state, internal, spec['max_tokens'], head_max,
-                return_stats=True, return_truncation_stats=True,
-            )
-            cap = stats.get('tokens_per_option')
-            options_cut = cap is not None and any(
-                len(encode_text(model.tok, item, add_special_tokens=False)['input_ids']) > cap
-                for item in render_options(internal)
-            )
-            if state_stats['truncated'] or len(markers) != stats['options'] or options_cut:
-                raise ValueError('Laya evidence or options exceed the input window; nothing was truncated.')
-        result = model.predict(state, questions, max_len=spec['max_tokens'], head_max_len=head_max)
-        if result.get('usage', {}).get('truncated'):
-            raise ValueError('Laya reported truncated input; result is unusable.')
-        return result
     import numpy as np
     import onnxruntime as ort
     from tokenizers import Tokenizer

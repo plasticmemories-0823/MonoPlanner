@@ -331,6 +331,13 @@ class LocalHistory:
         with self.connection:
             self._register(self._reference(path), kind, source=source)
 
+    def artifact(self, relative):
+        """按已知精确路径核验原件，不把导航记录混入普通证据搜索。"""
+        row = self.connection.execute(
+            'SELECT path,sha256,kind FROM artifacts WHERE path=?', (relative,),
+        ).fetchone()
+        return dict(zip(('path', 'sha256', 'kind'), row)) if row else None
+
     def find(self, query, limit=20, prefix=""):
         if Path(prefix).is_absolute() or ".." in Path(prefix).parts or ":" in prefix:
             raise ValueError("History scope must be relative")

@@ -16,7 +16,7 @@ from typing_extensions import TypedDict
 
 from agent.model.client import create_model, configure_call
 from agent.model.tools import CHAT_TOOLS
-from agent.model.tool_results import normalize_result
+from agent.model.tool_results import model_result
 from agent.server.assistant import invoke as invoke_assistant
 from agent.settings import load_settings
 from agent.storage.permissions import Permissions
@@ -336,8 +336,8 @@ class Chatbot:
             # 先保留单次操作原件，再整理尚未提交的模型视图；失败必须停止后续派发。
             operation = state['call_id'] + '-' + str(index)
             self._archive_tool_result(conversation, operation, call, result)
-            visible = normalize_result(call['name'], result,
-                                       project=self.store.get(conversation)['repo'])
+            visible = model_result(call['name'], result,
+                                   project=self.store.get(conversation)['repo'])
             if call['name'] == 'retrieve_evidence':
                 from agent.rag.integration import delivery
 

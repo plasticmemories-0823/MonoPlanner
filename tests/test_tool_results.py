@@ -139,9 +139,11 @@ class ToolResultTests(unittest.TestCase):
         old = {'kind': 'function', 'name': 'f', 'line': 2, 'end_line': 3, 'signature': 'old'}
         new = {**old, 'end_line': 5, 'signature': 'new'}
         middle = {'kind': 'class', 'name': 'C', 'line': 10}
-        dependency = {'path': 'dep.py', 'line': 1, 'evidence': 'import dep.f',
+        dependency = {'path': 'dep.py', 'line': 1, 'id': 'import:1:0:0',
+                      'import_target': 'dep.f',
                       'certainty': 'static_candidate', 'old_only': True}
-        latest_dependency = {'path': 'dep.py', 'line': 1, 'evidence': 'import dep.f',
+        latest_dependency = {'path': 'dep.py', 'line': 1, 'id': 'import:1:0:0',
+                             'import_target': 'dep.f',
                              'certainty': 'confirmed'}
         update = {'path': 'a.py', 'read_ranges': [[0, 5]],
                   'new_symbols': [old, middle, new],
@@ -149,7 +151,7 @@ class ToolResultTests(unittest.TestCase):
         other = {'path': 'a.py', 'read_ranges': [[20, 30]],
                  'new_symbols': [new], 'new_dependencies': []}
         value = {'repository_map': {'source_version': 's1', 'updates': [update, other],
-                                    'known_symbols': 30}}
+                                    'coverage': {'discovered_symbols': 30}}}
         result = normalize_result('retrieve_evidence', value)
         updates = result['repository_map']['updates']
         self.assertEqual(len(updates), 2)
@@ -159,10 +161,10 @@ class ToolResultTests(unittest.TestCase):
         self.assertEqual(value['repository_map']['updates'][0], update)
 
     def test_dependency_identity_keeps_distinct_imports_on_the_same_line(self):
-        old = {'path': 'dep.py', 'line': 1, 'evidence': 'import dep.first',
+        old = {'path': 'dep.py', 'line': 1, 'id': 'import:1:0:0', 'import_target': 'dep.first',
                'certainty': 'static_candidate', 'old_only': True}
-        other = {**old, 'evidence': 'import dep.second'}
-        latest = {'path': 'dep.py', 'line': 1, 'evidence': 'import dep.first',
+        other = {**old, 'id': 'import:1:0:1', 'import_target': 'dep.second'}
+        latest = {'path': 'dep.py', 'line': 1, 'id': 'import:1:0:0', 'import_target': 'dep.first',
                   'certainty': 'confirmed'}
         value = {'repository_map': {'source_version': 's1', 'updates': [{
             'path': 'consumer.py', 'new_dependencies': [old, other, latest],
@@ -174,12 +176,12 @@ class ToolResultTests(unittest.TestCase):
         self.assertEqual(value, before)
         self.assertEqual(normalize_result('retrieve_evidence', result), result)
 
-    def test_dependency_without_evidence_only_deduplicates_identical_items(self):
-        for evidence in (None, '', ' ', 1, []):
-            with self.subTest(evidence=evidence):
+    def test_dependency_without_source_identity_only_deduplicates_identical_items(self):
+        for identity in (None, '', ' ', 1, []):
+            with self.subTest(identity=identity):
                 old = {'path': 'dep.py', 'line': 1, 'certainty': 'static_candidate'}
-                if evidence is not None:
-                    old['evidence'] = evidence
+                if identity is not None:
+                    old['id'] = identity
                 other = {**old, 'certainty': 'confirmed'}
                 value = {'repository_map': {'source_version': 's1', 'updates': [{
                     'path': 'consumer.py', 'new_dependencies': [old, other, deepcopy(old)],
@@ -188,10 +190,10 @@ class ToolResultTests(unittest.TestCase):
                 dependencies = result['repository_map']['updates'][0]['new_dependencies']
                 self.assertEqual(dependencies, [other, old])
 
-    def test_dependency_evidence_is_exact_and_updates_stay_separate(self):
-        dependencies = [{'path': 'dep.py', 'line': 1, 'evidence': evidence}
-                        for evidence in ('import dep.first', 'import dep.second',
-                                         ' import dep.first ', 'import dep.First')]
+    def test_shortened_dependency_labels_do_not_merge_and_versions_stay_separate(self):
+        dependencies = [{'path': 'dep.py', 'line': 1, 'id': f'import:1:0:{index}',
+                         'import_target': 'same shortened label',
+                         'truncated_fields': ['import_target']} for index in range(4)]
         updates = [{'path': 'consumer.py', 'source_version': version,
                     'new_dependencies': deepcopy(dependencies)} for version in ('s1', 's2')]
         value = {'repository_map': {'updates': updates}}

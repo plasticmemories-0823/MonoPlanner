@@ -72,6 +72,24 @@ def test_missing_local_models_never_spawn_or_download(monkeypatch):
         LocalModels().embed(['source'])
 
 
+@pytest.mark.parametrize('role', ['decision', 'unknown'])
+def test_local_models_reject_unsupported_roles_before_loading(tmp_path, role):
+    config = tmp_path / 'models.json'
+    config.write_text(json.dumps({'version': 1, 'models': {role: {}}}))
+    models = LocalModels(config)
+    with pytest.raises(ModelUnavailable, match='Only embedding and reranker'):
+        models.identity_for(role)
+    with pytest.raises(ModelUnavailable, match='Only embedding and reranker'):
+        models._spec(role)
+
+
+def test_model_worker_rejects_unsupported_roles_before_optional_imports():
+    from agent.rag.model_worker import infer
+
+    with pytest.raises(ValueError, match='Only embedding and reranker'):
+        infer({'spec': {}, 'payload': {}, 'role': 'decision'})
+
+
 def test_runtime_versions_are_part_of_admission(tmp_path, monkeypatch):
     config = tmp_path / 'models.json'
     config.write_text(json.dumps({'version': 1, 'models': {'embedding': {

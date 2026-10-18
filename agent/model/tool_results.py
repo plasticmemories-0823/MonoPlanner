@@ -97,7 +97,8 @@ def _repository_map(value, source_version, project):
     for update in mapping['updates']:
         if not isinstance(update, dict):
             continue
-        scope = (project, _version(update, version), _path(update.get('path')))
+        scope = (project, _version(update, version), _path(update.get('path')),
+                 _name(update.get('sha256')))
 
         def symbol(item):
             kind, name, line = (_name(item.get('kind')), _name(item.get('name')),
@@ -106,9 +107,9 @@ def _repository_map(value, source_version, project):
 
         def dependency(item):
             path, line = _path(item.get('path')), _line(item.get('line'))
-            # 同一行可从同一模块导入多个符号；完整依据才标识具体依赖关系。
-            evidence = _name(item.get('evidence'))
-            return (*scope, path, line, evidence) if path and line and evidence else None
+            # 导入节点ID含列与别名位置；规范化标签的截断不合并同一行的不同导入。
+            identity = _name(item.get('id'))
+            return (*scope, path, line, identity) if path and line and identity else None
 
         _collection(update, 'new_symbols', symbol)
         _collection(update, 'new_dependencies', dependency)
@@ -136,4 +137,73 @@ def normalize_result(tool_name, value, *, source_version=None, project=None):
                 _hits(row['data'], version, project)
             if row.get('op') in {'read', 'search'}:
                 _repository_map(row['data'], version, project)
+    return result
+
+
+def _search_view(value):
+    """原件保留完整检索身份；模型只接收共享来源表、原文和命中位置。"""
+    if value.get('format') != 'monoplanner-retrieval-excerpts-v2':
+        return value
+    sources, results, source_ids, result_ids = [], [], {}, {}
+    for item in value['results']:
+        identity = tuple(item[key] for key in ('source_id', 'version', 'source_sha256', 'path'))
+        if identity not in source_ids:
+            source = {'path': item['path'], 'sha256': item['source_sha256'], 'kind': item['kind']}
+            if item['version'] != item['source_sha256']:
+                source['version'] = item['version']
+            kind, _, path = item['source_id'].partition(':')
+            if item['path'] != ('$record/' + path if kind == 'record' else path):
+                source['source_id'] = item['source_id']
+            elif kind != 'source':
+                source['source_type'] = kind
+            for field in ('origin', 'namespace', 'actual_path', 'temporary',
+                          'from_build_tree', 'timestamp'):
+                if item.get(field):
+                    source[field] = item[field]
+            source_ids[identity] = len(sources)
+            sources.append(source)
+        result_ids[item['id']] = len(results)
+        results.append({
+            'id': item['id'], 'source': source_ids[identity],
+            **{key: item[key] for key in ('start', 'end', 'line_start', 'line_end', 'text')},
+            **({'symbol': item['symbol']} if item.get('symbol') else {}),
+        })
+    hits = [{
+        'result': result_ids[hit['result_id']],
+        **{key: hit[key] for key in ('line', 'line_end', 'match_start', 'match_end',
+                                     'column_start', 'column_end', 'truncated')},
+    } for hit in value['hits']]
+    # 这些字段仍在操作原件中；它们不参与模型的阅读、定位或续查。
+    internal = {'hits', 'results', 'configuration_version', 'scope', 'reader_scope',
+                'retrieval_mode', 'token_count', 'ranking', 'exact_current_version_hit',
+                'retrieval_incomplete', 'requested_limit', 'requested_offset', 'notice'}
+    body = {key: item for key, item in value.items() if key not in internal}
+    if body.get('effective_query') == body.get('query'):
+        body.pop('effective_query', None)
+    if body.get('rewrite', {}).get('status') == 'not_triggered':
+        body.pop('rewrite')
+    for field in ('reasons', 'missing_entities', 'missing_kinds', 'continuation',
+                  'unavailable_sources', 'unavailable_source_count'):
+        if not body.get(field):
+            body.pop(field, None)
+    body.update(
+        format='monoplanner-search-view-v1', sources=sources, results=results, hits=hits,
+        coordinates='Zero-based source/result indices and Unicode [start,end) ranges; '
+                    'one-based lines and columns. Source version defaults to sha256.',
+        notice='Excerpts only; read the source path and line range for surrounding context.',
+    )
+    return body
+
+
+def model_result(tool_name, value, *, source_version=None, project=None):
+    """只在工具消息提交处投影；from_step 和本地审计继续使用完整去重结果。"""
+    result = normalize_result(tool_name, value, source_version=source_version, project=project)
+    if not isinstance(result, dict):
+        return result
+    if tool_name == 'retrieve_evidence':
+        return _search_view(result)
+    if tool_name == 'submit_plan':
+        for row in result.get('steps', []):
+            if isinstance(row, dict) and row.get('op') == 'search' and isinstance(row.get('data'), dict):
+                row['data'] = _search_view(row['data'])
     return result

@@ -20,7 +20,13 @@ class Operation(BaseModel):
             '$container namespace. Never widen the registered scope.'
         ),
     )
-    query: str = ""
+    query: str = Field(
+        default="",
+        description=(
+            'Search text: a complete literal string for exact, or a natural-language '
+            'description for semantic.'
+        ),
+    )
     offset: int = Field(default=0, ge=0)
     limit: int = Field(
         default=80,
@@ -30,7 +36,11 @@ class Operation(BaseModel):
     )
     mode: Literal["exact", "semantic"] = Field(
         default="exact",
-        description='search mode only; exact uses literal case-sensitive original text.',
+        description=(
+            'Search only. exact: case-sensitive literal matching with BM25 ranking. '
+            'semantic: vector retrieval and reranking by meaning; requires an available '
+            'index of the bound current project.'
+        ),
     )
     intent: Literal["locate", "diagnostic", "audit"] = "locate"
     required_entities: list[str] = Field(default_factory=list, max_length=16)

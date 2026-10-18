@@ -61,7 +61,7 @@ def test_chat_archives_before_normalizing_and_keeps_calls_separate(setup, monkey
         reply(call('list_files', '../../model-id'), call('list_files', 'second')),
         text_reply(), reply(call('list_files', 'later-call')), text_reply(),
     ])
-    normalized = chat.normalize_result
+    normalized = chat.model_result
     observed = []
 
     def checked(name, value, **options):
@@ -71,7 +71,7 @@ def test_chat_archives_before_normalizing_and_keeps_calls_separate(setup, monkey
         observed.append((name, deepcopy(value), options))
         return normalized(name, value, **options)
 
-    monkeypatch.setattr(chat, 'normalize_result', checked)
+    monkeypatch.setattr(chat, 'model_result', checked)
     bot = Chatbot(store, lambda *_args, **_options: pytest.fail('Unexpected handoff'),
                   factory=lambda _: model, invoke_tool=lambda *_: raw)
     first = incoming()
@@ -95,6 +95,34 @@ def test_chat_archives_before_normalizing_and_keeps_calls_separate(setup, monkey
     assert all(item[2] == {'project': str(repo)} for item in observed)
     assert all(path.parent.parent == store.root / 'application-records' / conversation
                for path in originals(store, conversation))
+
+
+def test_chat_search_keeps_audit_local_and_sends_shared_sources(setup, monkeypatch):
+    import hashlib
+    from agent.rag import integration
+
+    store, conversation, repo = setup
+    text = '中文 needle needle\r\n'
+    (repo / 'example.py').write_bytes(text.encode('utf-8'))
+    model = ScriptedModel([
+        reply(call('retrieve_evidence', query='needle', path='.', mode='exact')),
+        text_reply(),
+    ])
+    monkeypatch.setattr(integration, '_models', lambda *_: pytest.fail('Exact loaded a model'))
+    bot = Chatbot(store, lambda *_: pytest.fail('Unexpected handoff'), factory=lambda _: model)
+    item = incoming()
+    store.submit(conversation, item)
+    bot.run(conversation, item)
+    tool = next(message for message in model.calls[1] if isinstance(message, ToolMessage))
+    body = json.loads(tool.content)
+    raw = json.loads(originals(store, conversation)[0].read_text('utf-8'))['result']
+    assert tool.tool_call_id == 'tool-1' and tool.name == 'retrieve_evidence'
+    assert len(body['hits']) == len(raw['hits']) == 2
+    assert len(body['sources']) == len(body['results']) == 1
+    assert body['results'][0]['text'] == raw['results'][0]['text']
+    assert body['sources'][0]['sha256'] == hashlib.sha256(text.encode()).hexdigest()
+    assert tool.content.count('example.py') == tool.content.count(raw['results'][0]['version']) == 1
+    assert 'scope' in raw and 'scope' not in body
 
 
 @pytest.mark.parametrize('name,result', [
@@ -137,13 +165,13 @@ def test_builtin_handoff_and_status_tools_also_save_raw_results(setup, monkeypat
     monkeypatch.setattr(bot, 'work_facts', lambda *_args: {'task': result, 'events': [result, result]})
     monkeypatch.setattr(records, 'read_work_record', lambda *_args, **_options: result)
     observed = []
-    normalize = chat.normalize_result
+    normalize = chat.model_result
 
     def normalized(tool_name, value, **options):
         observed.append(deepcopy(value))
         return normalize(tool_name, value, **options)
 
-    monkeypatch.setattr(chat, 'normalize_result', normalized)
+    monkeypatch.setattr(chat, 'model_result', normalized)
     item = incoming()
     store.submit(conversation, item)
     bot.run(conversation, item)
@@ -233,7 +261,7 @@ def test_normalization_failure_preserves_raw_and_never_replays_operation(setup, 
     executed = []
     bot = Chatbot(store, lambda *_: None, factory=lambda _: model,
                   invoke_tool=lambda *_: executed.append('done') or {'entries': []})
-    monkeypatch.setattr(chat, 'normalize_result', lambda *_args, **_options:
+    monkeypatch.setattr(chat, 'model_result', lambda *_args, **_options:
                         (_ for _ in ()).throw(ValueError('normalization failed')))
     item = incoming()
     store.submit(conversation, item)

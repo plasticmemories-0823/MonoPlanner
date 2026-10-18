@@ -102,12 +102,14 @@ class WorkResultNormalizationTests(unittest.TestCase):
             prepared=None,
             source_bytes=lambda name: files[name],
         )
+        mapping = ExplorationMap(reader, {})
+        self.loop.executor = SimpleNamespace(exploration=mapping)
         data = {'path': 'consumer.py', 'sha256': digests['consumer.py'],
                 'text': source.decode(), 'visible_ranges': [[0, 1]], 'offset': 0}
-        data['repository_map'] = ExplorationMap(reader, {}).observe(data)
+        data['repository_map'] = mapping.observe(data)
         expected = data['repository_map']['updates'][0]['new_dependencies']
-        self.assertEqual([row['evidence'] for row in expected],
-                         ['import dep.alpha', 'import dep.beta'])
+        self.assertEqual([row['import_target'] for row in expected],
+                         ['dep.alpha', 'dep.beta'])
         self.assertEqual(normalize_result('retrieve_evidence', data), data)
         row = {'id': 'read-imports', 'op': 'read', 'status': 'succeeded', 'data': data}
         self.loop.state['pending'] = {
@@ -118,7 +120,14 @@ class WorkResultNormalizationTests(unittest.TestCase):
                                      'tool_call_id': 'earlier-call'},
         }]
         self.loop.state['history'] = deepcopy(prefix)
+        with patch('agent.model.tool_payloads.project', side_effect=OSError('projection failed')):
+            with self.assertRaisesRegex(OSError, 'projection failed'):
+                finish_plan(self.loop, 'inspected')
+        self.assertEqual(mapping.state['consumer.py']['delivered']['ids'], [])
+        self.assertEqual(self.loop.state['history'], prefix)
         finish_plan(self.loop, 'inspected')
+        self.assertEqual(mapping.state['consumer.py']['delivered']['ids'],
+                         ['import:1:0:0', 'import:1:0:1'])
         self.assertEqual(self.loop.state['history'][:-2], prefix)
         message = self.loop.state['history'][-1]['data']
         self.assertEqual(message['tool_call_id'], 'plan-call')

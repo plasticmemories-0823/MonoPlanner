@@ -182,15 +182,6 @@ class UnifiedSearchTests(unittest.TestCase):
             retriever.retrieve(replace(query, cursor=first['next_cursor'],
                                        original_text='original query'))
 
-    def test_fusion_weight_is_no_longer_a_tuning_candidate(self):
-        from dataclasses import asdict
-        from agent.rag.tuning.policy import Config, enumerate_candidates
-        base = Config.create(asdict(RagConfig()))
-        self.assertNotIn('vector_weight', base.values)
-        self.assertNotIn('vector_weight', {candidate.knob for candidate in enumerate_candidates(base)})
-        with self.assertRaisesRegex(ValueError, 'Obsolete fusion'):
-            Config.create(base.values | {'vector_weight': 0.5})
-
     def test_metadata_only_exact_search_reads_beyond_semantic_document_limit(self):
         text = 'unrelated original line\n' * 210000 + 'late needle\n'
         document = Document('large', 'v', text, path='large.txt')

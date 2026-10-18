@@ -92,7 +92,7 @@ def test_tokenizer_failure_keeps_semantic_unavailable_without_paid_rewrite(
         SimpleNamespace(), sources,
         arguments(mode='semantic', intent=intent, required_entities=['answer'], required_kinds=['code', 'log']),
         root=tmp_path, cache_root=tmp_path / 'tasks/task', repo=project, task_id='task',
-        request_id='one-request', config=integration.task_configuration(tmp_path, 'task'),
+        request_id='one-request', config=integration.retrieval_configuration(),
         rewrite=lambda *_: pytest.fail('Unavailable retrieval must not consume a rewrite'),
     )
     assert attempted == ['count']
@@ -116,7 +116,14 @@ def test_work_tool_reaches_next_request_after_original_and_preserves_pairing(pro
     assert search['data']['mode'] == 'exact' and search['data']['hits']
     original = loop.root / search['record']
     saved = json.loads(original.read_text('utf-8'))
-    assert saved['data']['hits'] == search['data']['hits']
+    hit = search['data']['hits'][0]
+    excerpt = search['data']['results'][hit['result']]
+    source = search['data']['sources'][excerpt['source']]
+    assert source['path'] == saved['data']['hits'][0]['path']
+    assert source['sha256'] == saved['data']['hits'][0]['source_sha256']
+    assert hit['match_start'] == saved['data']['hits'][0]['match_start']
+    assert excerpt['text'] == saved['data']['results'][0]['text']
+    assert 'scope' in saved['data'] and 'scope' not in search['data']
     assert loop.state['rag_request_id'] == 'one-user-request'
     assert not loop.state.get('rag_pending') and not loop.state.get('rag_running')
     assert not (loop.root / 'rag/operations').exists()
@@ -305,10 +312,24 @@ def test_final_tool_envelope_counts_metadata_and_long_identifiers():
         integration.delivery({'results': []}, call)
 
 
-def test_configuration_binding_is_persistent_and_does_not_change_task(tmp_path):
-    selected = integration.task_configuration(tmp_path, 'task-a')
-    assert selected == integration.task_configuration(tmp_path, 'task-a')
+def test_fixed_configuration_ignores_legacy_database_and_returns_independent_snapshots(tmp_path):
+    legacy = tmp_path / 'rag/tuning.sqlite3'
+    legacy.parent.mkdir()
+    legacy.write_bytes(b'legacy parameter database must not be opened')
+    selected = integration.retrieval_configuration()
     assert selected['values'] == asdict(RagConfig())
+    for task in ('task-a', 'task-b'):
+        loop = SimpleNamespace(root=tmp_path / 'tasks' / task, state={})
+        bound = integration.bind_work(loop)
+        assert {key: bound[key] for key in selected} == selected
+        assert loop.state['rag_config'] == selected
+    selected['values']['chunk_target'] = 384
+    assert integration.retrieval_configuration()['values'] == asdict(RagConfig())
+    assert legacy.read_bytes() == b'legacy parameter database must not be opened'
+
+
+def test_fixed_configuration_rejects_modified_checkpoint(tmp_path):
+    selected = integration.retrieval_configuration()
     loop = SimpleNamespace(root=tmp_path / 'tasks/task-a', state={'rag_config': deepcopy(selected)})
     loop.state['rag_config']['values']['chunk_target'] = 384
     with pytest.raises(ValueError, match='configuration changed'):
@@ -356,9 +377,9 @@ def test_work_citation_audit_preserves_response_and_does_not_reject_plan(project
 def test_citation_marker_cannot_recover_unseen_or_modified_evidence():
     text = 'original source'
     sha = hashlib.sha256(text.encode()).hexdigest()
-    chunk = {'id': 'found', 'source_id': 'source:main.py', 'version': 'v1',
-             'source_sha256': sha, 'start': 0, 'end': len(text)}
-    tool = ToolMessage(content=json.dumps({'results': [chunk]}), name='retrieve_evidence',
+    chunk = {'id': 'found', 'source': 0, 'start': 0, 'end': len(text)}
+    source = {'path': 'main.py', 'version': 'v1', 'sha256': sha}
+    tool = ToolMessage(content=json.dumps({'sources': [source], 'results': [chunk]}), name='retrieve_evidence',
                        tool_call_id='lookup')
     raw = message_to_dict(text_reply('[evidence:found]'))
     assert integration._audit_markers(raw, [], lambda *_: text)[0]['status'] == 'unverified'
@@ -370,7 +391,7 @@ def test_public_record_projection_never_reuses_work_private_index(project, tmp_p
     private = '{"status":"failed","text":"work-only result detail"}'
     public = '{"status":"failed"}'
     version = hashlib.sha256(private.encode()).hexdigest()
-    configuration = integration.task_configuration(tmp_path, 'task')
+    configuration = integration.retrieval_configuration()
 
     def query(text, reader_scope):
         sources = integration.Sources()
@@ -404,7 +425,7 @@ def test_index_resource_failure_is_not_presented_as_absent_evidence(project, tmp
         SimpleNamespace(), sources, arguments(), root=tmp_path,
         cache_root=tmp_path / 'tasks/task', repo=project,
         task_id='task', request_id='request',
-        config=integration.task_configuration(tmp_path, 'task'),
+        config=integration.retrieval_configuration(),
         rewrite=lambda *_: pytest.fail('Resource failure must not trigger paid rewrite'),
     )
     assert result['retrieval_incomplete'] is True
@@ -495,7 +516,7 @@ def test_model_configuration_is_frozen_per_task_and_invalid_original_keeps_hash(
 def test_full_source_cache_prunes_stale_versions_before_admitting_replacement(project, tmp_path, monkeypatch):
     from agent.rag.index import Index
 
-    configuration = integration.task_configuration(tmp_path, 'task')
+    configuration = integration.retrieval_configuration()
     owner = SimpleNamespace()
     def retrieve(version, text):
         sources = integration.Sources()

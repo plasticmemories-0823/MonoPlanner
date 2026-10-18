@@ -218,12 +218,10 @@ class LocalModels:
         self.reranker = self
 
     def _spec(self, role):
-        spec = self.manifest.get('models', {}).get(role)
+        self.identity_for(role)
+        spec = self.manifest['models'][role]
         if not isinstance(spec, dict) or not self.path:
             raise ModelUnavailable(f'No local {role} model configured; no download attempted.')
-        self.identity_for(role)
-        if role == 'laya' and spec.get('backend') != 'laya_onnx':
-            raise ModelUnavailable('Laya requires a qualified local quantized ONNX artifact under this memory budget.')
         root = Path(spec.get('root', ''))
         root = (self.path.parent / root).resolve() if not root.is_absolute() else root.resolve()
         hashes = spec.get('sha256')
@@ -242,22 +240,20 @@ class LocalModels:
             if digest.hexdigest() != expected:
                 raise ModelUnavailable('Local model file hash changed.')
         for key in ('tokenizer', 'model'):
-            if role != 'laya' and spec.get(key) not in hashes:
+            if spec.get(key) not in hashes:
                 raise ModelUnavailable(f'Pin the {key} file in the local model manifest.')
-        if role == 'laya':
-            files = {item.relative_to(root).as_posix() for item in root.rglob('*') if item.is_file()}
-            if files != set(hashes) or spec.get('model') not in hashes:
-                raise ModelUnavailable('Every loaded Laya artifact must be included in the hash manifest.')
         if type(spec.get('max_tokens')) is not int or not 16 <= spec['max_tokens'] <= 8192:
             raise ModelUnavailable('Set a verified input window of 16..8192 tokens.')
         return {**spec, 'root': str(root)}
 
     def identity_for(self, role):
+        if role not in {'embedding', 'reranker'}:
+            raise ModelUnavailable('Only embedding and reranker models are supported.')
         spec = self.manifest.get('models', {}).get(role)
         if not spec:
             raise ModelUnavailable(f'No local {role} model configured.')
         expected = spec.get('runtime_versions', {})
-        required = {'laya', 'onnxruntime', 'transformers'} if role == 'laya' else {'onnxruntime', 'tokenizers', 'numpy'}
+        required = {'onnxruntime', 'tokenizers', 'numpy'}
         if not required.issubset(expected):
             raise ModelUnavailable('Pin the actual inference runtime package versions.')
         try:
@@ -298,7 +294,7 @@ class LocalModels:
             _INFERENCE.release()
 
     def _run(self, raw, *, consume=None):
-        env = {**os.environ, 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
+        env = {**os.environ, 'HF_HUB_OFFLINE': '1',
                'CUDA_VISIBLE_DEVICES': '', 'OMP_NUM_THREADS': '2', 'PYTHONUTF8': '1',
                'PYTHONDONTWRITEBYTECODE': '1', 'MONOPLANER_RAG_WORKER_BYTES': str(WORKER_BYTES),
                'MONOPLANER_RAG_PARENT_LIMIT': '1' if os.name == 'nt' else '0'}
@@ -430,32 +426,6 @@ class LocalModels:
                 'query': query, 'texts': [c.embedding_text() for c in chunks[start:start + 16]],
             }))
         return scores
-
-    def laya_provider(self):
-        owner = self
-
-        class Provider:
-            @property
-            def identity(self):
-                identity = owner.identity_for('laya')
-                spec = owner.manifest['models']['laya']
-                from agent.rag.tuning import laya as adapter
-
-                return {
-                    'model_revision': identity,
-                    'runtime_revision': hashlib.sha256(json.dumps(
-                        [sys.version, spec['runtime_versions']], sort_keys=True).encode()).hexdigest(),
-                    'tokenizer_revision': hashlib.sha256(json.dumps(
-                        {k: v for k, v in spec['sha256'].items() if 'token' in k},
-                        sort_keys=True).encode()).hexdigest(),
-                    'prompt_revision': hashlib.sha256(Path(adapter.__file__).read_bytes()).hexdigest(),
-                }
-
-            def predict(self, state, questions):
-                return owner._call('laya', {'state': state, 'questions': questions})
-
-        return Provider()
-
 
 class LocalVectorRoute:
     """未完成的向量索引只报告不完整；相同输入的真实向量按哈希复用。"""
