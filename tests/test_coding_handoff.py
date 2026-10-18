@@ -25,7 +25,7 @@ from agent.settings import PROJECT_ROOT
 class CodingHandoffTests(unittest.TestCase):
 
     def test_acceptance_schema_and_task_rules_outside_lookup_protocol_are_unchanged(self):
-        # 实验版2只替换检索和地图；其余规则逐字对照已冻结的正式版工作区。
+        # 实验版2只保留检索替换；地图及其余规则逐字对照正式版工作区。
         baseline = 'aebb8240e1113a5ee3f27a64abea4852a2642b24'
         def original(name):
             return subprocess.check_output(['git', 'show', baseline + ':' + name],
@@ -35,16 +35,13 @@ class CodingHandoffTests(unittest.TestCase):
             self.assertEqual(json.loads((PROJECT_ROOT / 'resources' / name).read_bytes()),
                              json.loads(original('resources/' + name)))
         rules = (PROJECT_ROOT / 'resources/prompts/task.txt').read_text(encoding='utf-8')
-        changed = ('read uses repository-relative', 'Each lookup grows a repository_map',
-                   'repository_map is navigation')
+        changed = ('read uses repository-relative',)
         protected = lambda value: [line for line in value.splitlines()
                                    if not line.startswith(changed)]
         self.assertEqual(protected(rules), protected(original('resources/prompts/task.txt')))
         expected = {
             'read uses repository-relative':
                 '6f462cbc31bba65c93fdf91e74e8e3b2f44c23665bbc5f1eb818afb4ef31fe62',
-            'repository_map is navigation':
-                '51407898ed0e620a778a864b74a86dcf9e60fa123d6c9a3b9e9cdd7ed368ae17',
         }
         for prefix, digest in expected.items():
             line = next(line for line in rules.splitlines() if line.startswith(prefix))

@@ -44,11 +44,14 @@ def _text(value):
 
 
 def _entry(archive, relative):
-    return archive.artifact(relative) if archive is not None else None
+    if archive is None:
+        return None
+    rows = archive.find('', limit=1, prefix=relative)
+    return rows[0] if rows and rows[0]['path'] == relative else None
 
 
 def readable(name, archive=None):
-    """内容寻址正文、已登记日志和地图原件共用流式读取。"""
+    """仅新增内容寻址正文和已有受管日志的流式读取入口。"""
     if _CAS.fullmatch(name):
         return True
     if not name.startswith('$record/'):
@@ -57,7 +60,7 @@ def readable(name, archive=None):
     return (bool(relative.parts) and not relative.is_absolute()
             and '..' not in relative.parts and ':' not in name
             and relative.parts[0] in {'plans', 'feedback', 'acceptance'}
-            and relative.name in {'stdout.log', 'stderr.log', 'repository-map.json'}
+            and relative.name in {'stdout.log', 'stderr.log'}
             and _entry(archive, relative.as_posix()) is not None)
 
 

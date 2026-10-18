@@ -243,11 +243,6 @@ def finish_plan(self, outcome):
             ),
         ]
     )
-    mapping = getattr(getattr(self, 'executor', None), 'exploration', None)
-    if mapping is not None:
-        for row in delivered['steps']:
-            if row['status'] == 'succeeded' and row['op'] in {'read', 'search'}:
-                mapping.acknowledge(row['data'].get('repository_map'))
     status = "verified_success" if outcome == "verified_success" else "needs_plan"
     reason = "Fixed final acceptance passed" if outcome == "verified_success" else outcome
     if outcome == "candidate_limit_reached":

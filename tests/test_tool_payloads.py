@@ -185,28 +185,6 @@ class ToolPayloadTests(unittest.TestCase):
             payloads.project(self.loop, {'stdout': 'excerpt', 'stdout_record': 'plans/p1/stdout.log'})
         self.assertTrue(log.read_bytes().startswith(b'tampered'))
 
-    def test_registered_map_uses_streaming_hash_checked_line_and_byte_reads(self):
-        store = self.open_store()
-        path = self.root / 'plans/p1/read/repository-map.json'
-        path.parent.mkdir(parents=True)
-        raw = b'{\r\n  "long_signature": "' + b'x' * (2_100_000) + b'"\r\n}\r\n'
-        path.write_bytes(raw)
-        store.register_derived(path, 'source_navigation', 'v1')
-        self.assertEqual(store.find('', prefix='plans/p1'), [])
-        name = '$record/plans/p1/read/repository-map.json'
-        with patch.object(Path, 'read_bytes', side_effect=AssertionError('must stream map')):
-            page = self.reader.read(name, 0, 200)
-            self.assertEqual(page['sha256'], hashlib.sha256(raw).hexdigest())
-            self.assertTrue(page['truncated'])
-            self.assertEqual(page['visible_ranges'], [[0, 1]])
-            position = page['long_line']['byte_offset']
-            part = payloads.read_bytes(self.root, name, position, archive=store)
-            self.assertGreater(part['next_byte_offset'], position)
-            self.assertEqual(part['visible_ranges'], [])
-        path.write_bytes(raw[:-1] + b' ')
-        with self.assertRaisesRegex(ValueError, 'SHA-256 mismatch'):
-            self.reader.read(name, 0, 200)
-
     def test_cas_tampering_is_detected_on_repeated_projection_and_read(self):
         body = {'stdout': 'original\n' * 2000}
         ref = payloads.project(self.loop, body)['stdout']

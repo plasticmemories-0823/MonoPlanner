@@ -223,12 +223,11 @@ def test_mixed_source_result_keeps_existing_project_projection(bridge, tmp_path)
     executor, owner, _ = bridge
     hits = [source_hit(b'header text'), {'path': 'project.c', 'line': 2}]
     projected = {'source_version': 'project-version', 'updates': [{'path': 'project.c'}]}
-    executor.exploration = SimpleNamespace(observe=Mock(return_value=projected), coverage=lambda: {})
+    executor.exploration = SimpleNamespace(observe=Mock(return_value=projected))
     owner.root, owner.state, owner.history_store = tmp_path, {'source_map': {}}, None
     row = {'status': 'succeeded', 'data': {'hits': hits}}
     lifecycle.record_lookup(owner, SimpleNamespace(op='search'), row, tmp_path)
-    executor.exploration.observe.assert_called_once_with(
-        row['data'], queued=[], record='$record/repository-map.json')
+    executor.exploration.observe.assert_called_once_with(row['data'])
     assert row['data']['repository_map']['updates'] == [{'path': 'project.c'}]
     assert (tmp_path / 'repository-map.json').exists()
 

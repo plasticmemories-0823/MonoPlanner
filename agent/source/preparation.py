@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 import time
 
-from agent.source.syntax import _parse, MAX_FILE_BYTES
+from agent.source.syntax import _parse, _module, MAX_FILE_BYTES
 
 
 MAX_FILES = 3000
@@ -51,11 +51,12 @@ def build_preparation(view, previous, cancel, max_seconds=8.0):
                 entry = _parse(raw, name)
             except (SyntaxError, UnicodeError, ValueError, RecursionError) as exc:
                 entry = {
+                    'module': _module(name),
+                    'doc': '',
                     'symbols': [],
                     'imports': [],
-                    'total_lines': len(text.splitlines()),
-                    'parser': {'status': type(exc).__name__, 'complete': False,
-                               'continuation': {'path': name, 'offset': 0, 'limit': 200}},
+                    'calls': [],
+                    'error': type(exc).__name__,
                 }
             entry = {**entry, 'digest': sha}
         entries[name] = entry

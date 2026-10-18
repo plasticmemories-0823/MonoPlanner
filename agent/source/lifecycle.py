@@ -100,8 +100,7 @@ def configure_lookups(loop):
             ] = spans
     if not hasattr(loop.executor, 'exploration'):
         loop.executor.exploration = ExplorationMap(
-            loop.executor, loop.state.setdefault('source_map', {}),
-            loop.state.setdefault('source_map_coverage', {}),
+            loop.executor, loop.state.setdefault('source_map', {})
         )
     loop.executor.exploration.sync()
 
@@ -120,19 +119,10 @@ def record_lookup(loop, step, row, directory):
             or (not paths and is_container_path(getattr(step, 'path', '')))):
         # 容器原件由只读适配器归档，不以项目版本生成误导性的仓库映射。
         return
+    result = loop.executor.exploration.observe(row['data'])
     path = directory / 'repository-map.json'
-    record = '$record/' + path.relative_to(loop.root).as_posix()
-    row['data'].pop('repository_map', None)  # 读取缓存不能重发上次的导航投递。
-    queued = [item['data'].get('repository_map')
-              for item in (loop.state.get('pending') or {}).get('rows', [])
-              if item['status'] == 'succeeded' and item['op'] in {'read', 'search'}]
-    result = loop.executor.exploration.observe(row['data'], queued=queued, record=record)
-    if result is None:
-        return
-    save(path, {'format': 'repository-map-v3', 'source_version': result['source_version'],
-                'coverage': loop.executor.exploration.coverage(),
-                'files': {name: loop.state['source_map'][name] for name in paths
-                          if name in loop.state['source_map']}})
+    save(path, {'source_version': result['source_version'], 'files': loop.state['source_map']})
     if loop.history_store:
         loop.history_store.register_derived(path, 'source_navigation', result['source_version'])
+    result['record'] = '$record/' + path.relative_to(loop.root).as_posix()
     row['data']['repository_map'] = result

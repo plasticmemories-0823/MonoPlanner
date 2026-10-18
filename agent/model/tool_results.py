@@ -97,8 +97,7 @@ def _repository_map(value, source_version, project):
     for update in mapping['updates']:
         if not isinstance(update, dict):
             continue
-        scope = (project, _version(update, version), _path(update.get('path')),
-                 _name(update.get('sha256')))
+        scope = (project, _version(update, version), _path(update.get('path')))
 
         def symbol(item):
             kind, name, line = (_name(item.get('kind')), _name(item.get('name')),
@@ -107,9 +106,9 @@ def _repository_map(value, source_version, project):
 
         def dependency(item):
             path, line = _path(item.get('path')), _line(item.get('line'))
-            # 导入节点ID含列与别名位置；规范化标签的截断不合并同一行的不同导入。
-            identity = _name(item.get('id'))
-            return (*scope, path, line, identity) if path and line and identity else None
+            # 同一行可从同一模块导入多个符号；完整依据才标识具体依赖关系。
+            evidence = _name(item.get('evidence'))
+            return (*scope, path, line, evidence) if path and line and evidence else None
 
         _collection(update, 'new_symbols', symbol)
         _collection(update, 'new_dependencies', dependency)
