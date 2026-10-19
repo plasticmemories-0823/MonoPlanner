@@ -1,8 +1,8 @@
 # RAG 操作与验证边界
 
-本文件对应实验目录 `E:\AI\LangGraph\MonoPlanner-rag-experiment2`。
+本文件对应正式目录 `E:\AI\LangGraph\MonoPlanner`。
 容器资料的只读授权、提示分工、版本及缓存规则见 [容器资料检索](container-rag-sources.md)。
-实验版2以正式版为底，复用现有实验版的 RAG；仓库地图、验收和阶段调度保持正式版实现。工作上下文与 Chatbot 统一采用通用80%同步压缩及输出预留。下列历史验证数字不代表本次验证。
+当前正式版由实验版2晋升，保留其 RAG；仓库地图、验收和阶段调度沿用原正式版实现。工作上下文与 Chatbot 统一采用通用80%同步压缩及输出预留。下列历史验证数字不代表本次晋升验证。
 
 ## 固定检索参数
 
@@ -86,10 +86,10 @@ RAG 调度分支已经移除；历史名称只用于读取既有记录。批量�
 `.rag-models/asset-receipt.json`。许可证分别为MIT和Apache-2.0，原模型说明随本地资产保存。
 `requirements-rag-local.txt`固定CPU依赖；如需另机部署，安装到隔离目录，不能覆盖产品环境。
 
-实验后端可以使用以下独立端口及数据目录启动；本轮没有自动运行该服务：
+需要单独验证后端时，可以使用以下独立端口及数据目录启动：
 
 ```powershell
-Set-Location 'E:\AI\LangGraph\MonoPlanner-rag-experiment2'
+Set-Location 'E:\AI\LangGraph\MonoPlanner'
 $env:MONOPLANER_STATE_DIR = "$PWD\validation\rag-app-data"
 $env:MONOPLANER_BACKEND_PORT = '12024'
 $env:MONOPLANER_UI_PORT = '13000'
@@ -97,8 +97,8 @@ $env:MONOPLANER_RAG_MODELS = "$PWD\.rag-models\models.json"
 & 'E:\AI\LangGraph\MonoPlanner\.venv-web\Scripts\python.exe' -B -m agent.server.portable
 ```
 
-这只是后端入口，不是已打包的完整桌面程序。源代码工作树中的EXE是桌面回归所需的
-本地编译产物；本轮未构建新的前端分发包，不应用它替换正在使用的正式版。
+这只是后端入口，不是已打包的完整桌面程序。本次晋升更新正式源码，沿用现有桌面
+运行时及本地编译产物；未重新发布便携ZIP，已下载的分发包不会自动更新。
 新任务固定检索配置与模型清单指纹；既有任务不会因环境变量变动悄悄换模型。
 
 ## 当前验证与限制
