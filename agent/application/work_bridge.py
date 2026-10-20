@@ -19,7 +19,7 @@ from agent.settings import load_settings
 from agent.storage.preferences import state_root
 from agent.storage.records import save
 from agent.storage.usage import summarize
-from agent.task import control
+from agent.task import control, acceptance_limit
 from agent.task.budget import StepBudget
 from agent.task.instructions import ARTIFACT_RULES, TASK_RULES
 from agent.task.runner import TaskRunner
@@ -68,6 +68,8 @@ def public_fact(state, event, payload=None):
             key: report[key] for key in ("status", "tests_ready", "execution_exception")
             if isinstance(report.get(key), (str, int, bool))
         }
+    if acceptance_limit.public(state):
+        details["acceptance_limit"] = acceptance_limit.public(state)
     return details
 
 
@@ -107,6 +109,7 @@ class WorkRunner(TaskRunner):
             "task_id": self.root.name,
             "applied_inputs": list(self.state.get("applied_inputs", [])),
             "usage": summarize(self.state),
+            "acceptance_limit": acceptance_limit.public(self.state),
         }
         # 公开事实只携带标识和结果，测试正文、完整模型推理及源码不自动外传。
         fact["details"] = public_fact(self.state, event, payload)
@@ -121,7 +124,8 @@ class WorkRunner(TaskRunner):
 
     def continue_after_return(self):
         # 补充中断保存结果后，仍由同一图和同一租约继续，不依靠浏览器唤醒。
-        if self.state["status"] not in {"needs_plan", "executing"} or self.yield_boundary:
+        if (self.state["status"] not in {"needs_plan", "executing"} or self.yield_boundary
+                or acceptance_limit.active(self.state)):
             return False
         # result() 已关闭预处理；重建可丢弃缓存，沿用任务、预算和执行游标。
         self.preparation = None
@@ -383,6 +387,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                 "status": result["status"], "reason": result.get("stop_reason", ""),
                 "task_id": task_id, "usage": result.get("usage", {}),
                 "applied_inputs": result["applied_inputs"],
+                "acceptance_limit": result.get("acceptance_limit"),
             })
             return result
     except Exception as exc:
@@ -419,7 +424,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
             if environment is not None:
                 environment.close()
                 if (result and result.get("status") in {
-                    "paused", "awaiting_user", "output_limit_reached",
+                    "paused", "awaiting_user", "output_limit_reached", acceptance_limit.STATUS,
                 } and not owner["interrupted_operation"]
                         and hasattr(environment, "output_limit_stop_receipt")):
                     save(directory / "pause-container.json", environment.output_limit_stop_receipt())

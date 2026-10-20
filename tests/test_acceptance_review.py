@@ -222,7 +222,7 @@ class AcceptanceReviewTests(unittest.TestCase):
         self.assertFalse(self.model.calls)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
-    def test_runnable_behavior_failure_cannot_open_frozen_revision(self):
+    def test_runnable_failure_without_evidence_cannot_change_frozen_expectations(self):
         result = self.run_replies(
             [
                 f.reply(self.candidate(2)),
@@ -258,7 +258,7 @@ class AcceptanceReviewTests(unittest.TestCase):
         self.assertEqual(len(data["versions"]), 2)
         self.assertTrue(all(row["candidate"]["status"] == "passed" for row in data["versions"]))
 
-    def test_new_pass_does_not_erase_old_runnable_failure(self):
+    def test_preparation_revision_pass_preserves_old_runnable_failure(self):
         code = (
             "from sample import value\nif value() != 0:\n    raise RuntimeError('old setup conflict')\n"
             + f.CODE
@@ -277,7 +277,7 @@ class AcceptanceReviewTests(unittest.TestCase):
         self.assertEqual(result["rounds"][-1]["verification"]["status"], "failed")
         self.assertTrue(result["verification"]["acceptance_comparison"]["conflicts"])
 
-    def test_frozen_revision_cannot_change_assertions_or_inputs(self):
+    def test_preparation_revision_cannot_change_assertions_or_inputs(self):
         code = (
             "from sample import value\nif value() == 2:\n    raise RuntimeError('setup broken')\n"
             + f.CODE
@@ -363,7 +363,7 @@ class AcceptanceReviewTests(unittest.TestCase):
         )
         self.assertEqual(
             set(revise["function"]["parameters"]["properties"]),
-            {"trial_id", "reason", "test_code", "test_driver"},
+            {"trial_id", "reason", "test_code", "test_driver", "evidence", "corrections"},
         )
         self.assertNotEqual(behavior(f.CODE), behavior(f.CODE.replace("value(), 4", "value(), 2")))
 

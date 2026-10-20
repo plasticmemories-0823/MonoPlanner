@@ -59,6 +59,8 @@ def main(argv=None):
     parser.add_argument('--pause-after-steps', type=int)
     parser.add_argument('--find', help='Search existing history metadata; no model or shell')
     parser.add_argument('--status', action='store_true')
+    parser.add_argument('--continue-acceptance', action='store_true',
+                        help='明确批准增加一批验收轮次，从原任务断点继续')
     args = parser.parse_args(argv)
     for name in ('max_steps', 'pause_after_steps'):
         value = getattr(args, name)
@@ -82,11 +84,21 @@ def main(argv=None):
             parser.error('任务入口原件无效或记录目录已改变；不会迁移旧任务。')
     folder = root / 'tasks' / job['task_id'] if job else root
     old = _history(folder)
+    if args.continue_acceptance and (args.find is not None or args.status):
+        parser.error('--continue-acceptance cannot be combined with read-only queries')
+    from agent.task import acceptance_limit
+
+    limit = acceptance_limit.public(old or {})
+    if old and acceptance_limit.is_legacy_exhausted(old):
+        limit = acceptance_limit.legacy_projection(folder)
+    if args.continue_acceptance and not (limit or {}).get('active'):
+        parser.error('当前任务不处于可批准增加验收额度的暂停状态。')
     if args.find is not None or args.status:
         if old is None:
             parser.error('No existing indexed task at this path')
         value = (_history(folder, args.find) if args.find is not None else
-                 {key: old.get(key) for key in ('status', 'reason', 'source', 'plan_count')})
+                 {key: old.get(key) for key in ('status', 'reason', 'source', 'plan_count',
+                                                               'acceptance_limit')})
         print(json.dumps(value, ensure_ascii=False, indent=2))
         return 0
     if old is not None and job is None:
@@ -128,9 +140,15 @@ def main(argv=None):
         invocation['budget']['max_steps'] = args.max_steps
     # 步数暂停是本次调用的调试边界，不在下次显式续跑时重复触发。
     invocation['pause_after_steps'] = args.pause_after_steps
-    controls = ([{'id': uuid.uuid4().hex, 'kind': 'resume'}]
-                if old and old.get('status') in {'paused', 'awaiting_user', 'output_limit_reached'}
-                else [])
+    if args.continue_acceptance:
+        controls = [{'id': uuid.uuid4().hex, 'kind': 'resume',
+                     'acceptance_pause_id': limit['pause_id']}]
+    elif (limit or {}).get('active'):
+        controls = []
+    else:
+        controls = ([{'id': uuid.uuid4().hex, 'kind': 'resume'}]
+                    if old and old.get('status') in {'paused', 'awaiting_user', 'output_limit_reached'}
+                    else [])
     save(root / 'cli-invocations' / (uuid.uuid4().hex + '.json'),
          {'task_id': job['task_id'], 'budget': invocation['budget'],
           'pause_after_steps': invocation.get('pause_after_steps'), 'controls': controls})

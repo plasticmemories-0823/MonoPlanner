@@ -47,7 +47,9 @@ def freeze_acceptance(**kwargs) -> dict:
 def revise_acceptance(**kwargs) -> dict:
     """Submit a complete acceptance revision and evidence-based reason, never workspace edits.
     Before first freezing, correct test expectations and setup. After freezing,
-    only module preparation may change when acceptance is not runnable.
+    correct only expected literals with exact original evidence and itemized corrections;
+    otherwise only module preparation may change when acceptance is not runnable.
+    Every revision needs an original-source trial and a new freeze_acceptance.
     """
     return kwargs
 

@@ -32,13 +32,47 @@
         "items": {
           "type": "string"
         }
+      },
+      "evidence": {
+        "type": "array",
+        "description": "For frozen expectation corrections only; otherwise []. Quote complete relevant original text verbatim, including whitespace. Source matching proves provenance, not semantic correctness.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {"type": "string"},
+            "source": {
+              "type": "string",
+              "description": "task_request, user_update:<persisted human update id>, or original_file:<task-start frozen relative path>. Never current outputs, generated files, URLs or edited workspace contents."
+            },
+            "quote": {"type": "string", "description": "Exact original quotation, without trimming, ellipses or corrections."}
+          },
+          "required": ["id", "source", "quote"],
+          "additionalProperties": false
+        }
+      },
+      "corrections": {
+        "type": "array",
+        "description": "For frozen expectation corrections only; otherwise []. All changes must be covered. Before snippets must match uniquely in the active FROZEN code (even while revising a pending proposal). Include unchanged context to disambiguate literals. Keep driver, inputs, calls, assertion types and cases unchanged.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "before": {"type": "string"},
+            "after": {"type": "string"},
+            "evidence_ids": {"type": "array", "items": {"type": "string"}},
+            "reason": {"type": "string", "description": "Explain why independent original evidence establishes that the old expected literal is erroneous and the replacement is correct."}
+          },
+          "required": ["before", "after", "evidence_ids", "reason"],
+          "additionalProperties": false
+        }
       }
     },
     "required": [
       "trial_id",
       "reason",
       "test_code",
-      "test_driver"
+      "test_driver",
+      "evidence",
+      "corrections"
     ],
     "additionalProperties": false
   }

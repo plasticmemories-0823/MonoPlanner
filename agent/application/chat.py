@@ -24,6 +24,7 @@ from agent.storage.read_sources import ReadSources
 from agent.storage.resources import _safe_tree, preflight_space
 from agent.source.snapshots import _safe_file
 from agent.task.budget import StepBudget
+from agent.task.acceptance_limit import public as public_acceptance_limit
 from agent.settings import PROJECT_ROOT
 from agent.application.store import Conflict, encode
 
@@ -165,11 +166,13 @@ class Chatbot:
         page = self.store.work_events(conversation, task['task_id'], after, limit,
                                       latest=latest, through=through) if task else {
             'events': [], 'cursor': after, 'truncated': False}
-        return {
-            'task': None if task is None else {key: task.get(key) for key in
-                ('task_id', 'repo', 'project_path', 'status', 'reason', 'revision', 'request', 'updated_at')},
-            **page,
-        }
+        public_task = None
+        if task is not None:
+            public_task = {key: task.get(key) for key in (
+                'task_id', 'repo', 'project_path', 'status', 'reason', 'revision', 'request', 'updated_at',
+            )}
+            public_task['acceptance_limit'] = public_acceptance_limit(task)
+        return {'task': public_task, **page}
 
     def _rules(self, value, progress):
         if progress:

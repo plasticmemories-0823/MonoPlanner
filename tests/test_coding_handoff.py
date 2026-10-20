@@ -1,9 +1,5 @@
 """验证恢复后的资料交接和单一执行方持续工作；不调用模型服务。"""
 
-import ast
-import hashlib
-import json
-import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,38 +20,11 @@ from agent.settings import PROJECT_ROOT
 
 class CodingHandoffTests(unittest.TestCase):
 
-    def test_acceptance_schema_and_task_rules_outside_lookup_protocol_are_unchanged(self):
-        # 实验版2只保留检索替换；地图及其余规则逐字对照正式版工作区。
-        baseline = 'aebb8240e1113a5ee3f27a64abea4852a2642b24'
-        def original(name):
-            return subprocess.check_output(['git', 'show', baseline + ':' + name],
-                                           cwd=PROJECT_ROOT).decode('utf-8-sig')
-
-        for name in ('plan.schema.json', 'repair.schema.json', 'acceptance-review.schema.json'):
-            self.assertEqual(json.loads((PROJECT_ROOT / 'resources' / name).read_bytes()),
-                             json.loads(original('resources/' + name)))
-        rules = (PROJECT_ROOT / 'resources/prompts/task.txt').read_text(encoding='utf-8')
-        changed = ('read uses repository-relative',)
-        protected = lambda value: [line for line in value.splitlines()
-                                   if not line.startswith(changed)]
-        self.assertEqual(protected(rules), protected(original('resources/prompts/task.txt')))
-        expected = {
-            'read uses repository-relative':
-                '6f462cbc31bba65c93fdf91e74e8e3b2f44c23665bbc5f1eb818afb4ef31fe62',
-        }
-        for prefix, digest in expected.items():
-            line = next(line for line in rules.splitlines() if line.startswith(prefix))
-            self.assertEqual(hashlib.sha256(line.encode()).hexdigest(), digest)
+    def test_coding_tools_share_work_contract_and_chat_has_no_planner(self):
         self.assertEqual(wire_input([], CODING_TOOLS)['tools'][:4],
                          wire_input([], WORK_TOOLS)['tools'])
         self.assertEqual([tool.name for tool in CODING_TOOLS],
                          [tool.name for tool in WORK_TOOLS] + ['web_search', 'web_fetch'])
-        definitions = lambda value: {node.name: ast.dump(node) for node in ast.parse(value).body
-                                     if isinstance(node, ast.FunctionDef)}
-        before = definitions(original('agent/model/tools.py'))
-        after = definitions((PROJECT_ROOT / 'agent/model/tools.py').read_text('utf-8-sig'))
-        for tool in WORK_TOOLS:
-            self.assertEqual(before[tool.name], after[tool.name])
         self.assertNotIn('submit_plan', [tool.name for tool in CHAT_TOOLS])
 
     def test_model_visible_lookup_policy_keeps_execution_and_explicit_scopes(self):

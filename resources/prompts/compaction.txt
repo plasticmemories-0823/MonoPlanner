@@ -10,7 +10,7 @@ Under 已完成 preserve confirmed facts, source changes and actual operation ou
 Under 未完成 preserve failures, contradictions, hypotheses and unresolved work. Never turn a failed or unexecuted check into a success.
 Under 正在做 describe the work in progress and the next justified action. Do not guess a newer request absent from this earlier span; messages after the checkpoint determine current work.
 Use (none) for an empty section. Keep exact paths, identifiers, hashes, commands, diagnostic values and important source locations.
-Reference saved code and test records rather than rewriting their bodies. Do not alter frozen acceptance or treat previous-task results as completion of a newer request.
+Reference saved code and test records rather than rewriting their bodies. Preserve frozen acceptance and any explicit evidence-correction version chain, source references and exact quotes; only the host's revise_acceptance trial-and-freeze protocol may supersede identified expectations. Do not treat previous-task results as completion of a newer request.
 Summarize conclusions and evidence, not private reasoning transcripts.
 Merge previous checkpoints with newer evidence, discarding stale claims. Later original messages and actual tool results take precedence over older summaries.
 The execution-state snapshot below comes from program records at compaction start. Preserve its distinctions; it is not an LLM completion judgment.

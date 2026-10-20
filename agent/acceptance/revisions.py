@@ -12,6 +12,8 @@ from langchain_core.messages import ToolMessage, message_to_dict
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent.acceptance.contracts import VerificationSpec, tests_ready_for_candidate
+from agent.acceptance import evidence, expectations
+from agent.acceptance.evidence import Correction, Evidence
 from agent.acceptance.runner import AcceptanceRun
 from agent.acceptance.artifact_checks import required_consumer, requested_calls
 from agent.execution.local import LocalEnvironment
@@ -30,6 +32,8 @@ class Review(BaseModel):
     reason: str = Field(min_length=1, max_length=1600)
     test_code: str = Field(default="", max_length=32768)
     test_driver: list[str] = Field(default_factory=list, max_length=32)
+    evidence: list[Evidence] = Field(default_factory=list, max_length=24)
+    corrections: list[Correction] = Field(default_factory=list, max_length=24)
 
 
 def checked(root, ref):
@@ -184,10 +188,38 @@ def run_report(loop, snapshot, spec, directory, phase, repository_baseline=None)
 # 验收记录的完整性校验
 # ============================================================
 def validate(loop):
+    checked_proposals = set()
+
     def proposal(ref):
         data = checked(loop.root, ref)
+        if data.get("original_source") != loop.baseline.digest:
+            raise ModelRequestNotSent("state_conflict", "Acceptance original snapshot identity changed")
+        key = (ref["record"], ref["sha256"])
+        if key in checked_proposals:
+            return data
         if data.get("candidate"):
             checked(loop.root, data["candidate"])
+        correction = data.get("expectation_correction")
+        if correction:
+            try:
+                base_ref = correction["base_version"]
+                if base_ref not in loop.state.get("acceptance_versions", []):
+                    raise ValueError("Correction base is not a retained frozen version")
+                base = checked(loop.root, base_ref)
+                expected = evidence.prepare(
+                    loop, base_ref, base["spec"]["test_code"], data["spec"]["test_code"],
+                    [evidence.Evidence(**{key: row[key] for key in ("id", "source", "quote")})
+                     for row in correction["evidence"]],
+                    [evidence.Correction(**row) for row in correction["corrections"]],
+                )
+                if (expected != correction or data["regression"] != base["regression"]
+                        or data["spec"] != {**base["spec"], "test_code": data["spec"]["test_code"]}):
+                    raise ValueError("Correction differs from its original evidence or fixed checks")
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ModelRequestNotSent(
+                    "state_conflict", "Acceptance correction changed: " + str(exc)
+                ) from exc
+        checked_proposals.add(key)
         return data
 
     for ref in loop.state.get("acceptance_trials", []):
@@ -240,8 +272,12 @@ def trial(
     reason="",
     reuse=None,
     superseded=None,
+    expectation_correction=None,
 ):
     spec = spec_for(loop, code, driver)
+    if expectation_correction:
+        base = checked(loop.root, expectation_correction["base_version"])
+        spec = VerificationSpec(**{**base["spec"], "test_code": code})
     proposal = {
         "spec": asdict(spec),
         "regression": regression,
@@ -252,6 +288,8 @@ def trial(
         "candidate": candidate,
         "baseline_conditions": baseline_conditions(loop, spec, regression),
     }
+    if expectation_correction:
+        proposal["expectation_correction"] = expectation_correction
     identifier = hashlib.sha256(json.dumps(proposal, sort_keys=True).encode()).hexdigest()
     folder = loop.root / "acceptance" / identifier
     folder.mkdir(parents=True, exist_ok=True)
@@ -301,6 +339,7 @@ def trial(
             "selected_candidate": candidate_summary(loop, candidate),
             "superseded_candidate": candidate_summary(loop, superseded),
             "baseline_reused": bool(reuse),
+            "expectation_correction": expectation_correction,
             "next": "Inspect the real evidence, then freeze_acceptance or revise_acceptance. "
             "A runnable assertion failure may reproduce the defect; it is not proof that the expectation is correct. "
             "No proposed modification has run. freeze_acceptance releases only the selected_candidate above. "
@@ -374,14 +413,31 @@ def review(loop, decision, response):
             raise ValueError("User fixed acceptance cannot be revised")
         if not decision.test_code.strip():
             raise ValueError("Revision requires complete test_code; no code is guessed")
-        if loop.state.get("verification_spec"):
+        correction = None
+        if decision.evidence or decision.corrections:
+            if not loop.state.get("verification_spec"):
+                raise ValueError("Evidence corrections apply after freezing; revise the draft normally")
+            base_ref = loop.state["active_acceptance"]
+            base = checked(loop.root, base_ref)
+            driver = decision.test_driver or proposal["spec"].get("test_driver", ())
+            if list(driver) != list(base["spec"].get("test_driver", ())):
+                raise ValueError("Evidence correction cannot change the frozen test_driver")
+            correction = evidence.prepare(
+                loop, base_ref, base["spec"]["test_code"], decision.test_code,
+                decision.evidence, decision.corrections,
+            )
+        if loop.state.get("verification_spec") and not correction:
             if tests_ready_for_candidate(loop.state.get("verification", {})):
-                raise ValueError("Runnable behavior failed; repair source, not frozen acceptance")
+                raise ValueError(
+                    "Runnable behavior failed. Repair source, or use revise_acceptance with "
+                    "original evidence and itemized corrections to justify changed expected literals."
+                )
             old_code = loop.state["verification_spec"]["test_code"]
             if behavior(old_code) != behavior(decision.test_code):
                 raise ValueError(
-                    "Frozen revision may change module preparation only; test classes, "
-                    "helpers, fixtures, inputs and assertions must remain unchanged"
+                    "A preparation-only revision cannot change test classes, helpers, fixtures, "
+                    "inputs or assertions; these must remain unchanged. Use evidence and corrections "
+                    "for justified frozen expectation changes."
                 )
         trial(
             loop,
@@ -392,11 +448,12 @@ def review(loop, decision, response):
             candidate=current_trial.get("candidate") if current_trial else None,
             parent=current_ref["id"],
             reason=decision.reason,
+            expectation_correction=correction,
         )
         return
     if not current_trial or not current_trial.get("baseline_result"):
         raise ValueError("No completed acceptance trial can be frozen")
-    if decision.test_code or decision.test_driver:
+    if decision.test_code or decision.test_driver or decision.evidence or decision.corrections:
         raise ValueError(
             "freeze_acceptance confirms existing code; use revise_acceptance to submit code"
         )
@@ -442,6 +499,7 @@ def review(loop, decision, response):
             {
                 "outcome": "acceptance_frozen",
                 "trial_id": ref["id"],
+                "expectation_correction": proposal.get("expectation_correction"),
                 "next": "Submit source repair using this acceptance; previous versions remain recorded.",
             },
         )
@@ -454,9 +512,10 @@ def review(loop, decision, response):
 def compare(loop, snapshot, active_report, folder):
     validate(loop)
     versions = loop.state.get("acceptance_versions", [])
+    records = [checked(loop.root, ref) for ref in versions]
+    active = checked(loop.root, loop.state["active_acceptance"]) if versions else None
     rows, conflicts = [], []
-    for ref in versions:
-        version = checked(loop.root, ref)
+    for index, (ref, version) in enumerate(zip(versions, records)):
         baseline = checked(loop.root, version["baseline_result"])
         report = (
             active_report
@@ -470,12 +529,53 @@ def compare(loop, snapshot, active_report, folder):
                 baseline,
             )
         )
-        if ref != loop.state.get("active_acceptance") and (
-            report.get("status") != "passed"
-            and (tests_ready_for_candidate(baseline) or tests_ready_for_candidate(report))
+        # 旧结果保留对照。只对行为相同的历史版本投射已经冻结的逐项预期纠正，
+        # 不移除旧版本自己的准备条件，防止普通准备修订借此掩盖其它冲突。
+        effective_spec = deepcopy(version["spec"])
+        superseded_by = []
+        for later_ref, later in zip(versions[index + 1:], records[index + 1:]):
+            correction = later.get("expectation_correction")
+            if not correction:
+                continue
+            base = checked(loop.root, correction["base_version"])
+            if (behavior(effective_spec["test_code"]) != behavior(base["spec"]["test_code"])
+                    or effective_spec.get("test_driver") != base["spec"].get("test_driver")):
+                continue
+            try:
+                code = expectations.rewrite(
+                    effective_spec["test_code"],
+                    [evidence.Correction(**row) for row in correction["corrections"]],
+                )
+            except ValueError:
+                continue  # 旧片段身份不能确认时，仍保留原来的冲突检查。
+            effective_spec["test_code"] = code
+            superseded_by.append(later_ref["id"])
+        effective_report, effective_baseline = report, baseline
+        if superseded_by:
+            if effective_spec == active["spec"]:
+                effective_report = active_report
+                effective_baseline = checked(loop.root, active["baseline_result"])
+            else:
+                spec = VerificationSpec(**effective_spec)
+                projected = folder / ref["id"] / "corrected-expectations"
+                effective_baseline = run_report(
+                    loop, loop.baseline, spec, projected / "baseline", "baseline"
+                )
+                effective_report = run_report(
+                    loop, snapshot, spec, projected / "candidate", "candidate", effective_baseline
+                )
+        if ref != loop.state.get("active_acceptance") and not (
+            superseded_by and effective_spec == active["spec"]
+        ) and (
+            effective_report.get("status") != "passed"
+            and (tests_ready_for_candidate(effective_baseline)
+                 or tests_ready_for_candidate(effective_report))
         ):
             conflicts.append(ref["id"])
-        rows.append({"trial_id": ref["id"], "baseline": baseline, "candidate": report})
+        rows.append({"trial_id": ref["id"], "baseline": baseline, "candidate": report,
+                     "superseded_expectations_by": superseded_by,
+                     "effective_spec": effective_spec, "effective_baseline": effective_baseline,
+                     "effective_candidate": effective_report})
     result = {
         "versions": rows,
         "conflicts": conflicts,

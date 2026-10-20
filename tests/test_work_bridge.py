@@ -220,3 +220,52 @@ def test_bridge_keeps_trial_freeze_edit_and_real_rework_order(tmp_path):
     for number, plan in enumerate(plans, 1):
         stored = json.loads((directory / "plans" / f"p{number:04}" / "plan.json").read_text())
         assert stored["plan"]["steps"][0]["command"] == plan["steps"][0]["command"]
+
+
+def test_acceptance_pause_retains_container_receipt_without_terminal_cleanup(tmp_path):
+    from test_task_runner import CODE, Model
+    from support import python_command
+
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'sample.py').write_text('def value():\n    return 0\n')
+    command = python_command(
+        "from pathlib import Path; Path('sample.py').write_text('def value():\\n    return 2\\n')"
+    )
+    model = Model([{
+        'kind': 'candidate', 'note': '保存失败后的断点', 'test_code': CODE,
+        'steps': [{'id': 'edit', 'op': 'shell', 'command': command}],
+    }])
+    receipt = {'container': 'retained-container', 'stopped': True}
+
+    class PausableEnvironment(OfflineEnvironment):
+        def output_limit_stop_receipt(self):
+            return receipt
+
+    runner_type = bridge.WorkRunner
+
+    def one_round_runner(*args, **kwargs):
+        return runner_type(*args, **kwargs, max_rounds=1)
+
+    task, events = '3' * 32, []
+    job = {'task_id': task, 'repo': str(repo), 'request': 'value must return 4',
+           'execution_binding': {'image': 'sha256:' + 'b' * 64, 'runtime': {}}}
+    with patch.object(bridge, 'require_binding', side_effect=lambda repo, value: value), patch.object(
+        bridge, 'WorkRunner', side_effect=one_round_runner,
+    ), patch('agent.storage.resources.release_task_resources') as cleanup:
+        result = bridge.run_work(
+            job, lambda kind, fact: events.append(fact), lambda: [], model=model,
+            environment_factory=PausableEnvironment, root=tmp_path / 'state',
+        )
+    assert result['status'] == 'acceptance_limit_reached'
+    assert result['acceptance_limit']['completed_rounds'] == 1
+    assert json.loads((tmp_path / 'state/tasks' / task / 'pause-container.json').read_text()) == receipt
+    assert events[-1]['acceptance_limit'] == result['acceptance_limit']
+    cleanup.assert_not_called()
+
+
+def test_active_acceptance_pause_cannot_continue_after_return():
+    runner = object.__new__(bridge.WorkRunner)
+    runner.state = {'status': 'needs_plan', 'acceptance_limit': {'active': True}}
+    runner.yield_boundary = False
+    assert not runner.continue_after_return()

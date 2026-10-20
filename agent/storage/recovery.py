@@ -94,6 +94,7 @@ def code_key(root=None):
         'agent/task/dispatch.py',
         'agent/task/dialogue.py',
         'agent/task/output_limit.py',
+        'agent/task/acceptance_limit.py',
         'agent/task/operations.py',
         'agent/storage/preferences.py',
         'agent/settings.py',
@@ -123,6 +124,8 @@ def code_key(root=None):
         'agent/task/repair.py',
         'resources/repair.schema.json',
         'agent/acceptance/revisions.py',
+        'agent/acceptance/evidence.py',
+        'agent/acceptance/expectations.py',
         'resources/acceptance-review.schema.json',
         'agent/acceptance/contracts.py',
         'agent/acceptance/runner.py',
@@ -170,7 +173,12 @@ def code_key(root=None):
 def restore(loop, stored, identity):
     if stored.get('hard_interruption') or (loop.root / 'hard-interruption.json').exists():
         return conflict(loop, stored, 'Operation was forcefully interrupted; inspect retained evidence before continuing')
-    if stored.get('identity') != identity or stored.get('code_key') != code_key():
+    from agent.task import acceptance_limit
+
+    legacy = acceptance_limit.is_legacy_exhausted(stored)
+    if stored.get('identity') != identity or (
+        stored.get('code_key') != code_key() and not legacy
+    ):
         raise ValueError('Task or engine changed; stored plan was not executed')
     if stored.get('environment_key') != environment_key(loop.environment):
         return conflict(loop, stored, 'Execution environment changed')
@@ -295,6 +303,24 @@ def restore(loop, stored, identity):
     # ========================================================================
     from agent.task.output_limit import resume_validated
 
+    if legacy:
+        # 已审查旧版的次数终态仅在显式人工续跑时升级；不迁移其它旧检查点。
+        continuation = acceptance_limit.resume_input(loop)
+        if not continuation:
+            return conflict(loop, stored, '验收额度已用完，请明确继续原任务以恢复断点。')
+        rounds = len(stored['rounds'])
+        ledger = {'round_limit': rounds, 'round_increment': rounds}
+        token = continuation.get('acceptance_pause_id')
+        if token != acceptance_limit._value(stored, ledger)['pause_id']:
+            return conflict(loop, stored, '继续请求不属于当前暂停，请刷新后重新确认。')
+        stored['acceptance_budget'] = ledger
+        previous_key = stored['code_key']
+        stored['code_key'] = loop.code_key
+        acceptance_limit.release_unexecuted_legacy_plan(loop)
+        acceptance_limit.pause(loop, persist=False)
+        loop.persist('acceptance_checkpoint_upgraded', {
+            'previous_code_key': previous_key, 'completed_steps_not_replayed': True,
+        })
     resume_validated(loop)
     if stored['status'] == 'verified_success':
         loop.reused_result = True
@@ -303,6 +329,10 @@ def restore(loop, stored, identity):
     if loop.budget.cancelled:
         stored.update(status='task_cancelled', reason=loop.budget.cancel_reason)
         return loop.result()
+    if acceptance_limit.active(stored):
+        acceptance_limit.resume_validated(loop)
+        if acceptance_limit.active(stored):
+            return loop.result()
     if stored['status'] in {'paused', 'awaiting_user'}:
         if not getattr(loop, 'resume_without_input', True):
             return loop.result()

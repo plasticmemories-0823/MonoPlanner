@@ -121,7 +121,7 @@ export class ProjectEnvironmentMonitor {
       if (!response.ok)
         throw new Error(value.error || "无法连接环境服务，请稍后重新连接。");
       if (path === "/workspace/execution") {
-        // 旧版保存操作成功后，同样读取公开状态。
+        // 手动环境保存成功后，读取包含 mode/status 的统一公开状态。
         await this.request();
         return;
       }

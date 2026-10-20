@@ -24,6 +24,7 @@ KEY_EVENTS = {
     'environment_preparation', 'plan_accepted', 'plan_rejected', 'plan_finished',
     'acceptance_trial_finished', 'final_acceptance_finished', 'user_input_applied',
     'paused', 'task_returned', 'work_state', 'environment',
+    'acceptance_limit_reached', 'acceptance_limit_continued',
 }
 
 
@@ -477,7 +478,9 @@ class Scheduler:
         if fault:
             return [{'id': fault['id'], 'kind': 'pause', 'text': ''}]
         return [{'id': row['id'], 'kind': 'message' if row['kind'] == 'supplement' else row['kind'],
-                 'text': row['value'].get('text', '')}
+                 'text': row['value'].get('text', ''),
+                 **({'acceptance_pause_id': row['acceptance_pause_id']}
+                    if row.get('acceptance_pause_id') else {})}
                 for row in self.store.commands(task=task)
                 if row['kind'] in {'pause', 'resume', 'supplement'}]
 
@@ -491,8 +494,9 @@ class Scheduler:
     def _emit(self, task, kind, payload):
         work = self.store.work(task)
         if kind == 'work_state':
-            allowed = {key: payload[key] for key in ('status', 'reason', 'usage', 'applied_inputs')
-                       if key in payload}
+            allowed = {key: payload[key] for key in (
+                'status', 'reason', 'usage', 'applied_inputs', 'acceptance_limit',
+            ) if key in payload}
             seq = self.store.work_state(task, **allowed, event=payload.get('event'),
                                         details=payload.get('details', {}))
         else:
@@ -505,7 +509,8 @@ class Scheduler:
             seq = self.store.record_event(work['conversation_id'], 'work_fact',
                                           {'task_id': task, 'event': kind, **safe})
         relevant = payload.get('event', kind)
-        if payload.get('status') in {'preparation_failed', 'runtime_error'}:
+        if payload.get('status') in {'preparation_failed', 'runtime_error',
+                                     'acceptance_limit_reached'}:
             self.store.finish_progress(task, seq)
             return
         if relevant in KEY_EVENTS:
@@ -514,13 +519,18 @@ class Scheduler:
 
     def _work(self, job):
         task = job['task_id']
+        attempted = set()
         try:
+            attempted = {row['id'] for row in self.store.commands(task=task)
+                         if row['kind'] in {'resume', 'supplement'}}
             self.ensure_dispatch_available()
             result = self.work_factory(job, lambda kind, data: self.emit(task, kind, data),
                                        lambda: self.controls(task))
             self.emit(task, 'work_state', {
                 'status': result['status'], 'reason': result.get('stop_reason', result.get('reason', '')),
                 'usage': result.get('usage', {}), 'applied_inputs': result.get('applied_inputs', []),
+                **({'acceptance_limit': result['acceptance_limit']}
+                   if 'acceptance_limit' in result else {}),
             })
             if result['status'] in {'preparation_failed', 'runtime_error'}:
                 self.store.publish(job['conversation_id'], 'work:' + task + ':failure',
@@ -538,6 +548,14 @@ class Scheduler:
             except (OSError, sqlite3.Error):
                 pass  # 已闭锁；不能再把写入失败伪装成已保存的终态。
         finally:
+            # 入口失败或拒绝的旧控制必须结束，不能在同一暂停状态反复派发。
+            try:
+                for row in self.store.commands(task=task):
+                    if row['id'] in attempted:
+                        self.store.command_state(job['conversation_id'], row['id'], 'failed',
+                                                 error='WorkControlNotApplied')
+            except (OSError, sqlite3.Error) as error:
+                self.storage_failed('work_control_completion', error)
             with self.lock:
                 self.works.discard(task)
                 self.active_jobs.pop(task, None)
@@ -554,6 +572,9 @@ class Scheduler:
                 through = pending['pending_seq']
                 return
             before = self.store.work(task)
+            if before and before['status'] == 'acceptance_limit_reached':
+                through = pending['pending_seq']
+                return
             facts = self.chatbot.work_facts(conversation, pending['reported_seq'], 50,
                                             latest=False, through=pending['pending_seq'])
             through = facts['cursor']

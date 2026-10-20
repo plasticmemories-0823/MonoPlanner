@@ -56,6 +56,14 @@ export type StorageFailure = {
   operation: string;
   dispatch_suspended: true;
 };
+export type AcceptanceLimit = {
+  active: boolean;
+  completed_rounds: number;
+  round_limit: number;
+  round_increment: number;
+  pause_id: string;
+  last_verification_status: string;
+};
 export type ConversationSnapshot = {
   thread_id: string;
   status: string;
@@ -67,6 +75,7 @@ export type ConversationSnapshot = {
     status: string;
     reason?: string;
     revision?: number;
+    acceptance_limit?: AcceptanceLimit | null;
   } | null;
   repo: string;
   runtime_settings?: RuntimeSettings;
@@ -88,6 +97,7 @@ export type ConversationCommand = {
   text?: string;
   repo?: string;
   runtime_settings?: Record<string, unknown>;
+  acceptance_pause_id?: string;
 };
 
 export type CommandReceipt = {
@@ -151,4 +161,26 @@ export function canSupplementWork(status?: string): boolean {
   return ["queued", "running", "needs_plan", "executing", "paused", "awaiting_user"].includes(
     status || "",
   );
+}
+
+/** 恢复只能来自显式控制；未知状态、普通聊天和补充不能扩展验收预算。 */
+export function canResumeWork(status?: string): boolean {
+  return ["paused", "awaiting_user", "output_limit_reached", "acceptance_limit_reached"].includes(
+    status || "",
+  );
+}
+
+export function acceptanceLimitLabel(limit?: AcceptanceLimit | null): string | null {
+  if (!limit?.active) return null;
+  return `已完成 ${limit.completed_rounds} / ${limit.round_limit} 轮验收，等待你决定是否追加 ${limit.round_increment} 轮`;
+}
+
+export function resumeCommand(work: ConversationSnapshot["work"], id: string): ConversationCommand {
+  return {
+    id,
+    kind: "resume",
+    ...(work?.acceptance_limit?.active
+      ? { acceptance_pause_id: work.acceptance_limit.pause_id }
+      : {}),
+  };
 }

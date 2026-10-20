@@ -12,6 +12,7 @@ from agent.acceptance import revisions
 from agent.storage.records import digest, save
 from agent.model.errors import ModelInterrupted, ModelRequestNotSent
 from agent.rag.rewrite import RewriteUnknown
+from agent.task import acceptance_limit
 
 
 def execute_pending(self):
@@ -35,8 +36,8 @@ def _execute_pending(self):
             if self.state["verification"]["status"] == "passed"
             else "verification_failed"
         )
-    if plan.kind == "candidate" and len(self.state["rounds"]) >= self.max_rounds:
-        return self.finish_plan("candidate_limit_reached")
+    if plan.kind == "candidate" and acceptance_limit.exhausted(self):
+        return acceptance_limit.pause(self)
     prior = {r["id"]: r for r in pending["rows"]}
     while pending["cursor"] < len(plan.steps):
         self.budget.check_request(0)
@@ -140,8 +141,8 @@ def _execute_pending(self):
 
 
 def final_acceptance(self):
-    if len(self.state["rounds"]) >= self.max_rounds:
-        return self.finish_plan("candidate_limit_reached")
+    if acceptance_limit.exhausted(self):
+        return acceptance_limit.pause(self)
     pending = self.state["pending"]
     folder = self.root / "feedback" / pending["id"]
     if self.optimize_source:
@@ -254,4 +255,6 @@ def finish_plan(self, outcome):
         status=status,
         reason=reason,
     )
+    if outcome == "verification_failed" and acceptance_limit.exhausted(self):
+        acceptance_limit.pause(self, persist=False)
     self.persist("plan_finished", {"plan": self.state["last_plan"], "outcome": outcome})

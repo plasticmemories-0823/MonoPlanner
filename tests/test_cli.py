@@ -1,4 +1,4 @@
-"""P0338 入口可离线运行，并拒绝已移除的 CLI 模式。"""
+"""当前 CLI 入口可离线运行，并拒绝已移除的模式。"""
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
@@ -65,6 +65,38 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(run.call_args.args[0]['task_id'], saved['task_id'])
                 self.assertEqual([row['kind'] for row in run.call_args.args[2]()], ['resume'])
                 self.assertEqual((root / 'bridge-job.json').read_bytes(), raw)
+
+    def test_acceptance_extension_requires_explicit_flag_and_bound_pause(self):
+        import json
+        from agent.task.acceptance_limit import STATUS
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name) / 'records'
+            repo = Path(name) / 'repo'
+            repo.mkdir()
+            with patch('agent.cli.tasks.run_work', return_value={'status': 'paused'}), patch(
+                'agent.cli.tasks._history', return_value=None
+            ), redirect_stdout(io.StringIO()):
+                persistent_main(['--state-dir', str(root), '--repo', str(repo), '--task', 'task'])
+            original = (root / 'bridge-job.json').read_bytes()
+            stored = {'status': STATUS, 'acceptance_limit': {
+                'active': True, 'pause_id': 'saved-pause', 'round_increment': 3,
+                'round_limit': 3, 'completed_rounds': 3, 'last_verification_status': 'failed',
+            }}
+            with patch('agent.cli.tasks._history', return_value=stored), patch(
+                'agent.cli.tasks.run_work', return_value={'status': STATUS}
+            ) as run, redirect_stdout(io.StringIO()):
+                persistent_main(['--state-dir', str(root), '--status'])
+                run.assert_not_called()
+                persistent_main(['--state-dir', str(root)])
+                self.assertEqual(run.call_args.args[2](), [])
+                persistent_main(['--state-dir', str(root), '--continue-acceptance'])
+                controls = run.call_args.args[2]()
+                self.assertEqual(len(controls), 1)
+                self.assertEqual(controls[0]['acceptance_pause_id'], 'saved-pause')
+                self.assertEqual(controls[0]['kind'], 'resume')
+                self.assertEqual(run.call_args.args[0]['task_id'], json.loads(original)['task_id'])
+                self.assertEqual((root / 'bridge-job.json').read_bytes(), original)
 
     def test_persistent_records_cannot_be_written_inside_work_source(self):
         with tempfile.TemporaryDirectory() as name, patch('agent.cli.tasks.run_work') as run:

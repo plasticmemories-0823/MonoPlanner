@@ -17,10 +17,3 @@ def build_c_driver(check, raw):
             + 'double agent_value(' + parameters + ') {\n' + body + '\n}\n'
             + 'int main(void) {\n' + calls + '\nreturn 0;\n}\n')
 '''
-
-
-def build_c_driver(check, raw):
-    """本地测试与隔离后端使用完全相同的驱动。"""
-    scope = {}
-    exec(DRIVER_SOURCE, scope)
-    return scope['build_c_driver'](check, raw)

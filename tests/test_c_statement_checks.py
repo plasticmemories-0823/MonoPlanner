@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from agent.acceptance.artifact_checks import load_artifact_checks
 from agent.acceptance.behavior import declaration_only
-from agent.acceptance.c_driver import build_c_driver
+from agent.acceptance.c_driver import DRIVER_SOURCE
 from agent.acceptance.runner import AcceptanceRun
 from agent.acceptance.contracts import VerificationSpec
 from agent.execution.local import LocalEnvironment
@@ -22,6 +22,13 @@ CHECK = {
     'result_variable': 'y',
     'cases': [{'values': [0.0], 'expected': 1.0}],
 }
+
+
+def build_c_driver(check, raw):
+    """测试直接运行送入隔离后端的同一份驱动原文。"""
+    scope = {}
+    exec(DRIVER_SOURCE, scope)
+    return scope['build_c_driver'](check, raw)
 
 
 def declaration(check=None):

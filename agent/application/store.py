@@ -11,15 +11,19 @@ import uuid
 
 from agent.storage.preferences import Preferences
 from agent.storage.usage import summarize
+from agent.task.acceptance_limit import STATUS as ACCEPTANCE_LIMIT
 
 
 ACTIVE = {'queued', 'running', 'needs_plan', 'executing', 'pausing'}
 TERMINAL = {'verified_success', 'task_blocked', 'task_cancelled', 'chat_complete',
             'existing_complete', 'stalled', 'budget_exhausted', 'preparation_failed'}
 UNKNOWN = {'model_request_unknown', 'execution_unknown', 'state_conflict'}
-RESUMABLE = {'paused', 'awaiting_user', 'output_limit_reached'}
+RESUMABLE = {'paused', 'awaiting_user', 'output_limit_reached', ACCEPTANCE_LIMIT}
 SUPPLEMENTABLE = (ACTIVE - {'pausing'}) | {'paused', 'awaiting_user'}
-WORK_STATE_FIELDS = {'status', 'reason', 'updated_at', 'revision', 'usage', 'control_unconfirmed'}
+WORK_STATE_FIELDS = {
+    'status', 'reason', 'updated_at', 'revision', 'usage', 'control_unconfirmed', 'acceptance_limit',
+}
+_UNSET = object()
 
 
 class Conflict(ValueError):
@@ -85,6 +89,28 @@ class ApplicationStore:
                 CREATE TABLE IF NOT EXISTS app_titles (
                     conversation TEXT PRIMARY KEY, data TEXT NOT NULL);
             ''')
+            db.execute('BEGIN IMMEDIATE')
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(app_commands)')}
+            if 'acceptance_pause_id' not in columns:
+                db.execute('ALTER TABLE app_commands ADD COLUMN acceptance_pause_id TEXT')
+        self.project_acceptance_limits()
+
+    def project_acceptance_limits(self):
+        """仅迁移已验证的旧轮次耗尽展示；不修改或执行内核检查点。"""
+        from agent.task.acceptance_limit import legacy_projection
+
+        with self.connection() as db:
+            rows = db.execute(
+                "SELECT id,data FROM app_work_state WHERE json_extract(data,'$.status')='stalled' "
+                "AND json_extract(data,'$.reason')='Final candidate attempt limit reached'"
+            ).fetchall()
+        for row in rows:
+            limit = legacy_projection(self.root / 'tasks' / row['id'])
+            if limit:
+                previous = json.loads(row['data'])
+                self.work_state(row['id'], ACCEPTANCE_LIMIT, acceptance_limit=limit,
+                                expected_revision=previous['revision'],
+                                event='acceptance_limit_migrated')
 
     @contextmanager
     def connection(self):
@@ -225,7 +251,7 @@ class ApplicationStore:
 
     def submit(self, conversation, command):
         conversation = identity(conversation)
-        allowed = {'id', 'kind', 'text', 'repo', 'runtime_settings'}
+        allowed = {'id', 'kind', 'text', 'repo', 'runtime_settings', 'acceptance_pause_id'}
         if not isinstance(command, dict) or set(command) - allowed:
             raise ValueError('Invalid command fields')
         command = dict(command)
@@ -246,6 +272,11 @@ class ApplicationStore:
             if repo and not repo.is_dir():
                 raise ValueError('Workspace must be an existing directory')
             command['repo'] = str(repo) if repo else ''
+        if 'acceptance_pause_id' in command and (
+            kind != 'resume' or not isinstance(command['acceptance_pause_id'], str)
+            or not 1 <= len(command['acceptance_pause_id']) <= 200
+        ):
+            raise ValueError('Invalid acceptance pause identity')
         body = encode(command)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -257,7 +288,8 @@ class ApplicationStore:
             if old:
                 if old['body'] != body:
                     raise Conflict('Command identity was reused for different content')
-                return {'received': True, 'id': command['id'], 'applied': old['state'] == 'applied'}
+                return {'received': True, 'id': command['id'],
+                        'applied': old['state'] in {'applied', 'coalesced'}}
             task = self._work(db, value.get('work_id'))
             if kind == 'workspace' and task and task['status'] not in TERMINAL:
                 raise Conflict('Pause the original task and select the workspace in a new conversation')
@@ -268,8 +300,25 @@ class ApplicationStore:
                 raise Conflict('Unknown work results require inspection, not replay')
             if kind == 'resume' and task and task['status'] not in RESUMABLE:
                 raise Conflict('当前任务不处于可恢复状态')
+            acceptance_pause_id = None
+            duplicate_resume = False
+            if kind == 'resume' and task:
+                limit = task.get('acceptance_limit') or {}
+                acceptance_pause_id = limit.get('pause_id') if limit.get('active') else None
+                expected = command.get('acceptance_pause_id')
+                if (not acceptance_pause_id
+                        and (task['status'] == ACCEPTANCE_LIMIT or limit.get('active'))):
+                    raise Conflict('验收暂停记录不完整，请先核对任务记录')
+                if (limit.get('active') or expected is not None) and expected != acceptance_pause_id:
+                    raise Conflict('验收暂停状态已变化，请刷新后重新决定是否继续')
+                if acceptance_pause_id:
+                    duplicate_resume = bool(db.execute(
+                        "SELECT 1 FROM app_commands WHERE task_id=? AND kind='resume' "
+                        "AND acceptance_pause_id=? AND state IN ('pending','running','applied')",
+                        (task['task_id'], acceptance_pause_id),
+                    ).fetchone())
             if kind == 'supplement' and task and task['status'] not in SUPPLEMENTABLE:
-                raise Conflict('当前任务不能接收补充；输出上限请先明确恢复，终态请新建工作')
+                raise Conflict('当前任务不能接收补充；输出或验收轮次达到上限时请先点击继续任务')
             if kind in {'workspace', 'message'}:
                 before_configuration = (value['repo'], value['runtime_settings'])
                 if 'repo' in command and command['repo'] != value['repo']:
@@ -280,9 +329,13 @@ class ApplicationStore:
                     value['runtime_settings'] = command['runtime_settings']
                 if before_configuration != (value['repo'], value['runtime_settings']):
                     value['configuration_revision'] = value.get('configuration_revision', 0) + 1
-            db.execute('INSERT INTO app_commands(id,conversation,kind,body,state,task_id) VALUES(?,?,?,?,?,?)',
-                       (command['id'], conversation, kind, body, 'pending',
-                        task['task_id'] if task and kind != 'message' else None))
+            db.execute(
+                'INSERT INTO app_commands(id,conversation,kind,body,state,task_id,acceptance_pause_id) '
+                'VALUES(?,?,?,?,?,?,?)',
+                (command['id'], conversation, kind, body,
+                 'coalesced' if duplicate_resume else 'pending',
+                 task['task_id'] if task and kind != 'message' else None, acceptance_pause_id),
+            )
             if kind in {'message', 'supplement'}:
                 self._message(db, conversation, command['id'], 'human', command['text'], 'user')
                 if not value['title']['revision']:
@@ -295,7 +348,7 @@ class ApplicationStore:
                 self._put_work_state(db, task)
             self._put(db, value)
             self._event(db, conversation, 'command_received', {'id': command['id'], 'kind': kind})
-        return {'received': True, 'id': command['id'], 'applied': False}
+        return {'received': True, 'id': command['id'], 'applied': duplicate_resume}
 
     def commands(self, *, conversation=None, task=None, states=('pending',)):
         query = 'SELECT * FROM app_commands WHERE state IN (%s)' % ','.join('?' for _ in states)
@@ -412,19 +465,27 @@ class ApplicationStore:
             self._event(db, conversation, 'work_created', {'task_id': task})
         return work
 
-    def work_state(self, task, status=None, *, reason=None, usage=None, applied_inputs=(), **facts):
+    def work_state(self, task, status=None, *, reason=None, usage=None, applied_inputs=(),
+                   acceptance_limit=_UNSET, expected_revision=None, **facts):
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT conversation,data FROM app_work_state WHERE id=?', (task,)).fetchone()
             if row is None:
                 raise KeyError('Work task does not exist')
             work = {**json.loads(row['data']), 'task_id': task, 'conversation_id': row['conversation']}
+            if expected_revision is not None and work['revision'] != expected_revision:
+                return None
             if status is not None:
                 work['status'] = status
             if reason is not None:
                 work['reason'] = reason
             if usage is not None:
                 work['usage'] = usage
+            if acceptance_limit is not _UNSET:
+                work['acceptance_limit'] = acceptance_limit
+            limit = work.get('acceptance_limit') or {}
+            if limit.get('active') and work['status'] in {'paused', 'awaiting_user'}:
+                work['status'] = ACCEPTANCE_LIMIT
             # 终止未确认属于持久保护，后来的正常收尾或再次暂停不能将它变为可恢复。
             if work.get('control_unconfirmed'):
                 work['status'] = 'execution_unknown'
@@ -440,8 +501,26 @@ class ApplicationStore:
                            (task, command_id))
             seq = self._event(db, work['conversation_id'], 'work_state',
                               {'task_id': task, 'status': work['status'], 'reason': work['reason'],
-                               'revision': work['revision'], **facts})
+                               'revision': work['revision'],
+                               'acceptance_limit': work.get('acceptance_limit'), **facts})
+            if work['status'] == ACCEPTANCE_LIMIT and limit.get('active'):
+                self._acceptance_notice(db, work, limit)
         return seq
+
+    def _acceptance_notice(self, db, work, limit):
+        """达到轮次上限的提示随状态一起提交，不依赖进度模型可用性。"""
+        verification = {'failed': '未通过', 'passed': '通过', 'error': '异常'}.get(
+            limit.get('last_verification_status'), '尚未确认',
+        )
+        text = (
+            f"已完成 {limit['completed_rounds']} 轮验收，达到当前 {limit['round_limit']} 轮上限，"
+            f"任务已暂停。最近一次验收：{verification}。"
+            f"点击“继续任务”可追加 {limit['round_increment']} 轮，从当前断点继续。"
+            '现有改动、执行记录和验收标准均已保留，等待你决定是否继续。'
+        )
+        self._message(db, work['conversation_id'],
+                      'acceptance-limit:' + work['task_id'] + ':' + limit['pause_id'],
+                      'ai', text, 'system')
 
     def control_unconfirmed(self, task, command_id):
         with self.connection() as db:
@@ -681,6 +760,7 @@ class ApplicationStore:
         # 上次可能在磁盘已满时退出，无法保存停止回执。未派发原文仍保留，
         # 但重新打开应用不能自动发起付费请求、准备环境或继续旧补充。
         self.stop_pending(error='ServiceInterrupted')
+        self.project_acceptance_limits()
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute("UPDATE app_calls SET state='unknown',error='ServiceInterrupted' WHERE state='sent'")
@@ -748,7 +828,7 @@ class ApplicationStore:
         usage = self.usage(conversation)
         public_work = ({key: work.get(key) for key in
                        ('task_id', 'input_id', 'repo', 'project_path', 'status', 'reason', 'revision',
-                        'created_at', 'updated_at')}
+                        'created_at', 'updated_at', 'acceptance_limit')}
                        if work else None)
         return {**value, 'work': public_work, 'messages': messages, 'pending_messages': [],
                 'workspace_bound': bool(work), 'usage': usage, 'event_cursor': cursor,

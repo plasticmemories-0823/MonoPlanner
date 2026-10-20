@@ -126,6 +126,7 @@ const stageLabels: Record<string, string> = {
   running: "工作正在进行",
   pausing: "正在停止当前操作",
   paused: "工作已暂停",
+  acceptance_limit_reached: "验收轮次已用完，等待手动继续",
   awaiting_user: "工作等待补充或继续",
   preparation_failed: "开工准备未完成",
   task_blocked: "工作需要处理后继续",
@@ -166,7 +167,13 @@ export function visibleWorkActivity(
   }
   const ended = ["verified_success", "existing_complete"].includes(work.status)
     ? "completed"
-    : ["paused", "awaiting_user", "output_limit_reached", "task_cancelled"].includes(work.status)
+    : [
+          "paused",
+          "awaiting_user",
+          "output_limit_reached",
+          "acceptance_limit_reached",
+          "task_cancelled",
+        ].includes(work.status)
       ? "interrupted"
       : ["preparation_failed", "task_blocked"].includes(work.status)
         ? "failed"

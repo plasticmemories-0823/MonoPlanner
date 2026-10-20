@@ -254,3 +254,14 @@ test("starting a new task cannot revive unfinished display rows from the previou
   assert.equal(rows[1].status, "running");
   assert.equal(original[0].status, "running", "originals remain untouched by display projection");
 });
+
+
+test("acceptance pause ends active diagnostics without calling the result unknown", () => {
+  const work = { task_id: "task", input_id: "user-1", status: "acceptance_limit_reached" };
+  const activity = visibleWorkActivity(
+    [{ id: "task-thinking", task_id: "task", kind: "thinking", status: "running", detail: "saved" }],
+    work,
+  );
+  assert.ok(activity.every((row) => row.status === "interrupted"));
+  assert.equal(activity.at(-1).label, "验收轮次已用完，等待手动继续");
+});

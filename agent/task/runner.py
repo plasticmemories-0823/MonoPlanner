@@ -56,6 +56,8 @@ class TaskRunner:
         work_rules_factory=None,
         user_request_id=None,
     ):
+        if type(max_rounds) is not int or max_rounds <= 0:
+            raise ValueError("max_rounds must be a positive integer")
         self.interactive, self.yield_boundary = interactive, yield_boundary
         self.event_sink, self.control_source = event_sink, control_source
         self.model, self.environment = model, environment
@@ -651,6 +653,9 @@ class TaskRunner:
             "repair_count": 0,
             "plan_error": "",
             "rounds": [],
+            "acceptance_budget": {
+                "round_increment": self.max_rounds, "round_limit": self.max_rounds,
+            },
             "seen_plans": [],
             "pending": None,
             "running_step": None,
@@ -711,12 +716,14 @@ class TaskRunner:
         report = f"{self.state['status']}: {self.state.get('reason', '')}"
         from agent.storage.usage import summarize
         from agent.task.output_limit import public as public_limit
+        from agent.task.acceptance_limit import public as public_acceptance_limit
 
         outcome = {
             "status": self.state["status"],
             "stop_reason": self.state.get("reason", ""),
             'pause_requested': self.state.get('pause_requested', False),
             'output_limit': public_limit(self.state),
+            'acceptance_limit': public_acceptance_limit(self.state),
             'usage': summarize(self.state),
             'existing_runs': self.state.get('existing_runs', []),
             "messages": [HumanMessage(content=self.state["request"]), AIMessage(content=report)],

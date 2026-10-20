@@ -32,7 +32,7 @@ import { DesktopCards } from "./desktop-controls";
 import { ExecutionPermissions } from "./execution-permissions";
 import { Resources } from "./resources";
 import { groupActivity } from "@/lib/work-diagnostics";
-import { canSupplementWork } from "@/lib/conversation-types";
+import { acceptanceLimitLabel, canResumeWork, canSupplementWork } from "@/lib/conversation-types";
 
 function StickyToBottomContent(props: {
   content: ReactNode;
@@ -87,7 +87,7 @@ export function Thread() {
 
   const stream = useStreamContext();
   const { repo, setRepo } = useWorkspace(stream.apiUrl, threadId ? stream.values.repo : undefined);
-  const { pause, resume, pauseRequested } = useRunControls(stream, threadId);
+  const { pause, resume, pauseRequested, controlPending } = useRunControls(stream, threadId);
   const messages = stream.messages;
   const [sending, setSending] = useState(false);
   const [sendKind, setSendKind] = useState<"message" | "supplement">("message");
@@ -597,21 +597,22 @@ export function Thread() {
                               ? stream.workRunning
                                 ? `${statusLabel(stream.values.work?.status)} · 聊天不会打断任务`
                                 : "正在回复"
-                              : statusLabel(stream.values.status)}
+                              : (stream.values.work?.status === "acceptance_limit_reached" &&
+                                  acceptanceLimitLabel(stream.values.work.acceptance_limit)) ||
+                                statusLabel(stream.values.status)}
                         </span>
                         {!stream.storageError &&
                           !stream.workRunning &&
-                          ["paused", "awaiting_user", "output_limit_reached"].includes(
-                            stream.values.work?.status || stream.values.status || "",
-                          ) && (
+                          canResumeWork(stream.values.work?.status) && (
                             <Button
                               type="button"
                               variant="ghost"
                               size="sm"
                               className="h-6 px-2 text-xs"
                               onClick={resume}
+                              disabled={controlPending}
                             >
-                              继续任务
+                              {controlPending ? "正在提交" : "继续任务"}
                             </Button>
                           )}
                       </div>

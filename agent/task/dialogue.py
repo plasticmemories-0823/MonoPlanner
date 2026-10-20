@@ -88,6 +88,21 @@ def apply_controls(loop):
         applied = loop.state.setdefault('applied_inputs', [])
         if control['id'] in applied:
             continue
+        from agent.task import acceptance_limit
+
+        if acceptance_limit.active(loop.state):
+            if control['kind'] == 'resume':
+                acceptance_limit.resume_validated(loop)
+            elif control['kind'] == 'pause':
+                applied.append(control['id'])
+                loop.state['pause_requested'] = True
+                loop.persist('paused', {'id': control['id']})
+            # 补充或普通消息不能暗中批准新的验收额度。
+            continue
+        if control['kind'] == 'resume' and control.get('acceptance_pause_id'):
+            applied.append(control['id'])
+            loop.persist('acceptance_continue_stale', {'id': control['id']})
+            continue
         if control['kind'] == 'message':
             if loop.state.get('pending'):
                 loop.finish_plan('superseded_by_user')

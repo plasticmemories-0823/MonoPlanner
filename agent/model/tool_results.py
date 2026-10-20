@@ -124,7 +124,7 @@ def normalize_result(tool_name, value, *, source_version=None, project=None):
         _collection(result, 'sources', lambda item: _name(item.get('url')))
     elif tool_name == 'list_files':
         _collection(result, 'entries', lambda item: _path(item.get('path')))
-    elif tool_name in {'retrieve_evidence', 'search_files'}:
+    elif tool_name == 'retrieve_evidence':
         _hits(result, source_version, project)
         _repository_map(result, source_version, project)
     elif tool_name == 'submit_plan':

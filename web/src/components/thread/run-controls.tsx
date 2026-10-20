@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useStreamContext } from "@/providers/Stream";
-import { commandNotice } from "@/lib/conversation-types";
+import { commandNotice, resumeCommand, type ConversationCommand } from "@/lib/conversation-types";
 
 export function statusLabel(status?: string) {
   return (
@@ -23,6 +23,7 @@ export function statusLabel(status?: string) {
         awaiting_user: "等待补充或继续",
         task_blocked: "任务受阻",
         runtime_error: "任务已停止，运行记录已保留",
+        acceptance_limit_reached: "验收轮次已用完，等待手动继续",
         output_limit_reached: "回复达到输出上限，等待手动继续",
         model_request_unknown: "模型请求结果未确认，已保留记录",
         web_request_unknown: "联网请求结果未确认，已保留记录",
@@ -44,8 +45,9 @@ export function useRunControls(
   threadId: string | null,
 ) {
   const [pauseRequested, setPauseRequested] = useState(false);
+  const [controlPending, setControlPending] = useState(false);
   const busy = useRef(false);
-  const pending = useRef<{ kind: "pause" | "resume"; id: string } | null>(null);
+  const pending = useRef<ConversationCommand | null>(null);
   useEffect(() => {
     setPauseRequested(false);
     pending.current = null;
@@ -57,8 +59,19 @@ export function useRunControls(
   async function control(kind: "pause" | "resume") {
     if (!threadId || busy.current) return;
     busy.current = true;
+    setControlPending(true);
     if (kind === "pause") setPauseRequested(true);
-    if (pending.current?.kind !== kind) pending.current = { kind, id: crypto.randomUUID() };
+    const pauseId = stream.values.work?.acceptance_limit?.active
+      ? stream.values.work.acceptance_limit.pause_id
+      : undefined;
+    if (
+      pending.current?.kind !== kind ||
+      (kind === "resume" && pending.current.acceptance_pause_id !== pauseId)
+    )
+      pending.current =
+        kind === "resume"
+          ? resumeCommand(stream.values.work, crypto.randomUUID())
+          : { kind, id: crypto.randomUUID() };
     try {
       const receipt = await stream.command(pending.current, threadId);
       const notice = commandNotice(kind, receipt);
@@ -72,12 +85,14 @@ export function useRunControls(
       toast.error(error instanceof Error ? error.message : "请求结果未确认，请重新连接后核对。");
     } finally {
       busy.current = false;
+      setControlPending(false);
       setPauseRequested(false);
     }
   }
   return {
     pause: () => control("pause"),
     resume: () => control("resume"),
+    controlPending,
     pauseRequested:
       pauseRequested || (!stream.storageError && stream.values.work?.status === "pausing"),
   };
