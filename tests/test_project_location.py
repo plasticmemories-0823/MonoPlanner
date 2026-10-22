@@ -148,7 +148,7 @@ def test_creation_precedes_environment_and_failed_preparation_is_not_retried(tmp
     assert (store.root / 'tasks' / job['task_id'] / 'project-location.json').exists()
 
 
-def test_start_work_rejects_removed_argumentless_entry(tmp_path):
+def test_prepare_work_rejects_removed_argumentless_entry(tmp_path):
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     store = ApplicationStore(tmp_path / 'state')
@@ -166,7 +166,7 @@ def test_start_work_rejects_removed_argumentless_entry(tmp_path):
         def invoke(self, messages):
             self.requests.append(messages)
             if len(self.requests) == 1:
-                return AIMessage(content='', tool_calls=[{'name': 'start_work', 'id': 'bad', 'args': {}}])
+                return AIMessage(content='', tool_calls=[{'name': 'prepare_work', 'id': 'bad', 'args': {}}])
             return AIMessage(content='需要先确认项目位置。')
 
     model = FakeModel()

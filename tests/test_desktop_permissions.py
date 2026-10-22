@@ -175,26 +175,6 @@ class DesktopPermissionsTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
 
-    def test_legacy_conversation_can_preview_but_cannot_change_permissions(self):
-        from tests.legacy.conversations import ConversationStore
-
-        # 原有预览是旧版创建的原件，新版只读它而不再为旧会话创建操作。
-        record = self.store.preview(self.thread, str(self.file), str(self.repo), [])
-        ConversationStore(self.store.root).save_session(self.thread, {
-            'repo': str(self.repo), 'task_id': 'a' * 32, 'status': 'paused',
-            'public_messages': [],
-        })
-        with TestClient(Starlette(routes=routes)) as client:
-            self.assertEqual(
-                client.get(f'/threads/{self.thread}/preview/{record["id"]}').status_code,
-                200,
-            )
-            result = client.post(
-                f'/threads/{self.thread}/permission', json={'mode': 'full'},
-                headers={'Origin': 'http://127.0.0.1:3000'},
-            )
-        self.assertEqual(result.status_code, 400)
-        self.assertEqual(Permissions(self.store.root).get(self.thread)['requested'], 'sandbox')
 
     @unittest.skipUnless(os.name == 'nt', 'Registered Windows applications')
     def test_unfinished_launch_is_not_replayed(self):

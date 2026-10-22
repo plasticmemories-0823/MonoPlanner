@@ -199,13 +199,13 @@ class ProjectDockerTests(unittest.TestCase):
             (self.repo / name).write_text('VALUE = 1\n')
         folder = self.root / 'cli-state'
         model = ScriptedModel([investigation(['one.py', 'two.py'])])
+        selected_model = model
 
         def execute(*args, **kwargs):
-            return run_work(*args, environment_factory=FixtureDocker, **kwargs)
+            return run_work(*args, environment_factory=FixtureDocker,
+                            model=selected_model, **kwargs)
 
-        with patch('agent.cli.tasks.run_work', side_effect=execute), patch(
-            'agent.cli.tasks.LazyModel', return_value=model
-        ), redirect_stdout(io.StringIO()):
+        with patch('agent.cli.tasks.run_work', side_effect=execute), redirect_stdout(io.StringIO()):
             self.assertEqual(
                 main(
                     [
@@ -228,12 +228,13 @@ class ProjectDockerTests(unittest.TestCase):
         self.assertEqual(scope['excluded_projects'], [])
         before = [(p, p.read_bytes()) for p in records.glob('plans/*/*/result.json')]
         self.assertEqual(len(before), 1)
-        with patch('agent.cli.tasks.run_work', side_effect=execute), patch(
-            'agent.cli.tasks.LazyModel', return_value=BlockedModel()
-        ), redirect_stdout(io.StringIO()):
+        first_request = (records / 'requests/call-0001/request.json').read_bytes()
+        selected_model = BlockedModel()
+        with patch('agent.cli.tasks.run_work', side_effect=execute), redirect_stdout(io.StringIO()):
             self.assertEqual(main(['--state-dir', str(folder)]), 1)
         self.assertEqual(len(list(records.glob('plans/*/*/result.json'))), 2)
         self.assertEqual(before[0][0].read_bytes(), before[0][1])
+        self.assertEqual((records / 'requests/call-0001/request.json').read_bytes(), first_request)
         self.assertEqual(
             json.loads((records / 'project-scope.json').read_text(encoding='utf-8')), scope,
         )

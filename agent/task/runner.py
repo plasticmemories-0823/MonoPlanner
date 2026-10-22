@@ -7,8 +7,6 @@ import time
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages import message_to_dict, messages_from_dict, messages_to_dict
-from agent.task.instructions import ARTIFACT_RULES
-from agent.acceptance.artifact_checks import required_consumer, requested_calls
 from agent.model.client import configure_call, request_timeout
 from agent.model.errors import (
     ModelInterrupted,
@@ -55,6 +53,8 @@ class TaskRunner:
         runtime_settings=None,
         work_rules_factory=None,
         user_request_id=None,
+        confirmed_requirements=None,
+        recovery_id=None,
     ):
         if type(max_rounds) is not int or max_rounds <= 0:
             raise ValueError("max_rounds must be a positive integer")
@@ -78,6 +78,8 @@ class TaskRunner:
         self.runtime_settings = dict(runtime_settings or {})
         self.work_rules_factory = work_rules_factory
         self.user_request_id = user_request_id
+        self.confirmed_requirements = confirmed_requirements
+        self.recovery_id = recovery_id
         from agent.model.tools import CODING_TOOLS
 
         self.tools = CODING_TOOLS
@@ -173,9 +175,8 @@ class TaskRunner:
     # 模型请求的预算、记录与异常结算
     # ========================================================================
     def request_model(self, messages, purpose):
-        retrieval_rewrite = purpose == 'rag_rewrite'
-        request_tools = () if retrieval_rewrite else self.tools
-        pending_field = 'rag_request_pending' if retrieval_rewrite else 'request_pending'
+        request_tools = self.tools
+        pending_field = 'request_pending'
         selected = configure_call(
             self.model.bind_tools(request_tools),
             purpose,
@@ -183,7 +184,7 @@ class TaskRunner:
         )
         cap = getattr(selected, "max_output_tokens", 256000)
         cap = cap if type(cap) is int else 256000
-        if (purpose != 'compaction' and not retrieval_rewrite
+        if (purpose != 'compaction'
                 and self.state.get('baseline') and self.environment is not None):
             source_runtime.begin(self)
 
@@ -202,13 +203,12 @@ class TaskRunner:
             "reservation": ticket.reserved_tokens,
             "purpose": purpose,
         }
-        if not retrieval_rewrite:
-            self.state['context_usage'] = {
-                'used_tokens': estimate_input_tokens(messages, self.tools),
-                'window_tokens': CONTEXT_WINDOW_TOKENS,
-                'estimated': True,
-                'call': ticket.call_id,
-            }
+        self.state['context_usage'] = {
+            'used_tokens': estimate_input_tokens(messages, self.tools),
+            'window_tokens': CONTEXT_WINDOW_TOKENS,
+            'estimated': True,
+            'call': ticket.call_id,
+        }
         self.persist("model_request_started", self.state[pending_field])
 
         # ========================================================================
@@ -218,7 +218,7 @@ class TaskRunner:
         live = None
         received = False
         ending = 'unknown'
-        if (not retrieval_rewrite and self.event_sink
+        if (self.event_sink
                 and callable(getattr(type(selected), 'invoke_with_progress', None))):
             from agent.storage.live_reasoning import LiveReasoning
 
@@ -287,11 +287,6 @@ class TaskRunner:
         except Exception:
             self.budget.settle_request(ticket, None)
             self.state[pending_field] = None
-            if retrieval_rewrite:
-                self.state.setdefault('model_usage', []).append({
-                    'call': ticket.call_id, 'purpose': purpose, 'usage': None,
-                    'seconds': time.monotonic() - model_started,
-                })
             self.persist("model_request_error_unknown_usage")
             raise
         finally:
@@ -314,27 +309,26 @@ class TaskRunner:
             }
         )
         usage = response.usage_metadata
-        if (not retrieval_rewrite and usage
+        if (usage
                 and all(type(usage.get(k)) is int for k in ('input_tokens', 'output_tokens'))):
             self.state['context_usage'].update(
                 used_tokens=usage['input_tokens'] + usage['output_tokens'], estimated=False
             )
         raw = message_to_dict(response)
+        save(folder / "completion.json", {
+            "request": self.state[pending_field], "response_digest": digest(raw),
+            "seconds": time.monotonic() - model_started, "max_output_tokens": cap,
+        })
         save(folder / "response.json", raw)
         self.state[pending_field] = None
-        if retrieval_rewrite:
-            self.state['rag_rewrite_response'] = {
-                'call': ticket.call_id,
-                'record': (folder / 'response.json').relative_to(self.root).as_posix(),
-            }
-        elif purpose == 'compaction':
+        if purpose == 'compaction':
             self.state['compaction_pending'].update(
                 stage='response_saved', response=raw, call=ticket.call_id
             )
         else:
             self.state["response_pending"] = raw
         self.persist("model_response_received", {"call": ticket.call_id})
-        if not retrieval_rewrite and purpose != 'compaction':
+        if purpose != 'compaction':
             from agent.rag.integration import audit_work_citations
 
             audit_work_citations(self, raw, messages, folder)
@@ -345,11 +339,11 @@ class TaskRunner:
                 else 'completed'
             )
             live.finish(ending, response.additional_kwargs.get('reasoning_content', ''))
-        if purpose != 'compaction' and not retrieval_rewrite:
+        if purpose != 'compaction':
             from agent.task.output_limit import guard
 
             guard(self, raw)
-        if not retrieval_rewrite and self.state.get('baseline') and self.environment is not None:
+        if self.state.get('baseline') and self.environment is not None:
             source_runtime.collect(self)
         return raw
 
@@ -369,6 +363,11 @@ class TaskRunner:
         if finish in {"length", "content_filter", "aborted", "insufficient_system_resource"}:
             raise ValueError("Incomplete model response: " + str(finish))
         calls = response.tool_calls
+        if (len(calls) == 1 and not response.invalid_tool_calls
+                and calls[0]["name"] == "get_boundary_hints"):
+            from agent.acceptance.boundaries import Lookup
+
+            return Lookup.model_validate(calls[0]["args"]), raw
         if (
             calls
             and not response.invalid_tool_calls
@@ -430,6 +429,7 @@ class TaskRunner:
                 frozen = {
                     "test_code": current.get("test_code") or "",
                     "test_driver": list(current.get("test_driver", ())),
+                    "execution_checks": list(current.get("execution_checks", ())),
                     "regression_command": self.state["regression_command"],
                 }
                 for name, original in frozen.items():
@@ -438,12 +438,16 @@ class TaskRunner:
                         if name == "test_driver" and isinstance(value.get(name), (list, tuple))
                         else value.get(name)
                     )
+                    if name == "execution_checks" and plan is not None:
+                        supplied = [item.model_dump() for item in plan.execution_checks]
                     if supplied and supplied != original:
                         errors.append(
                             (
                                 ["/" + name],
                                 ValueError(
-                                    "Fixed " + name + " cannot be replaced during source repair"
+                                    "Fixed " + name + " cannot be replaced during source repair. "
+                                    "Use revise_acceptance instead. "
+                                    + revisions.evidence.REVISION_GUIDANCE
                                 ),
                             )
                         )
@@ -452,7 +456,8 @@ class TaskRunner:
             ):
                 try:
                     revisions.spec_for(
-                        self, value.get("test_code", ""), value.get("test_driver", ())
+                        self, value.get("test_code", ""), value.get("test_driver", ()),
+                        value.get("execution_checks", ()),
                     )
                 except ValueError as exc:
                     errors.append((repair.fields(exc, value), exc))
@@ -462,7 +467,14 @@ class TaskRunner:
             and isinstance(value.get("test_code", ""), str)
         ):
             try:
-                revisions.spec_for(self, value.get("test_code", ""), value.get("test_driver", ()))
+                current = self.state.get("verification_spec") or {}
+                pending = self.state.get("acceptance_trial")
+                if pending:
+                    current = revisions.checked(self.root, pending["ref"])["spec"]
+                revisions.spec_for(
+                    self, value.get("test_code", ""), value.get("test_driver", ()),
+                    value.get("execution_checks") or current.get("execution_checks", ()),
+                )
             except ValueError as exc:
                 errors.append((repair.fields(exc, value), exc))
         if errors:
@@ -473,37 +485,47 @@ class TaskRunner:
     # 冻结验收并接收计划
     # ========================================================================
     def freeze_contract(self, plan):
+        from agent.task.requirements import guard
+
+        guard(self, self.state.get("verification_spec"))
+        if not self.state.get("verify_command"):
+            from agent.acceptance.boundaries import require_general
+
+            require_general(self)
         current = self.state.get("verification_spec")
         if current:
+            if plan.execution_checks and [item.model_dump() for item in plan.execution_checks] != list(
+                current.get("execution_checks", ())
+            ):
+                raise ValueError("Fixed execution_checks cannot be replaced during source repair. Use revise_acceptance instead. "
+                                 + revisions.evidence.REVISION_GUIDANCE)
             if plan.test_code and plan.test_code != (current.get("test_code") or ""):
-                raise ValueError("Fixed task tests cannot be replaced during repair")
+                raise ValueError("Fixed task tests cannot be replaced during repair. Use revise_acceptance instead. "
+                                 + revisions.evidence.REVISION_GUIDANCE)
             if (
                 plan.regression_command
                 and plan.regression_command != self.state["regression_command"]
             ):
-                raise ValueError("Fixed regression command cannot be replaced")
+                raise ValueError("Fixed regression command cannot be replaced. Use revise_acceptance instead. "
+                                 + revisions.evidence.REVISION_GUIDANCE)
             if plan.test_driver and tuple(plan.test_driver) != tuple(
                 current.get("test_driver", ())
             ):
-                raise ValueError("Fixed test_driver cannot be replaced during source repair")
+                raise ValueError("Fixed test_driver cannot be replaced during source repair. Use revise_acceptance instead. "
+                                 + revisions.evidence.REVISION_GUIDANCE)
             return
         request = self.state["request"] + ''.join(
             '\n' + row['text'] for row in self.state.get('user_updates', [])
         )
         criteria = [request] + ([self.state["acceptance"]] if self.state["acceptance"] else [])
         command = self.state["verify_command"]
-        consumer = (
-            required_consumer(request + "\n" + (self.state["acceptance"] or ""))
-            if not command
-            else None
-        )
         spec = VerificationSpec(
             tuple(criteria),
             command=command,
             test_code=None if command else plan.test_code,
-            required_consumer=consumer,
-            required_calls=requested_calls(request) if consumer else (),
             test_driver=() if command else plan.test_driver,
+            execution_checks=() if command else [item.model_dump() for item in plan.execution_checks],
+            requirement_digest=self.state["requirements"]["digest"],
         )
         self.state["verification_spec"] = asdict(spec)
         self.state["regression_command"] = plan.regression_command
@@ -514,12 +536,19 @@ class TaskRunner:
         self.persist("acceptance_frozen", {"digest": digest(asdict(spec))})
 
     def accept_plan(self, plan, response):
+        if self.state.get("recovery_inspection_required") and plan.kind != "inspect":
+            raise ValueError("Inspect the current source after interrupted effects before changing it.")
+        if any(step.command and step.command in self.state.get("uncertain_commands", [])
+               for step in plan.steps):
+            raise ValueError("This command has unconfirmed prior effects. Do not repeat it; inspect "
+                             "the current source and plan a repair from observed state.")
         if plan.kind == "candidate":
             if not self.state.get("verification_spec") and not self.state.get("verify_command"):
                 revisions.stage_candidate(self, plan, response)
                 return
             self.freeze_contract(plan)
-        fingerprint = digest([plan.model_dump(), self.evidence.current])
+        fingerprint = digest([plan.model_dump(), self.evidence.current,
+                              (self.state.get("requirements") or {}).get("digest")])
         if fingerprint in self.state["seen_plans"]:
             self.state.update(
                 status="stalled",
@@ -550,7 +579,7 @@ class TaskRunner:
             status="executing",
         )
         self.state.pop("acceptance_release", None)
-        if plan.kind != "inspect":
+        if plan.kind != "inspect" or repair.targets_current_draft(self, response):
             self.state.pop("repair_draft", None)
         self.persist("plan_accepted", {"id": name, "base_source": self.evidence.current})
 
@@ -594,9 +623,14 @@ class TaskRunner:
         # ========================================================================
         # 捕获原始源码，绑定证据版本与操作执行器
         # ========================================================================
+        destination = self.root / "baseline"
+        if destination.exists():
+            import uuid
+
+            destination = self.root / ("baseline-recovery-" + uuid.uuid4().hex)
         self.baseline = SourceSnapshot.capture(
             self.environment.repo_root,
-            self.root / "baseline",
+            destination,
             runtime_files=getattr(self.environment, "runtime_files", ()),
             project_scope=getattr(self.environment, "project_scope", None),
         )
@@ -619,8 +653,6 @@ class TaskRunner:
         )
         if self.interactive:
             self.rules += '\nGive brief professional public progress in ordinary replies.'
-        if required_consumer(text + "\n" + (acceptance or "")) and not verify_command:
-            self.rules += ARTIFACT_RULES
 
         if self.work_rules_factory is not None:
             self.rules = self.work_rules_factory(self, text, acceptance, verify_command)
@@ -631,7 +663,15 @@ class TaskRunner:
         # ========================================================================
         # 保存原始需求和初始材料，再进入驱动循环
         # ========================================================================
+        if self.confirmed_requirements is not None:
+            from agent.task.requirements import checked
+
+            checked(self.confirmed_requirements, text)
+            save(self.root / "requirements-initial.json", self.confirmed_requirements)
+        from agent.task.requirements import model_view
+
         initial = {
+            "confirmed_requirements": model_view(self.confirmed_requirements),
             "request": text,
             "acceptance": acceptance,
             "verify_command": verify_command,
@@ -640,6 +680,8 @@ class TaskRunner:
         }
         self.state = {
             "engine": ENGINE,
+            "requirements": self.confirmed_requirements,
+            "initial_requirements": self.confirmed_requirements,
             "request": text,
             "acceptance": acceptance,
             "verify_command": verify_command,

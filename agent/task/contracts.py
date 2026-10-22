@@ -2,6 +2,7 @@
 
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from agent.acceptance.execution import ExecutionCheck, EXECUTION_DESCRIPTION
 
 
 class Operation(BaseModel):
@@ -23,8 +24,7 @@ class Operation(BaseModel):
     query: str = Field(
         default="",
         description=(
-            'Search text: a complete literal string for exact, or a natural-language '
-            'description for semantic.'
+            'Search text: one complete case-sensitive literal string.'
         ),
     )
     offset: int = Field(default=0, ge=0)
@@ -34,14 +34,15 @@ class Operation(BaseModel):
         le=2000,
         description='read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.',
     )
-    mode: Literal["exact", "semantic"] = Field(
+    mode: Literal["exact", "keywords"] = Field(
         default="exact",
-        description=(
-            'Search only. exact: case-sensitive literal matching with BM25 ranking. '
-            'semantic: vector retrieval and reranking by meaning; requires an available '
-            'index of the bound current project.'
-        ),
+        description="exact uses one literal query; keywords uses explicit terms and an empty query. BM25 automatically ranks rg matches.",
     )
+    match: Literal["whole_word", "substring"] = Field(
+        default="whole_word",
+        description="whole_word for complete identifiers; substring for partial names, errors or fragments. Case-sensitive; no rewriting.",
+    )
+    terms: list[str] = Field(default_factory=list, max_length=16)
     intent: Literal["locate", "diagnostic", "audit"] = "locate"
     required_entities: list[str] = Field(default_factory=list, max_length=16)
     required_kinds: list[Literal["code", "document", "tool_result", "log"]] = Field(
@@ -76,12 +77,15 @@ class Operation(BaseModel):
             )
         if self.op == "shell" and not self.command.strip():
             raise ValueError("shell requires actual executable commands, not a task description")
-        if self.op == "search" and not self.query:
-            raise ValueError("search requires a non-empty query")
+        if self.op == "search":
+            from agent.rag.integration import validate_arguments
+
+            validate_arguments({
+                "query": self.query, "path": self.path, "mode": self.mode,
+                "match": self.match, "terms": self.terms,
+            }, records=True, containers=True)
         if self.from_step and self.op != "read":
             raise ValueError("Only read may refer to an earlier search")
-        if self.op != 'search' and self.mode != 'exact':
-            raise ValueError('semantic mode applies only to search')
         if self.cursor and (self.op == 'shell' or self.from_step):
             raise ValueError('A continuation cursor requires one explicit read or search scope')
         return self
@@ -94,6 +98,9 @@ class WorkRequest(BaseModel):
     steps: list[Operation] = Field(default_factory=list, max_length=12)
     test_code: str = Field(default="", max_length=32768)
     test_driver: list[str] = Field(default_factory=list, max_length=32)
+    execution_checks: list[ExecutionCheck] = Field(
+        default_factory=list, max_length=8, description=EXECUTION_DESCRIPTION,
+    )
     regression_command: str = Field(default="", max_length=4000)
 
     @model_validator(mode="after")

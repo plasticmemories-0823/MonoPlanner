@@ -72,6 +72,11 @@ await test("acceptance budget pause exposes Continue but never supplement or run
     kind: "resume",
     id: "ordinary",
   });
-  for (const status of ["stalled", "execution_unknown", "state_conflict", "verified_success"])
+  for (const status of ["stalled", "verified_success"])
     assert.equal(canResumeWork(status), false, status);
+  for (const status of ["interrupted", "execution_unknown", "model_request_unknown", "runtime_error", "state_conflict"]) {
+    assert.equal(canResumeWork(status), true, status);
+    assert.equal(canSupplementWork(status), false, status);
+    assert.equal(isWorking(status), false, status);
+  }
 });

@@ -8,31 +8,22 @@ import re
 import sqlite3
 import uuid
 
-from agent.application.work_bridge import run_work
+from agent.runtime.bridge import run_work
 from agent.execution.projects import workspace_binding
 from agent.storage.history import LocalHistory
 from agent.storage.preferences import Preferences
 from agent.storage.records import save
 
 
-class LazyModel:
-    def __init__(self, settings=None):
-        self.model = None
-        self.settings = settings
-
-    def bind_tools(self, tools):
-        if self.model is None:
-            from agent.settings import load_settings
-            from agent.model.client import create_model
-
-            self.model = create_model(load_settings(self.settings))
-        return self.model.bind_tools(tools)
-
-
 def _history(folder, query=None):
     """只读旧索引和原件，不取得执行租约或创建检查点。"""
     if not (folder / 'history.sqlite3').is_file():
         return None
+    if (folder / 'engine-binding.json').exists():
+        from agent.runtime.bridge import read
+
+        return read(folder.parent.parent, folder.name, 'find' if query is not None else 'status',
+                    {'query': query} if query is not None else {})
     store = LocalHistory(folder)
     connection = None
     try:
@@ -55,6 +46,7 @@ def main(argv=None):
     parser.add_argument('--task')
     parser.add_argument('--verify-command')
     parser.add_argument('--acceptance')
+    parser.add_argument('--requirements', help='人类确认的交付目标 JSON；缺失时只允许调查')
     parser.add_argument('--max-steps', type=int)
     parser.add_argument('--pause-after-steps', type=int)
     parser.add_argument('--find', help='Search existing history metadata; no model or shell')
@@ -89,8 +81,6 @@ def main(argv=None):
     from agent.task import acceptance_limit
 
     limit = acceptance_limit.public(old or {})
-    if old and acceptance_limit.is_legacy_exhausted(old):
-        limit = acceptance_limit.legacy_projection(folder)
     if args.continue_acceptance and not (limit or {}).get('active'):
         parser.error('当前任务不处于可批准增加验收额度的暂停状态。')
     if args.find is not None or args.status:
@@ -119,6 +109,13 @@ def main(argv=None):
             'budget': {'max_steps': args.max_steps or 1000},
             'pause_after_steps': args.pause_after_steps,
         }
+        if args.requirements:
+            from agent.task.requirements import confirmed
+
+            specification = json.loads(Path(args.requirements).read_text(encoding='utf-8-sig'))
+            job['confirmed_requirements'] = confirmed(args.task, specification['targets'],
+                confirmation={'id': 'cli:' + str(Path(args.requirements).resolve()),
+                              'text': 'User explicitly supplied --requirements'})
         root.mkdir(parents=True, exist_ok=True)
         # 原件只创建一次；同时启动的另一个 CLI 不能覆盖任务身份。
         with job_path.open('x', encoding='utf-8') as stream:
@@ -126,6 +123,8 @@ def main(argv=None):
             stream.flush()
             os.fsync(stream.fileno())
     else:
+        if args.requirements:
+            parser.error('Existing requirement contracts cannot be replaced by a resume flag')
         for name, stored in (('repo', job['repo']), ('task', job['request']),
                              ('verify_command', job.get('verify_command')),
                              ('acceptance', job.get('acceptance'))):
@@ -147,13 +146,14 @@ def main(argv=None):
         controls = []
     else:
         controls = ([{'id': uuid.uuid4().hex, 'kind': 'resume'}]
-                    if old and old.get('status') in {'paused', 'awaiting_user', 'output_limit_reached'}
+                    if old and old.get('status') in {'paused', 'awaiting_user', 'output_limit_reached', 'interrupted',
+                                                                  'model_request_unknown', 'execution_unknown',
+                                                                  'runtime_error', 'compaction_commit_unknown'}
                     else [])
     save(root / 'cli-invocations' / (uuid.uuid4().hex + '.json'),
          {'task_id': job['task_id'], 'budget': invocation['budget'],
           'pause_after_steps': invocation.get('pause_after_steps'), 'controls': controls})
-    result = run_work(invocation, lambda *_: None, lambda: controls,
-                      model=LazyModel(job['settings']), root=root)
+    result = run_work(invocation, lambda *_: None, lambda: controls)
     print(json.dumps({key: value for key, value in result.items()
                       if key not in {'messages', 'rounds', 'verification'}},
                      ensure_ascii=False, indent=2))

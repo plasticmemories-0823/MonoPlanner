@@ -6,14 +6,13 @@ import unittest
 from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
-from agent.acceptance.revisions import behavior
 from agent.task.runner import TaskRunner
 from agent.task.budget import StepBudget
 from agent.storage.history import LocalHistory
 from agent.model.payload import wire_input
 from agent.model.tools import WORK_TOOLS
 from agent.storage.recovery import code_key
-from support import interrupt_after_persist
+from support import interrupt_after_persist, boundary_aware_reply
 import test_task_runner as f
 
 
@@ -40,8 +39,12 @@ class ScriptModel:
 
     def invoke(self, messages):
         self.calls.append(messages)
-        item = next(self.replies)
-        return item(messages) if callable(item) else item
+
+        def produce():
+            item = next(self.replies)
+            return item(messages) if callable(item) else item
+
+        return boundary_aware_reply(self, messages, produce)
 
 
 class AcceptanceReviewTests(unittest.TestCase):
@@ -75,7 +78,7 @@ class AcceptanceReviewTests(unittest.TestCase):
         self.assertIn("source", baseline)
         result = self.run_replies([review])
         self.assertEqual(result["status"], "verified_success", result)
-        self.assertEqual(result["planner_calls"], 2)
+        self.assertEqual(result["planner_calls"], 3)
         self.assertEqual(result["calls_this_invocation"], 1)
         self.assertEqual(len(self.state()["acceptance_trials"]), 1)
 
@@ -128,7 +131,7 @@ class AcceptanceReviewTests(unittest.TestCase):
             ]
         )
         self.assertEqual(result["status"], "verified_success", result)
-        trial = json.loads(self.model.calls[1][-1].content)
+        trial = json.loads(self.model.calls[2][-1].content)
         self.assertFalse(trial["baseline"]["tests_ready"])
         self.assertEqual(trial["baseline"]["execution_exception"]["phase"], "load")
         self.assertIn(
@@ -234,48 +237,20 @@ class AcceptanceReviewTests(unittest.TestCase):
             ]
         )
         self.assertEqual(result["status"], "task_blocked", result)
-        self.assertIn("Runnable behavior failed", self.model.calls[-1][-1].content)
+        self.assertIn("Provide valid original evidence", self.model.calls[-1][-1].content)
         self.assertEqual(len(self.state()["acceptance_versions"]), 1)
 
-    def test_frozen_setup_revision_retains_behavior_and_compares_both_versions(self):
-        code = (
-            "from sample import value\nif value() == 2:\n    raise RuntimeError('setup broken')\n"
-            + f.CODE
-        )
-        result = self.run_replies(
-            [
-                f.reply(self.candidate(2, test_code=code)),
-                review,
-                lambda m: review(m, "revise_acceptance", f.CODE),
-                review,
-                f.reply(self.candidate(test_code="")),
-            ]
-        )
-        self.assertEqual(result["status"], "verified_success", result)
-        self.assertEqual(len(self.state()["acceptance_versions"]), 2)
-        compare = result["verification"]["acceptance_comparison"]
-        data = json.loads((self.root / "state" / compare["record"][8:]).read_text())
-        self.assertEqual(len(data["versions"]), 2)
-        self.assertTrue(all(row["candidate"]["status"] == "passed" for row in data["versions"]))
-
-    def test_preparation_revision_pass_preserves_old_runnable_failure(self):
-        code = (
-            "from sample import value\nif value() != 0:\n    raise RuntimeError('old setup conflict')\n"
-            + f.CODE
-        )
-        result = self.run_replies(
-            [
-                f.reply(self.candidate(2, test_code=code)),
-                review,
-                lambda m: review(m, "revise_acceptance", f.CODE),
-                review,
-                f.reply(self.candidate(test_code="")),
-                f.reply({"kind": "blocked", "note": "Old runnable baseline still conflicts"}),
-            ]
-        )
-        self.assertEqual(result["status"], "task_blocked", result)
-        self.assertEqual(result["rounds"][-1]["verification"]["status"], "failed")
-        self.assertTrue(result["verification"]["acceptance_comparison"]["conflicts"])
+    def test_frozen_setup_revision_requires_evidence_and_preserves_old_failure(self):
+        code = "from sample import value\nif value() == 2:\n    raise RuntimeError('setup broken')\n" + f.CODE
+        result = self.run_replies([
+            f.reply(self.candidate(2, test_code=code)), review,
+            lambda m: review(m, 'revise_acceptance', f.CODE),
+            f.reply({'kind': 'blocked', 'note': 'Need original evidence for this revision'}),
+        ])
+        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(len(self.state()['acceptance_versions']), 1)
+        self.assertEqual(self.state()['verification_spec']['test_code'], code)
+        self.assertIn('Provide valid original evidence', self.model.calls[-1][-1].content)
 
     def test_preparation_revision_cannot_change_assertions_or_inputs(self):
         code = (
@@ -295,7 +270,7 @@ class AcceptanceReviewTests(unittest.TestCase):
             ]
         )
         self.assertEqual(result["status"], "task_blocked", result)
-        self.assertIn("must remain unchanged", self.model.calls[-1][-1].content)
+        self.assertIn("Provide valid original evidence", self.model.calls[-1][-1].content)
 
     def test_unknown_trial_execution_is_not_replayed(self):
         interrupt, error = self.crash("acceptance_trial_started")
@@ -363,9 +338,8 @@ class AcceptanceReviewTests(unittest.TestCase):
         )
         self.assertEqual(
             set(revise["function"]["parameters"]["properties"]),
-            {"trial_id", "reason", "test_code", "test_driver", "evidence", "corrections"},
+            {"trial_id", "reason", "test_code", "test_driver", "execution_checks", "evidence", "corrections", "regression_command"},
         )
-        self.assertNotEqual(behavior(f.CODE), behavior(f.CODE.replace("value(), 4", "value(), 2")))
 
     def test_revision_resource_is_in_restore_fingerprint(self):
         original = code_key()

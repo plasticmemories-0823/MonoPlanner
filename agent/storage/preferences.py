@@ -108,6 +108,9 @@ class Preferences:
         )
 
     def key(self):
+        # 冻结内核通过私有管道获得当前凭据，不解释未来版本的凭据文件格式。
+        if os.getenv('MONOPLANER_WORKER_CREDENTIAL'):
+            return os.environ['MONOPLANER_WORKER_CREDENTIAL']
         if self.secret.exists():
             if self.secret.is_symlink():
                 raise ValueError('密钥文件不能是链接')

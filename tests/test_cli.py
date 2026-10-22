@@ -1,4 +1,4 @@
-"""当前 CLI 入口可离线运行，并拒绝已移除的模式。"""
+"""P0338 入口可离线运行，并拒绝已移除的 CLI 模式。"""
 
 from contextlib import redirect_stderr, redirect_stdout
 import io

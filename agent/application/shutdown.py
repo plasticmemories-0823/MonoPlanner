@@ -77,10 +77,6 @@ class Shutdown:
             self.scheduler.store.closing.set()
             self.scheduler.wake.set()
             self.pending.add('shutdown_dispatch')
-        from agent.rag.models import cancel_jobs
-
-        cancel_jobs(self.scheduler.store.root, close=True,
-                    on_complete=self.scheduler._release_if_idle)
         Thread(target=self._run, name='application-shutdown', daemon=True).start()
 
     def _operation(self, name, callback):
@@ -113,7 +109,6 @@ class Shutdown:
 
     def _run(self):
         from agent.execution.preparation import close_jobs
-        from agent.rag.models import cancel_jobs
         from agent.task.control import interrupt
 
         scheduler = self.scheduler
@@ -131,7 +126,6 @@ class Shutdown:
             for task in tasks:
                 self._operation('work:' + task, lambda task=task:
                                 scheduler.pause_callback(task, self.identity))
-            self._operation('rag-index', lambda: cancel_jobs(scheduler.store.root, close=True, timeout=5))
             self._operation('preparations', lambda: close_jobs(scheduler.store.root))
             self._operation('pending_records', scheduler.store.stop_pending)
         except Exception as exc:
@@ -171,9 +165,6 @@ class Shutdown:
                 workers.append('progress')
             if scheduler.worker is not None and scheduler.worker.is_alive():
                 workers.append('dispatcher')
-        from agent.rag.models import pending_jobs
-
-        workers.extend('rag-index:' + task for task in pending_jobs(scheduler.store.root))
         fault = scheduler.storage_error()
         with self.lock:
             pending = sorted(self.pending | set(workers))

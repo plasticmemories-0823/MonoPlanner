@@ -113,14 +113,33 @@ def apply_controls(loop):
             loop.state['history'].append(
                 message_to_dict(HumanMessage(content=control['text'], id=control['id']))
             )
-            loop.state.setdefault('user_updates', []).append(
-                {'id': control['id'], 'text': control['text']}
-            )
+            updates = loop.state.setdefault('user_updates', [])
+            packet = control.get('confirmed_requirements')
+            if packet:
+                previous_sources = {row['id'] for row in (loop.state.get('requirements') or {}).get('sources', [])}
+                seen = previous_sources | {row['id'] for row in updates}
+                updates.extend({'id': row['id'], 'text': row['text']} for row in packet['sources']
+                               if row['id'] not in seen)
+            else:
+                updates.append({'id': control['id'], 'text': control['text']})
+            from agent.task.requirements import replace_requirements
+
+            replace_requirements(loop, control.get('confirmed_requirements'))
+            if packet:
+                from agent.task.requirements import model_view
+
+                loop.state['history'].append(message_to_dict(HumanMessage(content=json.dumps({
+                    'confirmed_requirements': model_view(packet),
+                    'notice': 'This confirmed revision replaces the earlier delivery binding; old acceptance cannot release it.',
+                }, ensure_ascii=False))))
             loop.state['rag_request_id'] = control['id']
             loop.state.setdefault('public_events', []).append(
                 {'id': control['id'], 'type': 'human', 'content': control['text']}
             )
-            loop.state.update(status='needs_plan', reason='User supplemented the task')
+            loop.state.update(
+                status='needs_plan' if packet else 'awaiting_user',
+                reason='User supplemented the task' if packet else 'Updated requirements await explicit confirmation',
+            )
             changed = True
         elif control['kind'] == 'pause':
             loop.state.update(status='paused', reason='User requested pause', pause_requested=True)

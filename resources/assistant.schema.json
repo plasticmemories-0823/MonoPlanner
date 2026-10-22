@@ -156,15 +156,15 @@
       },
       "path": {
         "type": "string",
-        "description": "Authorized file or directory scope. Exact may use an authorized absolute path; semantic requires a project-relative scope."
+        "description": "Authorized file or directory scope; exact may use an authorized absolute path."
       },
       "mode": {
         "type": "string",
         "enum": [
           "exact",
-          "semantic"
+          "keywords"
         ],
-        "description": "Default exact: case-sensitive literal text; semantic explicitly requests vector retrieval."
+        "description": "exact: one literal query. keywords: explicit terms, query empty. rg matches; BM25 automatically ranks files."
       },
       "offset": {
         "type": "integer",
@@ -188,7 +188,7 @@
           "diagnostic",
           "audit"
         ],
-        "description": "Default locate. Diagnostic or audit enables applicable conditional semantic rewrite signals."
+        "description": "Locate, diagnostic or audit intent."
       },
       "required_entities": {
         "type": "array",
@@ -209,6 +209,21 @@
           ]
         },
         "description": "Required source types, at most 4; empty when not required."
+      },
+      "match": {
+        "type": "string",
+        "enum": [
+          "whole_word",
+          "substring"
+        ],
+        "description": "whole_word for complete identifiers; substring for partial names, error text or fragments. Case-sensitive; no rewriting."
+      },
+      "terms": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "keywords only: explicit literal terms, any term matches; empty for exact."
       }
     },
     "required": [
@@ -220,7 +235,9 @@
       "cursor",
       "intent",
       "required_entities",
-      "required_kinds"
+      "required_kinds",
+      "match",
+      "terms"
     ]
   }
 }

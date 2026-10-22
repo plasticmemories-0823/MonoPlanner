@@ -169,10 +169,7 @@ class DesktopStore:
                 (self.store.thread(thread),),
             )
             current = [{**json.loads(r['data']), 'id': r['id'], 'status': r['status']} for r in rows]
-        if current or self.store.session(thread):
-            return current
-        return [{**json.loads(row['data']), 'id': row['id'], 'status': row['status']}
-                for row in self.store.legacy_rows('desktop_requests', thread)]
+        return current
 
     def get(self, thread, identity):
         return next((r for r in self.list(thread) if r['id'] == identity), None)

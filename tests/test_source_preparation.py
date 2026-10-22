@@ -239,7 +239,7 @@ class SourceTests(unittest.TestCase):
                 [], 'return 4', StepBudget(max_steps=4)
             )
         self.assertEqual(result['status'], 'verified_success', result)
-        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(len(model.calls), 3)
         self.assertEqual(result['source_performance']['preparation']['worker_model_calls'], 0)
         self.assertEqual(result['source_performance']['preparation_errors'], [])
 

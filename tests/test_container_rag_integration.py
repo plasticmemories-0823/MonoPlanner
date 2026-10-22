@@ -89,9 +89,6 @@ def container_work(tmp_path, monkeypatch):
     loop.executor = OperationExecutor(environment, loop.evidence, root, versioned_reads=True)
     loop.executor.retrieval_owner = loop
     monkeypatch.setattr(container_sources, 'ContainerBackend', FakeContainerBackend)
-    monkeypatch.setattr(integration, '_models',
-                        Mock(side_effect=AssertionError('Exact search loaded a model')))
-    monkeypatch.delenv('MONOPLANER_RAG_MODELS', raising=False)
     return loop
 
 
@@ -118,7 +115,7 @@ def test_container_literal_query_and_original_coordinates_are_unchanged(containe
     assert text[hit['match_start']:hit['match_end']] == query
     assert hit['actual_path'] == '/usr/include/source.h'
     assert hit['origin'] == 'container/toolchain'
-    assert result['rewrite']['status'] == 'not_triggered'
+    assert 'rewrite' not in result
     container_work.request_model.assert_not_called()
 
 
@@ -224,19 +221,3 @@ def test_container_enumeration_cursor_does_not_report_early_zero_or_cross_scope(
     container_work.request_model.assert_not_called()
 
 
-def test_container_semantic_unavailable_does_not_fall_back_to_literal_or_rewrite(
-    container_work, monkeypatch,
-):
-    container_work.environment.container_files['/usr/include/source.h'] = b'NEEDLE exact\n'
-    models = Mock(return_value=SimpleNamespace(
-        vector=None, reranker=None, unavailable_reason='local_models_unavailable:fixture',
-    ))
-    monkeypatch.setattr(integration, '_models', models)
-    result = search(container_work, 'NEEDLE', mode='semantic',
-                    intent='diagnostic', required_entities=['NEEDLE'])
-    assert result['mode'] == 'semantic' and result['retrieval_incomplete']
-    assert result['hits'] == result['results'] == []
-    assert 'vector_unavailable' in result['reasons']
-    assert result['rewrite']['status'] == 'not_triggered'
-    assert models.call_count == 1
-    container_work.request_model.assert_not_called()

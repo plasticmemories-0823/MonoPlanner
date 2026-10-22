@@ -240,6 +240,14 @@ class KernelSavedRejectionPauseTests(unittest.TestCase):
             self.run_replies([response])
         before = self.load_state()
         incoming = {'id': 'saved-update', 'kind': 'message', 'text': '只解释剩余工作'}
+        from agent.task.requirements import confirmed
+
+        original = before['requirements']
+        incoming['confirmed_requirements'] = confirmed(
+            before['request'] + '\n\n' + incoming['text'], original['targets'],
+            sources=[*original['sources'], {'id': incoming['id'], 'role': 'user', 'text': incoming['text']}],
+            confirmation={'id': 'confirmed-update', 'text': 'Confirm the updated request'}, parent=original,
+        )
 
         with control.active('saved-kernel', 'rejection-message') as signal:
             signal.interrupt('message', incoming['id'])

@@ -11,6 +11,7 @@ from agent.application import work_bridge as bridge
 from agent.execution.local import LocalEnvironment
 from agent.task import control
 from agent.storage.requests import read_request
+from support import fixture_delivery
 
 
 class RecordedModel:
@@ -149,7 +150,7 @@ def test_already_paused_job_never_starts_environment_preparation(tmp_path):
     assert result["applied_inputs"] == ["before-dispatch"]
 
 
-def test_model_supplement_continues_same_runner_without_restore_or_browser(tmp_path):
+def test_unconfirmed_supplement_waits_without_restore_or_browser(tmp_path):
     from agent.model.errors import ModelInterrupted
 
     repo = tmp_path / "repo"
@@ -177,14 +178,14 @@ def test_model_supplement_continues_same_runner_without_restore_or_browser(tmp_p
             job, lambda *args: None, lambda: commands, model=model,
             environment_factory=OfflineEnvironment, root=tmp_path / "state",
         )
-    assert result["status"] == "task_blocked"
-    assert len(model.calls) == 2
+    assert result["status"] == "awaiting_user"
+    assert len(model.calls) == 1
     assert result["applied_inputs"] == ["supplement-1"]
-    assert sum(message.content == "保持公开接口" for message in model.calls[-1]) == 1
+    assert result["applied_inputs"] == ["supplement-1"]
 
 
 def test_bridge_keeps_trial_freeze_edit_and_real_rework_order(tmp_path):
-    from test_task_runner import CODE, Model
+    from test_task_runner import CODE, Model, EXECUTION_CHECK
     from support import python_command
 
     repo = tmp_path / "repo"
@@ -196,12 +197,13 @@ def test_bridge_keeps_trial_freeze_edit_and_real_rework_order(tmp_path):
             "from pathlib import Path; Path('sample.py').write_text('def value():\\n    return %d\\n')"
             % value
         )
-        plans.append({"kind": "candidate", "note": "实现指定值", "test_code": CODE,
+        plans.append({"kind": "candidate", "note": "实现指定值", "test_code": CODE, "execution_checks": [dict(EXECUTION_CHECK)],
                       "steps": [{"id": "edit", "op": "shell", "command": command}]})
     model = Model(plans)
     events = []
     task = "1" * 32
     job = {"task_id": task, "repo": str(repo), "request": "value must return 4",
+           "confirmed_requirements": fixture_delivery("value must return 4"),
            "execution_binding": {"image": "sha256:" + "b" * 64, "runtime": {}}}
     with patch.object(bridge, "require_binding", side_effect=lambda repo, value: value):
         result = bridge.run_work(
@@ -210,7 +212,7 @@ def test_bridge_keeps_trial_freeze_edit_and_real_rework_order(tmp_path):
         )
     assert result["status"] == "verified_success"
     assert [row["verification"]["status"] for row in result["rounds"]] == ["failed", "passed"]
-    assert len(model.calls) == 3
+    assert len(model.calls) == 4
     ordered = [event.get("event") for event in events]
     assert ordered.index("acceptance_trial_finished") < ordered.index("acceptance_frozen")
     assert ordered.index("acceptance_frozen") < ordered.index("step_started")
@@ -223,7 +225,7 @@ def test_bridge_keeps_trial_freeze_edit_and_real_rework_order(tmp_path):
 
 
 def test_acceptance_pause_retains_container_receipt_without_terminal_cleanup(tmp_path):
-    from test_task_runner import CODE, Model
+    from test_task_runner import CODE, Model, EXECUTION_CHECK
     from support import python_command
 
     repo = tmp_path / 'repo'
@@ -233,7 +235,7 @@ def test_acceptance_pause_retains_container_receipt_without_terminal_cleanup(tmp
         "from pathlib import Path; Path('sample.py').write_text('def value():\\n    return 2\\n')"
     )
     model = Model([{
-        'kind': 'candidate', 'note': '保存失败后的断点', 'test_code': CODE,
+        'kind': 'candidate', 'note': '保存失败后的断点', 'test_code': CODE, 'execution_checks': [dict(EXECUTION_CHECK)],
         'steps': [{'id': 'edit', 'op': 'shell', 'command': command}],
     }])
     receipt = {'container': 'retained-container', 'stopped': True}
@@ -249,6 +251,7 @@ def test_acceptance_pause_retains_container_receipt_without_terminal_cleanup(tmp
 
     task, events = '3' * 32, []
     job = {'task_id': task, 'repo': str(repo), 'request': 'value must return 4',
+           'confirmed_requirements': fixture_delivery('value must return 4'),
            'execution_binding': {'image': 'sha256:' + 'b' * 64, 'runtime': {}}}
     with patch.object(bridge, 'require_binding', side_effect=lambda repo, value: value), patch.object(
         bridge, 'WorkRunner', side_effect=one_round_runner,

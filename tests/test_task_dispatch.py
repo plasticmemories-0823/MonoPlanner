@@ -45,12 +45,16 @@ class TaskDispatchTests(unittest.TestCase):
         self.assertEqual(
             [row["verification"]["status"] for row in result["rounds"]], ["failed", "passed"],
         )
-        self.assertEqual(visited.count("request_plan"), 3)
-        self.assertEqual(visited.count("review_acceptance"), 1)
-        self.assertEqual(visited.count("release_candidate"), 1)
-        self.assertEqual(visited.count("execute_plan"), 2)
-        self.assertEqual(visited.count("finalize"), 1)
-        self.assertLess(visited.index("review_acceptance"), visited.index("execute_plan"))
+        self.assertEqual(set(visited), {"search", "plan", "execute", "accept"})
+        self.assertEqual(len(self.model.calls), 4)
+        self.assertEqual(visited.count("execute"), 2)
+        self.assertLess(visited.index("search"), visited.index("execute"))
+        self.assertLess(visited.index("accept"), visited.index("execute"))
+        events = [json.loads(line)["kind"] for line in
+                  (runner.root / "events.jsonl").read_text().splitlines()]
+        self.assertEqual(events.count("acceptance_trial_started"), 1)
+        self.assertEqual(events.count("final_acceptance_started"), 2)
+        self.assertEqual(events.count("model_request_started"), 4)
 
     def test_default_graph_recursion_limit_does_not_reduce_existing_model_budget(self):
         plans = [
@@ -75,6 +79,12 @@ class TaskDispatchTests(unittest.TestCase):
         self.assertEqual(len(self.model.calls), 1)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
         self.assertFalse((self.root / "state/frozen-acceptance.json").exists())
+
+        drafted = self.runner([self.candidate()], yield_boundary=True)
+        result = drafted.run([], "return 4", StepBudget(max_steps=3))
+        self.assertEqual(result["status"], "needs_plan", result)
+        self.assertTrue(drafted.state.get("acceptance_trial"))
+        self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
         resumed = self.runner([])
         result = resumed.run([], "return 4", StepBudget(max_steps=3))
@@ -107,7 +117,7 @@ class TaskDispatchTests(unittest.TestCase):
         self.assertEqual(result["status"], "runtime_error", result)
         self.assertEqual(result["stop_reason"], "ValueError: runtime boundary failed")
         self.assertEqual(execute.call_count, 1)
-        self.assertEqual(len(self.model.calls), 2)
+        self.assertEqual(len(self.model.calls), 3)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
     def test_product_has_one_graph_scheduler_and_no_previous_outer_loops(self):
@@ -124,8 +134,9 @@ class TaskDispatchTests(unittest.TestCase):
                     )
         self.assertFalse(hasattr(TaskRunner, "advance"))
         graph = TaskDispatch(self.runner([])).graph.get_graph()
-        self.assertTrue(
-            {"request_plan", "review_acceptance", "execute_plan", "reject_reply"}.issubset(graph.nodes)
+        self.assertEqual(
+            set(graph.nodes) - {"__start__", "__end__"},
+            {"search", "plan", "execute", "accept"},
         )
         self.assertNotIn("advance", graph.nodes)
 

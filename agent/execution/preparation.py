@@ -5,7 +5,7 @@ from contextvars import copy_context
 import hashlib
 import json
 from pathlib import Path
-from threading import Event, RLock
+from threading import Event, RLock, current_thread
 import time
 import uuid
 
@@ -281,11 +281,18 @@ class PreparationJobs:
                 worker['future'].result(timeout=max(0, deadline - time.monotonic()))
             except Exception:
                 pass
+        # Future 完成时，线程仍可能在执行回调或退出线程池；不能提前报告已停止。
+        threads = tuple(self.pool._threads) if self.pool else ()
+        for thread in threads:
+            if thread is not current_thread():
+                thread.join(timeout=max(0, deadline - time.monotonic()))
+        threads_stopped = all(not thread.is_alive() for thread in threads)
         with self.lock:
             if not self.workers:
                 self.lease.close()
             self.close_report = {
-                **stopped, 'stopped': not self.workers and stopped['stopped'],
+                **stopped,
+                'stopped': not self.workers and threads_stopped and stopped['stopped'],
             }
             return self.close_report
 

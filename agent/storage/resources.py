@@ -81,6 +81,10 @@ class ResourceCatalog:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / 'resources.sqlite3'
+        from agent.storage.schema import initialize
+
+        # 原生资源协议独立固定为 1，不跟随应用数据库版本自动迁移。
+        initialize(self.path, target=1, migrations={})
         if self.path.is_symlink():
             raise ValueError('资源台账不能是链接。')
         with self._db() as db:

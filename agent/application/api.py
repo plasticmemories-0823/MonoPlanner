@@ -42,7 +42,7 @@ def build_routes(store, scheduler):
         async def run():
             if request.method == 'GET':
                 rows = await asyncio.to_thread(store.list)
-                return response({'conversations': rows, 'legacy_read_only': True})
+                return response({'conversations': rows, 'data_version': 1})
             value = await request.json()
             if hasattr(scheduler, 'ensure_dispatch_available'):
                 scheduler.ensure_dispatch_available()
@@ -73,16 +73,11 @@ def build_routes(store, scheduler):
 
     async def diagnostics(request):
         async def run():
-            from agent.storage.activity import read_activity
+            from agent.runtime.bridge import activity as read_activity
 
             conversation = identity(request.path_params['conversation'])
             # 持续活动只核对会话身份，不在每页重新组装整份聊天、思考及用量。
-            try:
-                await asyncio.to_thread(store.get, conversation)
-            except KeyError:
-                if await asyncio.to_thread(store.legacy, conversation):
-                    raise Conflict('旧版本详细诊断请使用对应冻结版本查看')
-                raise
+            await asyncio.to_thread(store.get, conversation)
             jobs = await asyncio.to_thread(store.work_for_conversation, conversation)
             tasks = [{'id': job['task_id'], 'input_id': job['input_id']} for job in jobs]
             cursors = json.loads(request.query_params.get('after', '{}'))

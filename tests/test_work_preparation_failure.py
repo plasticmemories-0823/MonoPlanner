@@ -103,7 +103,7 @@ def test_old_task_environment_failure_keeps_recovery_protection(tmp_path):
     directory.mkdir(parents=True)
     (directory / "state.json").write_text('{"running_step":"old write"}')
     with patch.object(bridge, "prepare_binding", side_effect=EnvironmentRequired("old failure")), (
-        pytest.raises(EnvironmentRequired, match="old failure")
+        pytest.raises(ValueError, match="no valid index")
     ):
         bridge.run_work(job, lambda *args: None, lambda: [], root=tmp_path,
                         environment_factory=OfflineEnvironment)

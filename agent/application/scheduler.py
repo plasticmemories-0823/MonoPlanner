@@ -88,9 +88,6 @@ class Scheduler:
                 interrupt(self.store.root, owner, 'pause', fault['id'])
             except Exception:
                 logging.getLogger(__name__).exception('Storage-fault cancellation was not confirmed')
-        from agent.rag.models import cancel_jobs
-
-        cancel_jobs(self.store.root, close=True)
         self.wake.set()
         return fault
 
@@ -107,7 +104,7 @@ class Scheduler:
         try:
             value = self.store.get(conversation)
             if value.get('read_only') or value.get('visibility') != 'active':
-                raise Conflict('旧版、已归档或删除中的会话不允许控制；请先核对会话。')
+                raise Conflict('只读、已归档或删除中的会话不允许控制；请先核对会话。')
             with self.store.connection() as db:
                 old = db.execute('SELECT body,state FROM app_commands WHERE conversation=? AND id=?',
                                  (conversation, command_id)).fetchone()
@@ -150,17 +147,17 @@ class Scheduler:
 
     @staticmethod
     def _run_work(job, emit, controls):
-        from agent.application.work_bridge import run_work
+        from agent.runtime.bridge import run_work
 
         return run_work(job, emit, controls)
 
     def _pause_work(self, task, command):
-        from agent.application.work_bridge import pause_work
+        from agent.runtime.bridge import pause_work
 
         return pause_work(task, command, root=self.store.root)
 
     def _supplement_work(self, task, command):
-        from agent.application.work_bridge import supplement_work
+        from agent.runtime.bridge import supplement_work
 
         return supplement_work(task, command, root=self.store.root)
 
@@ -175,6 +172,18 @@ class Scheduler:
             with self.lock:
                 self.lease = lease
             self.store.recover_interrupted()
+            from agent.runtime.bridge import pause_work
+
+            with self.store.connection() as db:
+                interrupted_tasks = [row[0] for row in db.execute('SELECT id FROM app_work_state')]
+            for task_id in interrupted_tasks:
+                task = self.store.work(task_id)
+                if task and task['status'] in {'interrupted', 'execution_unknown', 'pausing'}:
+                    # 启动只收拢遗留执行，不续跑任务。已有资源协议核验归属后才停止。
+                    self._control(task['conversation_id'], task['task_id'],
+                                  {'id': 'startup-stop-' + uuid.uuid4().hex, 'kind': 'pause'},
+                                  lambda task_id, command_id: pause_work(
+                                      task_id, command_id, root=self.store.root))
             with self.lock:
                 if not self.stop.is_set():
                     self.worker = Thread(target=self._loop, name='application-dispatch', daemon=True)
@@ -196,13 +205,10 @@ class Scheduler:
         self._release_if_idle()
 
     def _release_if_idle(self):
-        from agent.rag.models import pending_jobs
-
-        rag_pending = pending_jobs(self.store.root)
         with self.lock:
             if (self.shutdown.finished.is_set() and self.shutdown.controls_idle()) and not (
                 self.starting or self.chats or self.works or self.titles or self.reporting
-                or self.controls_inflight or rag_pending
+                or self.controls_inflight
             ):
                 if self.lease:
                     self.lease.close()
@@ -221,9 +227,6 @@ class Scheduler:
             interrupt(self.store.root, 'chat:' + target[0], 'pause', target[1])
             if target[2]:
                 interrupt(self.store.root, target[2], 'pause', target[1])
-                from agent.rag.models import cancel_jobs
-
-                cancel_jobs(self.store.root, [target[2]])
         if self.storage_error():
             if target:
                 return self._emergency_pause(target)
@@ -264,13 +267,6 @@ class Scheduler:
     def _control(self, conversation, task, command, callback, persist=True):
         try:
             result = callback(task, command['id'])
-            if command['kind'] == 'pause':
-                from agent.rag.models import cancel_jobs
-
-                rag = cancel_jobs(self.store.root, [task], timeout=2)
-                result = dict(result) if isinstance(result, dict) else {}
-                result['termination'] = [*result.get('termination', []),
-                                         {'resource': 'rag-index', 'stopped': rag['stopped']}]
             if not persist:
                 return
             termination = result.get('termination', []) if isinstance(result, dict) else []
@@ -317,6 +313,13 @@ class Scheduler:
                 raise Conflict('已有工作仍绑定原项目；补充不能创建或切换项目。')
             control = {'id': str(uuid.uuid5(uuid.UUID(command['id']), 'supplement')),
                        'kind': 'supplement', 'text': command['text']}
+            if (work_options or {}).get('confirmed_requirements'):
+                packet = work_options['confirmed_requirements']
+                from agent.application.requirements import latest
+
+                old_sources = {r['id'] for r in (latest(self.store, conversation) or {}).get('sources', [])}
+                control['text'] = '\n\n'.join(r['text'] for r in packet['sources'] if r['id'] not in old_sources)
+                control['confirmed_requirements'] = packet
             self.submit(conversation, control)
             return previous
         work = self.store.create_work(conversation, command['id'], kind=kind, arguments=arguments,
@@ -347,11 +350,35 @@ class Scheduler:
             raise StorageUnavailable(self.storage_error()['message']) from exc
 
     def _tick(self):
-        for row in self.store.commands(states=('pending',)):
+        commands = self.store.commands(states=('pending',))
+        # 原生线程可能先消费补充并进入等待；这不等于聊天端已生成新的确认方案。
+        for row in self.store.commands(states=('applied',)):
+            if row['kind'] != 'supplement' or row['value'].get('confirmed_requirements'):
+                continue
+            work = self.store.work(row['task_id'])
+            if work and work.get('confirmed_requirements') and work['status'] in SUPPLEMENTABLE:
+                commands.append(row)
+        for row in commands:
             if self.stop.is_set():
                 return
             conversation, command = row['conversation'], row['value']
-            if row['kind'] == 'message':
+            if row['kind'] == 'supplement' and not command.get('confirmed_requirements'):
+                target = self.store.work(row['task_id'])
+                if not target or target['status'] not in SUPPLEMENTABLE:
+                    self.store.command_state(conversation, command['id'], 'failed',
+                                             error='WorkNoLongerAcceptsControl')
+                    continue
+                if row['state'] == 'pending' and target['status'] in RESUMABLE:
+                    self._schedule_work(target)
+            if row['kind'] == 'message' or (row['kind'] == 'supplement'
+                                           and not command.get('confirmed_requirements')):
+                if row['kind'] == 'supplement':
+                    with self.store.connection() as db:
+                        discussed = db.execute("SELECT 1 FROM app_events WHERE conversation=? "
+                            "AND kind='requirement_discussion_started' AND json_extract(payload,'$.id')=?",
+                            (conversation, command['id'])).fetchone()
+                    if discussed:
+                        continue
                 with self.lock:
                     if self.stop.is_set():
                         return
@@ -359,12 +386,41 @@ class Scheduler:
                         continue
                     self.chats.add(conversation)
                 try:
-                    self.store.command_state(conversation, command['id'], 'running')
+                    if row['kind'] == 'supplement':
+                        self.store.record_event(conversation, 'requirement_discussion_started',
+                                                {'id': command['id']})
+                    else:
+                        self.store.command_state(conversation, command['id'], 'running')
                     self.chat_pool.submit(self._chat, conversation, command)
                 except BaseException:
                     with self.lock:
                         self.chats.discard(conversation)
                     raise
+            elif row['kind'] == 'confirm_work':
+                from agent.application.requirements import accept, work_for_proposal
+
+                if work_for_proposal(self.store, conversation, command['proposal_id']):
+                    self.store.command_state(conversation, command['id'], 'applied')
+                    continue
+                self.store.command_state(conversation, command['id'], 'running')
+                try:
+                    proposal_id = command['proposal_id']
+                    from agent.application.requirements import load_proposal
+
+                    proposal = load_proposal(self.store, conversation, proposal_id)
+                    packet, original = accept(
+                        self.store, conversation, command, proposal_id,
+                        proposal['project_path'], proposal['create'],
+                    )
+                    self.dispatch_work(
+                        conversation, command, project_path=proposal['project_path'], create=proposal['create'],
+                        work_options={'confirmed_requirements': packet, 'original_request': original},
+                    )
+                    self.store.command_state(conversation, command['id'], 'applied')
+                    self.store.chat_state(conversation, 'chat_complete')
+                except (ValueError, KeyError) as error:
+                    self.store.command_state(conversation, command['id'], 'failed', error=str(error))
+                    self.store.publish(conversation, command['id'] + ':error', str(error), source='system')
             elif row['kind'] == 'workspace':
                 # 选择的是授权工作区；实际项目在开工交接中确定，不能提前安装父目录。
                 self.store.command_state(conversation, command['id'], 'applied')
@@ -374,6 +430,11 @@ class Scheduler:
                     self.store.command_state(conversation, command['id'], 'applied')
             elif row['kind'] in {'resume', 'supplement'}:
                 task = self.store.work(row['task_id'])
+                if (row['kind'] == 'supplement' and task and task['status'] in RESUMABLE
+                        and any(command['kind'] == 'resume'
+                                for command in self.store.commands(task=task['task_id']))):
+                    # 本轮明确继续会携带原补充；不能因旧的中断状态先把它判失败。
+                    continue
                 allowed = RESUMABLE if row['kind'] == 'resume' else SUPPLEMENTABLE
                 if task and task['status'] in RESUMABLE and task['status'] in allowed:
                     self._schedule_work(task)
@@ -410,7 +471,8 @@ class Scheduler:
                 if self.store.pause_after(conversation, command['id']):
                     current().interrupt('pause')
                 result = self.chatbot.run(conversation, command)
-            self.store.command_state(conversation, command['id'], 'applied')
+            if command['kind'] != 'supplement':
+                self.store.command_state(conversation, command['id'], 'applied')
             self.store.chat_state(conversation, 'awaiting_user' if result.get('waiting_approval')
                                   else 'chat_complete')
         except Exception as exc:
@@ -426,20 +488,26 @@ class Scheduler:
                 else 'model_request_unknown'
             )
             try:
-                self.store.command_state(conversation, command['id'],
-                                         'applied' if status == 'paused'
-                                         else 'unknown' if status == 'model_request_unknown' else 'failed',
-                                         error=type(exc).__name__)
+                if command['kind'] != 'supplement':
+                    self.store.command_state(conversation, command['id'],
+                                             'applied' if status == 'paused'
+                                             else 'unknown' if status == 'model_request_unknown' else 'failed',
+                                             error=type(exc).__name__)
                 self.store.chat_state(conversation, status)
                 self.store.publish(conversation, command['id'] + ':error',
                                '回复已暂停。' if status == 'paused'
                                else '请先配置 DeepSeek API Key，再发送消息。' if status == 'settings_required'
                                else '回复达到输出上限，部分内容未执行；记录已保留。'
                                if status == 'output_limit_reached'
+                               else '工具处理发生内部错误；已保存模型响应，工具结果需核对，未自动重试。'
+                               if status == 'tool_internal_error'
+                               else '模型响应已保存，但本地处理失败；记录已保留，未重新请求。'
+                               if status == 'response_processing_error'
+                               else '工具调用与返回记录不完整；没有发送新请求，请核对保留现场。'
+                               if status == 'invalid_message_history'
                                else '聊天上下文未通过完整性或容量检查；记录已保留，没有发送新请求。'
                                if status in {'context_prefix_changed', 'context_capacity_exhausted',
-                                             'compaction_failed', 'compaction_commit_unknown',
-                                             'invalid_message_history'}
+                                             'compaction_failed', 'compaction_commit_unknown'}
                                    else '本次回复未完整完成，记录已保留；没有自动重发请求。', 'system')
             except (OSError, sqlite3.Error) as error:
                 self.storage_failed('chat_failure_record', error)
@@ -479,9 +547,11 @@ class Scheduler:
             return [{'id': fault['id'], 'kind': 'pause', 'text': ''}]
         return [{'id': row['id'], 'kind': 'message' if row['kind'] == 'supplement' else row['kind'],
                  'text': row['value'].get('text', ''),
+                 **({'confirmed_requirements': row['value']['confirmed_requirements']}
+                    if row['value'].get('confirmed_requirements') else {}),
                  **({'acceptance_pause_id': row['acceptance_pause_id']}
                     if row.get('acceptance_pause_id') else {})}
-                for row in self.store.commands(task=task)
+                for row in self.store.commands(task=task, states=('pending', 'running'))
                 if row['kind'] in {'pause', 'resume', 'supplement'}]
 
     def emit(self, task, kind, payload):
@@ -540,11 +610,17 @@ class Scheduler:
             self.store.work_state(task, 'paused', reason='应用退出，工作尚未派发；可明确继续。')
         except Exception as error:
             logging.getLogger(__name__).exception('Work bridge stopped')
+            from agent.runtime.bridge import WorkerUnavailable
+
             if isinstance(error, (OSError, sqlite3.Error)):
                 self.storage_failed('work_record', error)
             try:
-                self.emit(task, 'work_state', {'status': 'execution_unknown',
-                                              'reason': '执行结果未确认，已保留任务记录，不自动重试'})
+                unavailable = isinstance(error, WorkerUnavailable)
+                self.emit(task, 'work_state', {
+                    'status': 'paused' if unavailable else 'execution_unknown',
+                    'reason': ('工作尚未派发，内核或运行设置不可用：' + str(error))
+                    if unavailable else '执行结果未确认，已保留任务记录，不自动重试',
+                })
             except (OSError, sqlite3.Error):
                 pass  # 已闭锁；不能再把写入失败伪装成已保存的终态。
         finally:

@@ -3,16 +3,23 @@
 import hashlib
 import json
 from pathlib import PurePosixPath
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agent.acceptance.expectations import rewrite
+from agent.acceptance import corrections as edits
 from agent.model.errors import ModelRequestNotSent
 from agent.source.snapshots import _safe_file
 
 
-RULE_VERSION = "verbatim-expectations-v2"
-QUOTE_ERROR = "未找到原文或原文错误 请输入完全一致的原文"
+RULE_VERSION = "verbatim-acceptance-v3"
+REVISION_GUIDANCE = (
+    "Provide valid original evidence and itemized corrections to modify model-generated acceptance. "
+    "Cite an exact quote from task_request, user_update:<id>, or original_file:<path>, and explain "
+    "why each change follows from it. Original requirements, confirmed delivery constraints, "
+    "and user-fixed commands cannot be changed through this tool."
+)
+QUOTE_ERROR = "The cited source or exact quotation could not be verified. " + REVISION_GUIDANCE
 
 
 class Evidence(BaseModel):
@@ -24,8 +31,9 @@ class Evidence(BaseModel):
 
 class Correction(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    before: str = Field(min_length=1, max_length=32768)
-    after: str = Field(min_length=1, max_length=32768)
+    field: Literal["test_code", "test_driver", "execution_checks", "regression_command"] = "test_code"
+    before: str = Field(max_length=32768)
+    after: str = Field(max_length=32768)
     evidence_ids: list[str] = Field(min_length=1, max_length=24)
     reason: str = Field(min_length=1, max_length=1600)
 
@@ -103,21 +111,33 @@ def verify_sources(loop, items):
     return rows
 
 
-def prepare(loop, base_ref, old_code, new_code, items, corrections):
+def prepare(loop, base_ref, old_spec, new_spec, items, corrections,
+            old_regression="", new_regression=""):
+    if edits.protected(old_spec) != edits.protected(new_spec):
+        raise ValueError("A correction cannot change original requirements or a user-fixed command. "
+                         + REVISION_GUIDANCE)
     sources = verify_sources(loop, items)
     ids = {item.id for item in items}
     used = {ref for item in corrections for ref in item.evidence_ids}
     if not corrections or used != ids or any(not item.reason.strip() for item in corrections):
-        raise ValueError("Every correction requires cited evidence and a reason; no unused references")
-    revised = rewrite(old_code, corrections)
-    if revised != new_code:
-        raise ValueError("Undeclared acceptance changes; test_code must exactly match the listed corrections")
+        raise ValueError("Every correction requires valid cited evidence and a reason; no unused references. "
+                         + REVISION_GUIDANCE)
+    before = edits.materials(old_spec, old_regression)
+    after = edits.materials(new_spec, new_regression)
+    revised = edits.apply(before, corrections)
+    if revised != after:
+        fields = [name for name in edits.FIELDS if revised[name] != after[name]]
+        raise ValueError("Undeclared acceptance changes in " + ", ".join(fields)
+                         + "; all submitted fields must match the listed corrections. "
+                         + REVISION_GUIDANCE)
     return {
         "rule_version": RULE_VERSION,
         "base_version": base_ref,
         "original_source": loop.baseline.digest,
-        "before_code_sha256": sha(old_code),
-        "after_code_sha256": sha(new_code),
+        "protected_sha256": sha(json.dumps(edits.protected(old_spec), sort_keys=True)),
+        "before_materials_sha256": sha(json.dumps(before, sort_keys=True)),
+        "after_materials_sha256": sha(json.dumps(after, sort_keys=True)),
+        "changed_fields": [name for name in edits.FIELDS if before[name] != after[name]],
         "evidence": sources,
         "corrections": [item.model_dump() for item in corrections],
         "semantic_correctness_proven": False,

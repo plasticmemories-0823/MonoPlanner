@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
-from agent.storage.records import save
+from agent.storage.records import save, immutable
 from agent.source.snapshots import _safe_file
 
 
@@ -91,9 +91,33 @@ class LocalHistory:
         db = self.root / 'history.sqlite3'
         if db.is_symlink():
             raise ValueError('History database cannot be a link')
-        if not db.exists() and (self.root / 'state.json').exists():
-            raise ValueError('Existing archive has no valid index; explicit migration is required')
-        self.connection = sqlite3.connect(db, timeout=5)
+        marker = self.root / 'state.json'
+        if not db.exists() and marker.exists():
+            if json.loads(marker.read_text('utf-8')).get('journal_version') != 1:
+                raise ValueError('Existing archive has no valid index; explicit migration is required')
+        try:
+            self.connection = sqlite3.connect(db, timeout=5)
+            healthy = self.connection.execute('PRAGMA quick_check').fetchone()[0]
+            if healthy != 'ok':
+                raise sqlite3.DatabaseError('Task index integrity failure')
+        except sqlite3.DatabaseError:
+            if self.connection is not None:
+                self.connection.close()
+                self.connection = None
+            if (not marker.exists()
+                    or json.loads(marker.read_text('utf-8')).get('journal_version') != 1
+                    or not any((self.root / 'history/checkpoints').glob('*.json'))):
+                raise
+            import uuid
+
+            # 索引是派生数据；损坏原件另存，重建仍需通过完整日志链与所有原件哈希。
+            backup = self.root / ('history-corrupt-' + uuid.uuid4().hex + '.sqlite3')
+            db.replace(backup)
+            for suffix in ('-wal', '-shm', '-journal'):
+                sidecar = Path(str(db) + suffix)
+                if sidecar.exists():
+                    _safe_file(self.root, Path(sidecar.name)).replace(Path(str(backup) + suffix))
+            self.connection = sqlite3.connect(db, timeout=5)
         self.connection.execute('PRAGMA synchronous=FULL')
         self.connection.executescript(
             '''
@@ -110,10 +134,12 @@ class LocalHistory:
                 self.root / 'state.json',
                 {
                     'format': 'task-history-reference',
+                    'journal_version': 1,
                     'database': 'history.sqlite3',
                     'meaning': 'Progress references only; original history is in this archive.',
                 },
             )
+        self._reconcile_journal()
 
     # ========================================================================
     # 不可变记录与引用完整性
@@ -122,14 +148,7 @@ class LocalHistory:
         path = self.root / relative
         raw = encode(value).encode('utf-8') if raw is None else raw
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            if path.is_symlink() or path.read_bytes() != raw:
-                raise ValueError('Immutable history changed: ' + relative)
-        else:
-            with path.open('xb') as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
+        immutable(path, raw)
         return {'path': relative, 'sha256': sha(raw)}
 
     def _checked(self, reference):
@@ -200,6 +219,8 @@ class LocalHistory:
     # 检查点、事件与原始消息提交
     # ========================================================================
     def record(self, state, event, payload):
+        if getattr(self, '_index_failed', False):
+            raise OSError('Durable checkpoint awaits index reconciliation; stop this owner')
         packed = dict(state)
         packed['history_refs'] = [self._message(m) for m in packed.pop('history')]
         if 'chat_history' in packed:
@@ -222,57 +243,71 @@ class LocalHistory:
         number = self.last_commit + 1
         import uuid
 
-        name = 'history/checkpoints/%06d-%s.json' % (number, uuid.uuid4().hex)
-        reference = self._immutable(name, {'state': packed, 'event': event, 'payload': payload})
-        with self.connection:
-            if event in {'step_started', 'step_finished'}:
-                pid = state['pending']['id']
-                folder = self.root / 'plans' / pid / (pid + '-' + payload['id'])
-                req = json.loads((folder / 'request.json').read_text(encoding='utf-8'))
-                for filename in ('request.json', 'result.json', 'stdout.log', 'stderr.log'):
-                    file = folder / filename
-                    if file.is_file():
-                        self._register(
-                            self._reference(file),
-                            req['op'],
-                            req.get('query', ''),
-                            req.get('path', ''),
-                            payload.get('before', ''),
-                        )
-                if (
-                    event == 'step_finished'
-                    and payload.get('cache_key')
-                    and payload['status'] == 'succeeded'
-                ):
-                    item = self._reference(self.root / payload['record'])
-                    self.connection.execute(
-                        'INSERT OR REPLACE INTO read_cache VALUES(?,?,?)',
-                        (payload['cache_key'], item['path'], item['sha256']),
+        checkpoint_name = 'history/checkpoints/%06d-%s.json' % (number, uuid.uuid4().hex)
+        artifacts, cache = [], None
+
+        def register(reference, kind, query='', scope='', source=''):
+            artifacts.append({**reference, 'kind': kind, 'query': query,
+                              'scope': scope, 'source': source})
+
+        if event in {'step_started', 'step_finished'}:
+            pid = state['pending']['id']
+            folder = self.root / 'plans' / pid / (pid + '-' + payload['id'])
+            req = json.loads((folder / 'request.json').read_text(encoding='utf-8'))
+            for filename in ('request.json', 'result.json', 'completion.json',
+                             'execution-result.json', 'stdout.log', 'stderr.log'):
+                file = folder / filename
+                if file.is_file():
+                    register(
+                        self._reference(file),
+                        req['op'],
+                        req.get('query', ''),
+                        req.get('path', ''),
+                        payload.get('before', ''),
                     )
-            if event in {
-                'model_request_started',
-                'model_response_received',
-                'model_request_interrupted',
-            }:
-                call = payload['call']
-                folder = self.root / 'requests' / ('call-%04d' % call)
-                for name in ('request.json', 'response.json', 'interruption.json'):
-                    if (folder / name).is_file():
-                        self._register(self._reference(folder / name), 'model_record')
-            if event == 'plan_accepted':
-                self._register(
-                    self._reference(self.root / 'plans' / state['pending']['id'] / 'plan.json'),
-                    'plan',
-                )
-            if event == 'plan_finished':
-                self._register(
-                    self._reference(self.root / 'plans' / payload['plan'] / 'result.json'),
-                    'plan_result',
-                )
-            self.connection.execute(
-                'INSERT INTO commits VALUES(?,?,?)',
-                (number, reference['path'], reference['sha256']),
+            if (
+                event == 'step_finished'
+                and payload.get('cache_key')
+                and payload['status'] == 'succeeded'
+            ):
+                item = self._reference(self.root / payload['record'])
+                cache = [payload['cache_key'], item['path'], item['sha256']]
+        if event in {
+            'model_request_started',
+            'model_response_received',
+            'model_request_interrupted',
+        }:
+            call = payload['call']
+            folder = self.root / 'requests' / ('call-%04d' % call)
+            for name in ('request.json', 'response.json', 'completion.json', 'interruption.json'):
+                if (folder / name).is_file():
+                    register(self._reference(folder / name), 'model_record')
+        if event == 'plan_accepted':
+            register(
+                self._reference(self.root / 'plans' / state['pending']['id'] / 'plan.json'),
+                'plan',
             )
+        if event == 'plan_finished':
+            register(
+                self._reference(self.root / 'plans' / payload['plan'] / 'result.json'),
+                'plan_result',
+            )
+        if event == 'final_acceptance_finished':
+            folder = Path(payload['record']).parent
+            for name in ('result.json', 'completion.json', 'candidate/manifest.json'):
+                register(self._reference(folder / name), 'acceptance_result')
+        previous = self.connection.execute(
+            'SELECT sha256 FROM commits WHERE seq=?', (self.last_commit,),
+        ).fetchone()
+        value = {'state': packed, 'event': event, 'payload': payload, 'sequence': number,
+                 'previous': previous[0] if previous else None,
+                 'artifacts': artifacts, 'read_cache': cache}
+        reference = self._immutable(checkpoint_name, value)
+        try:
+            self._index_checkpoint(number, reference, value)
+        except Exception:
+            self._index_failed = True
+            raise
         self.last_commit = number
         with (self.root / 'events.jsonl').open('a', encoding='utf-8') as out:
             out.write(
@@ -282,6 +317,70 @@ class LocalHistory:
     # ========================================================================
     # 恢复索引与派生材料检索
     # ========================================================================
+    def _index_checkpoint(self, number, reference, value):
+        with self.connection:
+            for item in value.get('artifacts', []):
+                self._checked_bytes(item)
+                self._register(item, item['kind'], item['query'], item['scope'], item['source'])
+            cached = value.get('read_cache')
+            if cached:
+                self.connection.execute('INSERT OR REPLACE INTO read_cache VALUES(?,?,?)', cached)
+            self.connection.execute('INSERT INTO commits VALUES(?,?,?)',
+                                    (number, reference['path'], reference['sha256']))
+
+    def _checked_bytes(self, reference):
+        raw = _safe_file(self.root, Path(reference['path'])).read_bytes()
+        if sha(raw) != reference['sha256']:
+            raise ValueError('Recorded history checksum mismatch: ' + reference['path'])
+        return raw
+
+    def _reconcile_journal(self):
+        # 只导入原子发布且父哈希连续的原件；分叉、缺页和篡改都不能猜测选择。
+        rows = {row[0]: (row[1], row[2]) for row in self.connection.execute(
+            'SELECT seq,path,sha256 FROM commits')}
+        candidates = {}
+        for path in (self.root / 'history/checkpoints').glob('*.json'):
+            reference = self._reference(path)
+            value = json.loads(self._checked_bytes(reference))
+            number = value.get('sequence')
+            if number is None:
+                continue  # 旧格式只能使用原完整索引，不能凭文件猜恢复。
+            if type(number) is not int or number < 1 or number in candidates:
+                raise ValueError('Checkpoint journal is branched or invalid')
+            candidates[number] = (reference, value)
+        previous = None
+        for number in sorted(candidates):
+            reference, value = candidates[number]
+            if number != 1 and number - 1 not in candidates:
+                raise ValueError('Checkpoint journal has a gap')
+            if value['previous'] != previous:
+                raise ValueError('Checkpoint journal parent checksum mismatch')
+            if number in rows:
+                if rows[number] != (reference['path'], reference['sha256']):
+                    raise ValueError('Checkpoint index differs from durable journal')
+            else:
+                self._index_checkpoint(number, reference, value)
+                self.stats['reconciled_checkpoints'] = self.stats.get('reconciled_checkpoints', 0) + 1
+            previous = reference['sha256']
+        for path in (self.root / 'history/derived').glob('*.json'):
+            item = json.loads(_safe_file(self.root, path.relative_to(self.root)).read_bytes())
+            self._checked_bytes(item)
+            with self.connection:
+                self._register(item, item['kind'], source=item['source'])
+        self.last_commit = self.connection.execute('SELECT COALESCE(MAX(seq),0) FROM commits').fetchone()[0]
+        self._index_failed = False
+        if candidates and len(candidates) == self.last_commit:
+            # events.jsonl 仅为展示投影。补齐丢失或末行半写，不改变不可变检查点。
+            events = [encode({'kind': value['event'], 'payload': value['payload'],
+                              'checkpoint': reference['path']})
+                      for reference, value in (candidates[n] for n in sorted(candidates))]
+            expected = ('\n'.join(events) + '\n').encode('utf-8')
+            path = self.root / 'events.jsonl'
+            if not path.exists() or path.read_bytes() != expected:
+                from agent.storage.records import write_bytes
+
+                write_bytes(path, expected)
+
     def load(self):
         row = self.connection.execute(
             'SELECT seq,path,sha256 FROM commits ORDER BY seq DESC LIMIT 1'
@@ -318,8 +417,11 @@ class LocalHistory:
 
     def register_derived(self, path, kind, source):
         """不可变文件准备完成后，仅由所属主线程调用。"""
+        reference = self._reference(path)
+        item = {**reference, 'kind': kind, 'source': source}
+        self._immutable('history/derived/' + sha(encode(item).encode('utf-8')) + '.json', item)
         with self.connection:
-            self._register(self._reference(path), kind, source=source)
+            self._register(reference, kind, source=source)
 
     def find(self, query, limit=20, prefix=""):
         if Path(prefix).is_absolute() or ".." in Path(prefix).parts or ":" in prefix:

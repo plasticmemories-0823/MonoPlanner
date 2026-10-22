@@ -261,6 +261,10 @@ try {
     "a new implementation request presents a plan and awaits confirmation without dispatching work",
   );
   await send("按这个计划开始");
+  await page.getByRole("button", { name: "确认此方案并执行", exact: true }).waitFor();
+  assert.equal((await api(`/conversations/${first}/snapshot`)).work, null);
+  await page.getByRole("button", { name: "确认此方案并执行", exact: true }).click();
+  report.checks.push("only the human confirmation control starts the saved delivery proposal");
   const started = await until(async () => {
     const value = await api(`/conversations/${first}/snapshot`);
     return value.work && ["running", "executing"].includes(value.work.status) && value;

@@ -101,6 +101,15 @@ def projection(root, task, seq, record, db):
             status='running' if event == 'step_started' else payload['status'],
         )
         return row
+    if event == 'boundary_hints_read':
+        row.update(
+            id=f"{task['id']}-boundary-{payload['sha256']}",
+            kind='operation',
+            label='已读取边界提醒',
+            detail=', '.join(payload['keys']),
+            status='completed',
+        )
+        return row
     phases = {
         'acceptance_trial_started': ('trial', '正在原始源码上试跑验收'),
         'acceptance_trial_finished': ('trial', '原始源码验收结果'),

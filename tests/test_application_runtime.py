@@ -21,6 +21,31 @@ def command(text='请直接修改项目', kind='message'):
     return {'id': str(uuid.uuid4()), 'kind': kind, 'text': text}
 
 
+def test_missing_frozen_runtime_stops_before_work_and_can_be_explicitly_retried(setup):
+    from agent.runtime.bridge import WorkerUnavailable
+
+    store, conversation, _ = setup
+    incoming = command()
+    store.submit(conversation, incoming)
+    job = store.create_work(conversation, incoming['id'])
+    store.command_state(conversation, incoming['id'], 'applied')
+
+    def unavailable(*_):
+        raise WorkerUnavailable('Engine file integrity failure')
+
+    scheduler = Scheduler(store, work_factory=unavailable)
+    try:
+        scheduler._work(job)
+        saved = store.work(job['task_id'])
+        assert saved['status'] == 'paused'
+        assert 'Engine file integrity failure' in saved['reason']
+        assert store.usage(conversation)['work']['calls'] == 0
+        result = store.submit(conversation, command(kind='resume'))
+        assert result['received']
+    finally:
+        scheduler.close()
+
+
 def answer(content='', **kwargs):
     return AIMessage(content=content, response_metadata={'finish_reason': 'stop'},
                      usage_metadata={'input_tokens': 100, 'output_tokens': 20, 'total_tokens': 120,
@@ -117,12 +142,47 @@ def test_recovery_classifies_inflight_without_replaying(setup):
     store.mark_sent(call)
     store.recover_interrupted()
     snapshot = store.snapshot(conversation)
-    assert snapshot['work']['status'] == 'execution_unknown'
+    assert snapshot['work']['status'] == 'interrupted'
     assert snapshot['chat_status'] == 'model_request_unknown'
     assert snapshot['usage']['chat']['unknown_calls'] == 1
     assert not store.commands(states=('running',))
-    with pytest.raises(Conflict):
-        store.submit(conversation, {'id': str(uuid.uuid4()), 'kind': 'resume'})
+    assert store.submit(conversation, {'id': str(uuid.uuid4()), 'kind': 'resume'})['received']
+    assert store.work(work['task_id'])['status'] == 'interrupted'
+
+
+def test_startup_stops_orphan_resources_without_resuming_work(setup, monkeypatch):
+    from agent.runtime import bridge
+
+    store, conversation, _ = setup
+    item = command()
+    store.submit(conversation, item)
+    job = store.create_work(conversation, item['id'])
+    store.work_state(job['task_id'], 'running')
+    stopped = []
+    monkeypatch.setattr(bridge, 'pause_work', lambda task, control, **options:
+                        stopped.append((task, options['root'])) or {'termination': []})
+    scheduler = Scheduler(store, work_factory=lambda *_: pytest.fail('Crash cannot auto-resume'))
+    try:
+        scheduler.start()
+        assert stopped == [(job['task_id'], store.root)]
+        assert store.work(job['task_id'])['status'] == 'interrupted'
+    finally:
+        scheduler.close()
+
+
+def test_only_validated_native_resume_clears_old_unconfirmed_stop(setup):
+    store, conversation, _ = setup
+    item = command()
+    store.submit(conversation, item)
+    task = store.create_work(conversation, item['id'])['task_id']
+    store.control_unconfirmed(task, 'old-pause')
+    store.work_state(task, 'paused', event='task_resumed')
+    assert store.work(task)['status'] == 'execution_unknown'
+    resume = command(kind='resume')
+    store.submit(conversation, resume)
+    store.work_state(task, 'needs_plan', event='task_resumed', applied_inputs=[resume['id']])
+    assert store.work(task)['status'] == 'needs_plan'
+    assert not store.work(task)['control_unconfirmed']
 
 
 def test_chat_preserves_rejected_tool_reasoning_and_call_pair(setup):
@@ -147,28 +207,50 @@ def test_chat_preserves_rejected_tool_reasoning_and_call_pair(setup):
     assert model.tools[0] == model.tools[1]
 
 
-def test_handoff_calls_work_once_without_running_it_inside_chat(setup):
+def delivery_args(item, project_path=".", create=False):
+    return {"project_path": project_path, "create": create, "request_message_ids": [item["id"]],
+            "targets": [{"id": "application", "artifact_type": "repository_entry",
+                         "target_runtime": "python", "entry": "app.py", "behavior": item["text"],
+                         "input_scope": "All requested inputs", "imports": "", "setup": "", "expression": "",
+                         "variables": [], "required_values": [], "argv": [],
+                         "quotes": [{"source_id": item["id"], "text": item["text"]}]}]}
+
+
+def test_handoff_calls_work_once_after_human_confirms_proposal(setup, monkeypatch):
     store, conversation, _ = setup
     item = command()
     store.submit(conversation, item)
-    model = FakeModel([answer('开始处理', tool_calls=[{'name': 'start_work', 'args': {'project_path': '.', 'create': False}, 'id': 'go'}])])
-    calls = []
-
-    def dispatch(thread, incoming, **options):
-        calls.append(incoming['text'])
-        return store.create_work(thread, incoming['id'], **options)
-
-    bot = Chatbot(store, dispatch, factory=lambda _: model)
+    model = FakeModel([answer(tool_calls=[{
+        'name': 'prepare_work', 'args': delivery_args(item), 'id': 'proposal',
+    }])])
+    bot = Chatbot(store, lambda *_: pytest.fail('Model self-confirmed work'), factory=lambda _: model)
     bot.run(conversation, item)
-    assert calls == [item['text']]
-    assert store.snapshot(conversation)['work']['status'] == 'queued'
-    assert len(model.requests) == 1
+    assert store.snapshot(conversation)['work'] is None and len(model.requests) == 1
+    proposal = next(row for row in store.snapshot(conversation)['messages'] if row['source'] == 'work_proposal')
+    confirmation = {'id': str(uuid.uuid4()), 'kind': 'confirm_work',
+                    'proposal_id': proposal['id'].split(':')[1]}
+    store.command_state(conversation, item['id'], 'applied')
+    store.submit(conversation, confirmation)
+    scheduler = Scheduler(store)
+    monkeypatch.setattr(scheduler, '_schedule_work', lambda *_: None)
+    try:
+        scheduler.tick()
+        task = store.snapshot(conversation)['work']
+        assert task['status'] == 'queued'
+        original = store.work(task['task_id'])
+        assert original['request'] == item['text']
+        assert original['confirmed_requirements']['confirmation']['id'] == confirmation['id']
+        store.submit(conversation, {**confirmation, 'id': str(uuid.uuid4())})
+        scheduler.tick()
+        assert len(store.work_for_conversation(conversation)) == 1
+    finally:
+        scheduler.close()
 
 
 def test_progress_has_read_only_tools_and_no_work_history_effect(setup):
     store, conversation, _ = setup
     model = FakeModel([
-        answer(tool_calls=[{'name': 'start_work', 'args': {}, 'id': 'forbidden'}]),
+        answer(tool_calls=[{'name': 'prepare_work', 'args': {}, 'id': 'forbidden'}]),
         answer('已完成调查，尚未验收'),
     ])
     dispatches = []
@@ -284,7 +366,7 @@ def test_complete_but_untrusted_tool_identity_stops_without_execution(setup):
     store, conversation, _ = setup
     item = command()
     store.submit(conversation, item)
-    model = FakeModel([answer(tool_calls=[{'name': 'start_work', 'args': {}, 'id': ''}])])
+    model = FakeModel([answer(tool_calls=[{'name': 'prepare_work', 'args': {}, 'id': ''}])])
     executed = []
     bot = Chatbot(store, lambda *_: executed.append(True), factory=lambda _: model)
     with pytest.raises(ValueError, match='identity'):
@@ -357,20 +439,6 @@ def test_duplicate_service_owner_cannot_reconcile_live_state(setup):
     second.close()
 
 
-def test_legacy_conversation_is_read_only_and_not_migrated(setup):
-    store, _, repo = setup
-    from tests.legacy.conversations import ConversationStore
-
-    legacy_id = str(uuid.uuid4())
-    ConversationStore(store.root).save_session(legacy_id, {
-        'repo': str(repo), 'task_id': 'a' * 32, 'status': 'paused',
-        'public_messages': [{'type': 'human', 'data': {'content': '旧版本原文', 'id': 'old'}}],
-    })
-    old = store.snapshot(legacy_id)
-    assert old['read_only'] and old['messages'][0]['content'] == '旧版本原文'
-    assert any(item['thread_id'] == legacy_id for item in store.list())
-    with pytest.raises(KeyError):
-        store.submit(legacy_id, command())
 
 
 def test_display_failure_does_not_cancel_saved_chat_response(setup, monkeypatch):
@@ -535,17 +603,6 @@ def test_chat_record_reader_allows_committed_output_but_not_private_files(setup)
         history.close()
 
 
-def test_legacy_identity_cannot_be_recreated_as_new_application_conversation(setup):
-    store, _, _ = setup
-    from tests.legacy.conversations import ConversationStore
-
-    old_id = str(uuid.uuid4())
-    original = {'status': 'paused', 'task_id': 'a' * 32, 'request': '保留原件'}
-    legacy = ConversationStore(store.root)
-    legacy.save_session(old_id, original)
-    with pytest.raises(Conflict, match='旧版本'):
-        store.create(old_id)
-    assert legacy.session(old_id) == original
 
 
 def test_automatic_progress_stops_after_three_requests_without_controlling_work(setup):
@@ -595,8 +652,8 @@ def test_failed_container_stop_is_not_reported_as_delivered(setup):
     scheduler._control(conversation, task, {'id': str(uuid.uuid4()), 'kind': 'pause'},
                        lambda *_: {'termination': [{'container': 'x', 'stopped': True}]})
     store.work_state(task, 'paused')
-    with pytest.raises(Conflict, match='Unknown'):
-        store.submit(conversation, {'id': str(uuid.uuid4()), 'kind': 'resume'})
+    assert store.submit(conversation, {'id': str(uuid.uuid4()), 'kind': 'resume'})['received']
+    assert store.work(task)['status'] == 'execution_unknown'
     scheduler.close()
 
 
@@ -691,10 +748,15 @@ def test_finished_or_uncertain_work_does_not_accept_pending_control(setup, statu
     store.submit(conversation, item)
     task = store.create_work(conversation, item['id'])['task_id']
     store.work_state(task, status)
-    for kind in ('resume', 'supplement'):
+    with pytest.raises(Conflict):
+        store.submit(conversation, command('只针对原任务补充', 'supplement'))
+    if status in {'execution_unknown', 'model_request_unknown', 'runtime_error'}:
+        assert store.submit(conversation, command(kind='resume'))['received']
+        assert store.work(task)['status'] == status
+    else:
         with pytest.raises(Conflict):
-            store.submit(conversation, command('只针对原任务补充', kind))
-    assert not store.commands(task=task)
+            store.submit(conversation, command(kind='resume'))
+        assert not store.commands(task=task)
 
 
 @pytest.mark.parametrize('restart', [False, True])
@@ -731,6 +793,28 @@ def test_handoff_waiting_for_dispatch_keeps_service_busy(setup):
         assert scheduler.status()['running_work'] == 0
         assert scheduler.status()['queued_work'] == 1
         assert scheduler.status()['pending'] == 1
+    finally:
+        scheduler.close()
+
+
+def test_already_consumed_supplement_does_not_resume_paused_work(setup, monkeypatch):
+    from support import fixture_delivery
+
+    store, conversation, _ = setup
+    first = command('Keep the application behavior')
+    store.submit(conversation, first)
+    work = store.create_work(conversation, first['id'],
+                             work_options={'confirmed_requirements': fixture_delivery(first['text'])})
+    store.command_state(conversation, first['id'], 'applied')
+    update = command('Retain all required inputs', 'supplement')
+    store.submit(conversation, update)
+    store.work_state(work['task_id'], 'paused', applied_inputs=[update['id']])
+    store.record_event(conversation, 'requirement_discussion_started', {'id': update['id']})
+    scheduler = Scheduler(store)
+    monkeypatch.setattr(scheduler, '_schedule_work', lambda *_: pytest.fail('Consumed input resumed work'))
+    try:
+        scheduler.tick()
+        assert store.work(work['task_id'])['status'] == 'paused'
     finally:
         scheduler.close()
 
@@ -920,50 +1004,28 @@ def test_external_result_requires_original_tool_target_and_conversation(setup):
 
 
 
-def test_default_plan_question_waits_for_user_before_work_handoff(setup):
-    """假轨迹验证交接时机与原文保留；不把它当成真实模型服从率测试。"""
+def test_default_plan_question_waits_before_preparing_confirmable_work(setup):
+    """讨论和方案都不是执行权限；确认必须绑定保存的完整需求。"""
     store, conversation, _ = setup
-    proposal = '我会做一个能直接打开的动画网页。是否按照这个计划开始制作？'
+    first = command('Create a runnable Python application; preserve the interface')
+    confirmation = command('Prepare that plan')
     model = FakeModel([
-        answer(proposal),
-        answer('我开始制作这个动画。', tool_calls=[
-            {'name': 'start_work', 'args': {'project_path': 'pelican-bike', 'create': True}, 'id': 'confirmed-start'},
-        ]),
+        answer('I can implement the application in a new child project. Shall I prepare its delivery plan?'),
+        answer(tool_calls=[{'name': 'prepare_work', 'args': delivery_args(first, 'application', True), 'id': 'proposal'}]),
     ])
-    calls = []
-
-    def dispatch(thread, incoming, **options):
-        calls.append(incoming['id'])
-        return store.create_work(thread, incoming['id'], **options)
-
-    bot = Chatbot(store, dispatch, factory=lambda _: model)
-    first = command('帮我画鹈鹕骑自行车')
+    bot = Chatbot(store, lambda *_: pytest.fail('Chat model started work'), factory=lambda _: model)
     store.submit(conversation, first)
     bot.run(conversation, first)
-    assert not calls and store.snapshot(conversation)['work'] is None
+    assert store.snapshot(conversation)['work'] is None
     assert not (store.root / 'tasks').exists()
-    assert store.snapshot(conversation)['messages'][-1]['content'] == proposal
-
-    # 复用旧提示的询问、等待和明确授权规则，而非只在README里描述。
-    expected_rules = (
-        'This is an interactive conversation with one general assistant. Default to discussing the request, clarifying useful details and proposing an approach, not starting coding work. Broad requests such as "帮我做一个xxx", "做一个淘宝首页html可以吗", "I want a website" or "help me build X" express a goal, not permission to create or change files. Do not invent operations to answer a greeting or discussion.',
-        'Begin coding work only after the user clearly authorizes actual implementation: for example "你直接动手", "你直接帮我改", "现在开始实现", "按这个方案执行", or an explicit request to create and save specified files. Judge the meaning in context, not isolated keywords. A clear yes to your specific question asking whether to begin actual work is authorization; liking an idea or agreeing on details alone is not. A selected workspace is not authorization.',
-        "Before authorization, discuss the important purpose, scope, behavior, appearance and constraints that matter for this request; avoid an exhaustive questionnaire or unnecessary investigation. Offer sensible defaults. When you have enough information, summarize the proposed result briefly and ask whether to start actual work, then WAIT for the user's answer. Do not ask and call a work tool in the same response. Discussion may include complete code examples or a draft HTML page in normal text; do not save, execute or generate acceptance tests for the draft.",
-        'Explicit restrictions such as "先不改代码", "只讨论", "不要写文件" or "先给代码，不要保存" take precedence over a broad creation goal. Do not reinterpret them as permission to create a new file while leaving existing files unchanged. If the user gives contradictory instructions, ask which behavior is intended before acting.',
-    )
     rules = model.requests[0][0].content
-    for paragraph in expected_rules:
-        assert paragraph in rules
-    assert 'do not demand a second ritual confirmation' not in rules
-
-    confirmation = command('按这个计划开始')
+    assert 'A broad goal alone is not permission to create or change files' in rules
+    assert 'human confirmation control' in rules
     store.submit(conversation, confirmation)
     bot.run(conversation, confirmation)
-    task = store.snapshot(conversation)['work']
-    assert calls == [confirmation['id']]
-    assert task['input_id'] == confirmation['id'] and task['status'] == 'queued'
-    original = store.work(task['task_id'])['public_conversation']
-    assert first['text'] in str(original) and proposal in str(original)
+    assert store.snapshot(conversation)['work'] is None
+    proposals = [m for m in store.snapshot(conversation)['messages'] if m['source'] == 'work_proposal']
+    assert len(proposals) == 1 and first['text'] in proposals[0]['content']
     assert len(model.requests) == 2
 
 
@@ -1042,49 +1104,3 @@ def test_project_context_reads_can_be_batched_without_losing_tool_results(setup)
     assert set(results) == {'location', 'status'}
     assert results['location']['workspace'] == str(repo)
     assert results['location']['current_project'] is None and results['status'] is None
-
-
-def test_purge_stops_background_index_before_removing_task_cache(setup, monkeypatch):
-    from test_rag_models import BlockingEmbedding, start_background
-    from agent.rag import models
-    from agent.application import purge
-
-    store, conversation, repo = setup
-    item = command()
-    store.submit(conversation, item)
-    task = store.create_work(conversation, item['id'])['task_id']
-    store.command_state(conversation, item['id'], 'applied')
-    store.work_state(task, 'paused')
-    store.chat_state(conversation, 'chat_complete')
-    store.visibility(conversation, 'deleted')
-    model = BlockingEmbedding()
-    path = start_background(store.root, task, model)
-    scheduler = Scheduler(store)
-    remove = purge.remove_directory
-
-    def checked_remove(target):
-        assert not models.pending_jobs(store.root)
-        with pytest.raises(models.ModelUnavailable, match='closed'):
-            with models.background_scope(store.root, task):
-                pytest.fail('Purged task can still dispatch a background build')
-        return remove(target)
-
-    monkeypatch.setattr(purge, 'remove_directory', checked_remove)
-    cancel = models.cancel_jobs
-    stops = []
-    def release_on_cancel(root, task_ids=None, **kwargs):
-        result = cancel(root, task_ids, **{**kwargs, 'timeout': 0})
-        if kwargs.get('close') and task_ids == [task]:
-            stops.append(result['stopped'])
-            model.release.set()
-        return cancel(root, task_ids, **kwargs)
-    monkeypatch.setattr(models, 'cancel_jobs', release_on_cancel)
-    try:
-        assert scheduler.purge(conversation)['deleted']
-        assert stops == [False]
-        assert not path.parents[2].exists()
-        assert repo.exists()
-    finally:
-        model.release.set()
-        models.cancel_jobs(store.root, [task], close=True, timeout=2)
-        scheduler.close()

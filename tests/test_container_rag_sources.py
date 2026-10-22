@@ -239,7 +239,7 @@ class ContainerSourceTests(unittest.TestCase):
         self.assertEqual(len(result['hits']), 1)
         self.assertEqual(result['hits'][0]['origin'], 'container/toolchain')
         self.assertEqual(len(list((self.owner.root / 'rag/container/originals').iterdir())), 1)
-        self.assertEqual(result['rewrite']['status'], 'not_triggered')
+        self.assertNotIn('rewrite', result)
 
     def test_long_line_byte_cursor_preserves_version_and_partial_read_status(self):
         self.backend.files['/usr/include/a.h'] = ('中' * 200 + '\nend').encode()
@@ -290,7 +290,7 @@ class ContainerSourceTests(unittest.TestCase):
         documents = {key: Document(key, 'v', 'same needle', path=key) for key in (first, other)}
         with Index(self.root / 'rank.sqlite', Scope('p', 't'), RagConfig(), lambda text: len(text)) as index:
             for document in documents.values():
-                index.upsert(document, exact=True)
+                index.upsert(document)
             retriever = Retriever(index, len, read_source=lambda source, version: documents[source].text)
             query = Query('needle', {key: 'v' for key in documents}, source_priorities={first: 1})
             result = json.loads(retriever.retrieve(query).message)

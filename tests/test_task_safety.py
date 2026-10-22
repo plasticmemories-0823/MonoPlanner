@@ -56,7 +56,7 @@ class TaskSafetyTests(unittest.TestCase):
             [], 'return 4', StepBudget(max_steps=8)
         )
         self.assertEqual(result['status'], 'verified_success', result)
-        self.assertEqual(len(self.model.calls), 7)
+        self.assertEqual(len(self.model.calls), 8)
 
     def test_corrections_still_obey_total_task_budget(self):
         bad = {'kind': 'inspect', 'note': 'invalid', 'steps': []}

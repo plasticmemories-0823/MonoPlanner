@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "entries": {
+    "general": {
+      "summary": "Input scope, assumptions, counterexamples and goal preservation.",
+      "hints": [
+        "Start from the original requirement and public contract: identify allowed inputs, states, outputs and observable behavior. Keep unresolved interpretations explicit.",
+        "Trace every added precondition to evidence. Special-case tests do not replace the unrestricted case; assumptions, filtering or preprocessing must not remove an allowed boundary or branch before validation.",
+        "Look for a counterexample that separates the proposed implementation from the required behavior. Cover meaningful endpoints and both sides of a transition where the domain permits them.",
+        "Obtain expected behavior from requirements or independent public evidence, not from the implementation being tested. Undefined behavior, a required error and a valid result are different outcomes.",
+        "Turn applicable reminders into checks of the actual entry and deliverable. Record unverified gaps; passing selected checks does not prove complete coverage, and apparent simplicity is not a reason to skip review."
+      ]
+    },
+    "math": {
+      "summary": "Domains, singularities, limits and probability endpoints.",
+      "hints": [
+        "Check the stated number domain and function domain before division, roots, logarithms, inverse functions or powers. Zero denominators and invalid-domain inputs require specified behavior, not an invented restriction.",
+        "At singularities, discontinuities and piecewise transitions, distinguish the value at the point, one-sided limits, two-sided limits and any explicitly defined extension. Do not substitute one for another.",
+        "Verify that cancellation, simplification or added symbolic assumptions preserve the allowed domain and branches. Test the general expression as well as any justified special cases.",
+        "Check signs, periodic boundaries, branch choices, indeterminate forms and empty or degenerate aggregates when relevant. Confirm endpoint inclusion from the contract.",
+        "For probabilities, check 0 and 1, normalization, impossible or certain events and empty support. Conditioning on zero probability or assuming independence needs explicit justification."
+      ]
+    },
+    "numeric": {
+      "summary": "Precision, overflow, rounding, money and units.",
+      "hints": [
+        "Check representable minima and maxima, overflow, underflow and loss of precision. Decide from the contract whether non-finite values and signed zero are supported or rejected.",
+        "Check cancellation, accumulated error and comparisons near a tolerance threshold. Choose tolerances from an accuracy requirement or justified error bound, not to make a result pass.",
+        "Verify rounding direction, halfway cases and the stage where rounding occurs. Money, percentages and integer conversions can change at these boundaries.",
+        "Track units and scale through every conversion, including inverse conversions and mixed-unit inputs. A numerically plausible result can still have the wrong unit.",
+        "Include negative values, zero, very small and very large magnitudes where allowed. Clamping or coercion must not silently replace the required result or error."
+      ]
+    },
+    "collections": {
+      "summary": "Empty collections, singleton cases, indexing and ordering.",
+      "hints": [
+        "Check empty, singleton and multiple-element inputs. Distinguish a missing collection from a present empty collection when the interface does.",
+        "Check first and last positions, inclusive versus exclusive endpoints, lengths and out-of-range access. Negative indices must follow the documented convention.",
+        "Check duplicates, missing keys, equality rules and stable ordering. Set-like behavior must not accidentally replace sequence or multiset behavior.",
+        "For slicing, pagination and iteration, check exact page boundaries, partial final pages, termination and no missing or duplicated elements.",
+        "Check mutation during iteration, shared elements and aliasing where supported. Large collections and deeply nested data should respect documented resource limits."
+      ]
+    },
+    "text": {
+      "summary": "Unicode, whitespace, escaping, parsing and text limits.",
+      "hints": [
+        "Distinguish missing text, empty text, whitespace-only text and valid content. Trimming or normalization must be authorized by the interface.",
+        "Check Unicode, combining characters and the unit used for length or positions: bytes, code points or user-perceived characters are not interchangeable.",
+        "Check encoding failures, line endings, case rules and locale-sensitive operations. Invalid input must not be silently reported as an empty successful result.",
+        "Check delimiters, escaping and nested syntax across parse or serialization boundaries. Treat data as data rather than executable code, paths or instructions.",
+        "Check long lines, size limits and truncation. Preserve exact text where required, and distinguish partial content from a complete read or parse."
+      ]
+    },
+    "state": {
+      "summary": "Initialization, lifecycle, cleanup and recovery.",
+      "hints": [
+        "Identify legal states and transitions, including uninitialized, active, completed, cancelled and failed states. Do not assume a previous step succeeded without evidence.",
+        "Check partial initialization and failure after each meaningful side effect. Cleanup must release owned resources without deleting another operation's state.",
+        "Check repeated use, restart and interrupted recovery. Preserve committed work and counters; an unknown outcome is not proof that nothing happened.",
+        "Check aliasing, stale caches, resource ownership and lifetime. Restoring a value is not enough if associated handles or dependent state remain invalid.",
+        "Verify cancellation and termination conditions, including blocked work. Report incomplete cleanup or recovery instead of converting it into success."
+      ]
+    },
+    "time": {
+      "summary": "Time zones, calendar boundaries and clock behavior.",
+      "hints": [
+        "Distinguish instants, local dates, durations and calendar periods. State the time zone and endpoint convention used by comparisons or windows.",
+        "Check ambiguous and nonexistent local times, offset changes and conversion across zones. Do not assume every local day has the same duration.",
+        "Check midnight, month and year transitions, leap-day handling and expired or exactly-on-deadline inputs as applicable.",
+        "Use a clock appropriate to the contract: wall-clock adjustments can break elapsed-time assumptions. Check timestamp precision and conversion rounding.",
+        "Check ordering of delayed or out-of-order events, repeated timestamps and interval overlap. Define the treatment of missing or invalid dates from evidence."
+      ]
+    },
+    "permissions": {
+      "summary": "Identity, authorization, thresholds and scope changes.",
+      "hints": [
+        "Separate authenticated identity from authorization for the requested resource and operation. Check both allowed and denied cases, including missing credentials.",
+        "Check ownership, tenant or project boundaries and inherited permissions. Access to metadata or a parent object does not automatically authorize child content or writes.",
+        "Check expiration, revocation and permission changes between checking and acting. Bind approval to the actual action and resource when required.",
+        "For eligibility rules, check the threshold and adjacent values using the stated units, dates and inclusivity. Do not invent legal or business policy from a generic reminder.",
+        "Check denied-path behavior for unintended side effects or information disclosure. Defaults and error handling must not silently grant broader access."
+      ]
+    },
+    "concurrency": {
+      "summary": "Races, atomicity, ordering, transactions and idempotence.",
+      "hints": [
+        "Identify shared state and required invariants. Test meaningful overlapping operations and alternate orderings rather than only a sequential successful run.",
+        "Check the gap between validation and use, lost updates, duplicate work and stale reads. A lock is useful only if all relevant accesses obey its scope.",
+        "Check transaction commit, rollback and partial failure across resources. A local success may not prove that the whole operation committed.",
+        "Check retry and duplicate delivery against the promised idempotence and ordering. An uncertain response must not silently trigger a second side effect.",
+        "Check deadlock, starvation, cancellation and shutdown while work is active. Completion must mean that owned work and required callbacks have actually finished."
+      ]
+    },
+    "external_io": {
+      "summary": "Network and file failures, partial results and retries.",
+      "hints": [
+        "Check unavailable dependencies, timeout, disconnection and malformed responses. Distinguish a complete empty result from an incomplete or failed operation.",
+        "Check partial reads and writes, interrupted transfers and size limits. Validate completeness and integrity before using or publishing a result.",
+        "Decide retry behavior from operation semantics and confirmed outcomes. Preserve unknown results and avoid replaying non-idempotent operations blindly.",
+        "Check file existence, path scope, access failures and changes during reading or writing. Report disk exhaustion and persistence failure without claiming the operation was saved.",
+        "Check dependency version or protocol mismatches and bounded resource use. Fallbacks must preserve the original contract rather than silently weaken it."
+      ]
+    },
+    "generation": {
+      "summary": "Generated artifacts, conversion semantics and real consumption.",
+      "hints": [
+        "Invoke the requested producer with inputs allowed by the original contract. A related API, substitute artifact or specially restricted input does not establish general correctness.",
+        "Pass the unchanged actual artifact to its intended consumer. Check successful parsing, compilation or loading where applicable before relying on execution results.",
+        "Check semantic preservation across conversions, including conditions, escaping, types, units and exceptional values. Similar-looking output can behave differently.",
+        "Exercise general and boundary inputs through the complete producer-to-consumer path. Pre-simplification or hand-written wrappers must not remove the behavior under test.",
+        "Use independent expected behavior and retain evidence linking the producer input, artifact and consumer result. Text matching or a round trip alone may hide a shared error."
+      ]
+    },
+    "interaction": {
+      "summary": "Empty, loading, error, cancellation and repeated-action flows.",
+      "hints": [
+        "Check empty, loading, ready and error states and the transitions between them. Visible success must correspond to a confirmed underlying result.",
+        "Check repeated clicks or submissions, cancellation, navigation away and return while work is active. Prevent unintended duplicate actions and stale result replacement.",
+        "Check invalid and partially entered input, focus or selection changes and available recovery paths. Validation messages must match what the system actually accepts.",
+        "Check permission changes, offline behavior and delayed updates. Disabled controls alone do not enforce authorization or prevent concurrent state changes.",
+        "For user-facing behavior, check applicable keyboard, assistive-technology, locale and layout constraints from the requirements. Do not silently turn optional reminders into new product requirements."
+      ]
+    }
+  }
+}

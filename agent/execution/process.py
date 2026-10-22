@@ -70,6 +70,11 @@ def run_process(
     }
     for path in (stdout_path, stderr_path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
+    from agent.storage.records import save
+
+    save(Path(stdout_path).with_suffix(".intent.json"), {
+        "command": command, "shell": shell, "cwd": str(cwd),
+    })
     with Path(stdout_path).open("wb") as out, Path(stderr_path).open("wb") as err:
         process = subprocess.Popen(
             command, cwd=str(cwd), shell=shell, stdout=out, stderr=err, env=env, **options
@@ -84,6 +89,7 @@ def run_process(
         except BaseException:
             stop_process(process)
             raise
+    save(Path(stdout_path).with_suffix(".completion.json"), result)
     return result
 
 

@@ -145,7 +145,7 @@ class PreferencesTests(unittest.TestCase):
         self.assertEqual(
             [t['function']['name'] for t in bodies[0]['tools']],
             [
-                'start_work',
+                'prepare_work',
                 'web_search',
                 'web_fetch',
                 'list_files',
@@ -156,5 +156,6 @@ class PreferencesTests(unittest.TestCase):
                 'launch_application',
                 'request_file_operation',
                 'retrieve_evidence',
+                'get_requirement_sources',
             ],
         )

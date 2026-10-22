@@ -20,7 +20,7 @@ from agent.storage.recovery import code_key
 from agent.task import repair
 from agent.task.budget import StepBudget
 from agent.task.runner import TaskRunner
-from support import interrupt_after_persist
+from support import interrupt_after_persist, boundary_aware_reply
 import test_task_runner as f
 
 
@@ -52,11 +52,15 @@ class Model:
 
     def invoke(self, messages):
         self.calls.append(messages)
-        review = f.confirmation(messages)
-        if review is not None:
-            return review
-        reply = next(self.replies)
-        return reply(messages) if callable(reply) else reply
+
+        def produce():
+            review = f.confirmation(messages)
+            if review is not None:
+                return review
+            reply = next(self.replies)
+            return reply(messages) if callable(reply) else reply
+
+        return boundary_aware_reply(self, messages, produce)
 
 
 class LocalRepairTests(unittest.TestCase):
@@ -108,6 +112,133 @@ class LocalRepairTests(unittest.TestCase):
         self.assertEqual(state["history"][-1]["data"]["name"], "freeze_acceptance")
         self.assertEqual(self.model.tools[0], self.model.tools[1])
         self.assertNotIn("repair_draft", state)
+
+    def repaired_inspection(self):
+        plan = {"kind": "inspect", "note": "Inspect the public source", "steps": [
+            {"id": "read", "op": "read", "path": "sample.py", "expected_exit": []},
+        ]}
+        saved = {}
+
+        def correct(messages):
+            notice = json.loads(messages[-1].content.split("] ", 1)[1].split("\n", 1)[0])
+            saved["draft_id"] = notice["draft_id"]
+            return correction(messages, [edit("/steps/0/expected_exit", "[]", "[0]")])
+
+        return plan, saved, correct
+
+    def test_consumed_inspection_draft_stays_consumed_after_resume(self):
+        plan, saved, correct = self.repaired_inspection()
+        result = self.run_replies([f.reply(plan), correct], pause_after_steps=1)
+        self.assertEqual(result["status"], "paused", result)
+        state = self.load_state()
+        self.assertNotIn("repair_draft", state)
+        self.assertTrue((self.root / "state/drafts" / (saved["draft_id"] + ".json")).is_file())
+        result = self.run_replies([f.reply(self.candidate())])
+        self.assertEqual(result["status"], "verified_success", result)
+        self.assertEqual(self.load_state()["plan_count"], 2)
+        self.assertEqual(len(list((self.root / "state/plans/p0001").glob("*/result.json"))), 1)
+
+    def test_corrected_candidate_draft_is_consumed_when_trial_is_committed(self):
+        plan = self.candidate()
+        plan["extra"] = 1
+        interrupt, error = self.crash_on("acceptance_trial_finished")
+        with interrupt, self.assertRaises(error):
+            self.run_replies([
+                f.reply(plan),
+                lambda m: correction(m, [edit("/extra", "1", "", "remove")]),
+            ])
+        state = self.load_state()
+        self.assertTrue(state.get("acceptance_trial"))
+        self.assertNotIn("repair_draft", state)
+        self.assertEqual(len(list((self.root / "state/drafts").glob("*.json"))), 1)
+        result = self.run_replies([])
+        self.assertEqual(result["status"], "verified_success", result)
+        self.assertEqual(result["calls_this_invocation"], 1)
+
+    def test_protocol_error_after_consumed_draft_cannot_resurrect_old_work(self):
+        plan, saved, correct = self.repaired_inspection()
+        multiple = AIMessage(content="", tool_calls=[
+            {"id": "lookup", "name": "get_boundary_hints", "args": {"keys": ["general"]}},
+            {"id": "new-work", "name": "submit_plan", "args": plan},
+        ])
+
+        def stale_repair(messages):
+            for message in messages[-2:]:
+                self.assertIn("exactly one valid work tool call", message.content)
+                self.assertNotIn("allowed_paths", message.content)
+                self.assertNotIn(saved["draft_id"], message.content)
+            return AIMessage(content="", tool_calls=[{
+                "id": "stale", "name": "repair_work", "args": {
+                    "draft_id": saved["draft_id"],
+                    "edits": [edit("/steps/0/expected_exit", "[]", "[0]")],
+                },
+            }])
+
+        def recover(messages):
+            self.assertIn("requires the current draft_id", messages[-1].content)
+            self.assertNotIn("allowed_paths", messages[-1].content)
+            return f.reply(self.candidate())
+
+        result = self.run_replies([f.reply(plan), correct, multiple, stale_repair, recover])
+        self.assertEqual(result["status"], "verified_success", result)
+        self.assertEqual(self.load_state()["plan_count"], 2)
+        self.assertNotIn("repair_draft", self.load_state())
+
+    def test_protocol_error_does_not_borrow_fields_from_unconsumed_draft(self):
+        plan = self.candidate()
+        plan["extra"] = 1
+        saved = {}
+
+        def invalid_pair(messages):
+            notice = json.loads(messages[-1].content.split("] ", 1)[1].split("\n", 1)[0])
+            saved["draft_id"] = notice["draft_id"]
+            return AIMessage(content="", tool_calls=[
+                {"id": "one", "name": "get_boundary_hints", "args": {"keys": ["general"]}},
+                {"id": "two", "name": "submit_plan", "args": plan},
+            ])
+
+        def correct(messages):
+            self.assertIn("exactly one valid work tool call", messages[-1].content)
+            self.assertNotIn("allowed_paths", messages[-1].content)
+            return AIMessage(content="", tool_calls=[{
+                "id": "actual-repair", "name": "repair_work", "args": {
+                    "draft_id": saved["draft_id"], "edits": [edit("/extra", "1", "", "remove")],
+                },
+            }])
+
+        result = self.run_replies([f.reply(plan), invalid_pair, correct])
+        self.assertEqual(result["status"], "verified_success", result)
+        self.assertEqual(self.load_state()["plan_count"], 1)
+
+    def test_wrong_draft_id_does_not_advertise_another_drafts_fields(self):
+        plan = self.candidate()
+        plan["extra"] = 1
+        saved = {}
+
+        def wrong(messages):
+            reply = correction(messages, [edit("/extra", "1", "", "remove")])
+            saved.update(deepcopy(reply.tool_calls[0]["args"]))
+            reply.tool_calls[0]["args"]["draft_id"] = "unrelated-draft"
+            return reply
+
+        def correct(messages):
+            self.assertIn("requires the current draft_id", messages[-1].content)
+            self.assertNotIn("allowed_paths", messages[-1].content)
+            return AIMessage(content="", tool_calls=[{
+                "id": "current-repair", "name": "repair_work", "args": saved,
+            }])
+
+        result = self.run_replies([f.reply(plan), wrong, correct])
+        self.assertEqual(result["status"], "verified_success", result)
+
+    def test_duplicate_inspection_still_stops_without_reexecution(self):
+        plan = {"kind": "inspect", "note": "Read the same source", "steps": [
+            {"id": "read", "op": "read", "path": "sample.py"},
+        ]}
+        result = self.run_replies([f.reply(plan), f.reply(plan)])
+        self.assertEqual(result["status"], "stalled", result)
+        self.assertEqual(self.load_state()["plan_count"], 1)
+        self.assertEqual(len(list((self.root / "state/plans/p0001").glob("*/result.json"))), 1)
 
     def test_missing_field_is_explicitly_added(self):
         plan = self.candidate()
@@ -165,8 +296,8 @@ class LocalRepairTests(unittest.TestCase):
         plan, draft, read_draft, correct_draft = self.draft_read_then_correction()
         result = self.run_replies([f.reply(plan), read_draft, correct_draft])
         self.assertEqual(result["status"], "verified_success", result)
-        self.assertEqual(result["planner_calls"], 4)
-        read_result = json.loads(self.model.calls[2][-1].content)["steps"][0]
+        self.assertEqual(result["planner_calls"], 5)
+        read_result = json.loads(self.model.calls[3][-1].content)["steps"][0]
         self.assertEqual(read_result["status"], "succeeded")
         self.assertIn('"extra": 1', read_result["data"]["text"])
         accepted = json.loads((self.root / "state/plans/p0002/plan.json").read_text())
@@ -186,7 +317,7 @@ class LocalRepairTests(unittest.TestCase):
         result = self.run_replies([correct_draft])
         self.assertEqual(result["status"], "verified_success", result)
         self.assertEqual(result["calls_this_invocation"], 2)
-        self.assertEqual(result["planner_calls"], 4)
+        self.assertEqual(result["planner_calls"], 5)
         self.assertEqual(
             len(list((self.root / "state/plans/p0001").glob("p0001-*/result.json"))), 1
         )
@@ -204,9 +335,9 @@ class LocalRepairTests(unittest.TestCase):
             ]
         )
         self.assertEqual(result["status"], "verified_success", result)
-        self.assertIn("Original value does not match", self.model.calls[2][-1].content)
-        self.assertIn("query_placeholder", self.model.calls[2][-1].content)
-        self.assertIn("original_error", self.model.calls[2][-1].content)
+        self.assertIn("Original value does not match", self.model.calls[3][-1].content)
+        self.assertIn("query_placeholder", self.model.calls[3][-1].content)
+        self.assertIn("original_error", self.model.calls[3][-1].content)
         self.assertEqual(len(list((self.root / "state/drafts").glob("*.json"))), 1)
 
     def test_modified_value_is_fully_revalidated_before_execution(self):
@@ -241,9 +372,9 @@ class LocalRepairTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "task_blocked", result)
         self.assertEqual(result["rounds"][0]["verification"]["status"], "failed")
-        self.assertIn("AssertionError", str(self.model.calls[3]))
+        self.assertIn("AssertionError", str(self.model.calls[4]))
         self.assertEqual(
-            json.loads(self.model.calls[3][-1].content)["outcome"], "verification_failed"
+            json.loads(self.model.calls[4][-1].content)["outcome"], "verification_failed"
         )
 
     def test_frozen_tests_cannot_be_replaced_by_field_correction(self):
@@ -268,6 +399,17 @@ class LocalRepairTests(unittest.TestCase):
         )
         self.assertEqual(len(result["rounds"]), 1)
 
+    def test_c_output_request_uses_the_same_generated_acceptance_path(self):
+        self.model = Model([f.reply(self.candidate())])
+        self.engine = TaskRunner(self.model, self.env, state_dir=self.root / "state")
+        result = self.engine.run(
+            [], "Generate C code for the supplied function", StepBudget(max_steps=8)
+        )
+        self.assertEqual(result["status"], "verified_success", result)
+        self.assertEqual(len(result["rounds"]), 1)
+        self.assertEqual(self.engine.state["verification_spec"]["test_code"], f.CODE)
+        self.assertEqual(len(self.model.calls), 3)
+
     def test_schema_and_independent_acceptance_errors_arrive_together(self):
         plan = self.candidate(
             note="x" * 1601,
@@ -279,14 +421,14 @@ class LocalRepairTests(unittest.TestCase):
         )
         self.engine = TaskRunner(self.model, self.env, state_dir=self.root / "state")
         result = self.engine.run(
-            [], "ccode should generate working C code", StepBudget(max_steps=4)
+            [], "Fix the requested function", StepBudget(max_steps=4)
         )
         self.assertEqual(result["status"], "task_blocked", result)
-        notice = json.loads(self.model.calls[1][-1].content.split("] ", 1)[1].split("\n", 1)[0])
+        notice = json.loads(self.model.calls[2][-1].content.split("] ", 1)[1].split("\n", 1)[0])
         self.assertEqual(notice["allowed_paths"], ["/note", "/test_code", "/test_driver"])
-        for text in ("1600", "test_driver", "独立预期", "ARTIFACT_CHECKS"):
+        for text in ("1600", "test_driver", "独立预期"):
             self.assertIn(text, "\n".join(notice["issues"]))
-        self.assertNotIn(plan["steps"][0]["command"], self.model.calls[1][-1].content)
+        self.assertNotIn(plan["steps"][0]["command"], self.model.calls[2][-1].content)
         self.assertEqual(result["rounds"], [])
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
@@ -309,7 +451,7 @@ class LocalRepairTests(unittest.TestCase):
             ]
         )
         self.assertEqual(result["status"], "verified_success", result)
-        self.assertEqual(len(self.model.calls), 3)
+        self.assertEqual(len(self.model.calls), 4)
 
     def test_syntax_error_skips_dependent_ast_checks_but_keeps_other_errors(self):
         plan = self.candidate(
@@ -320,14 +462,13 @@ class LocalRepairTests(unittest.TestCase):
         )
         self.engine = TaskRunner(self.model, self.env, state_dir=self.root / "state")
         result = self.engine.run(
-            [], "ccode should generate working C code", StepBudget(max_steps=4)
+            [], "Fix the requested function", StepBudget(max_steps=4)
         )
         self.assertEqual(result["status"], "task_blocked", result)
-        notice = self.model.calls[1][-1].content
+        notice = self.model.calls[2][-1].content
         self.assertIn("1600", notice)
         self.assertIn("test_driver", notice)
         self.assertIn("语法错误", notice)
-        self.assertNotIn("缺少顶格 ARTIFACT_CHECKS", notice)
 
     def test_repeated_format_errors_return_diagnostics_without_executing_work(self):
         broken = f.CODE.replace("\n", "\\n")
@@ -347,7 +488,7 @@ class LocalRepairTests(unittest.TestCase):
         ])
         self.assertEqual(result["status"], "verified_success", result)
         notices = [json.loads(self.model.calls[i][-1].content.split("] ", 1)[1].split("\n", 1)[0])
-                   for i in (1, 2, 3)]
+                   for i in (2, 3, 4)]
         self.assertIn("category=python_syntax", notices[0]["error"])
         self.assertIn("source line 1, column", notices[0]["error"])
         self.assertIn("/edits/0/before", notices[1]["error"])
@@ -365,7 +506,7 @@ class LocalRepairTests(unittest.TestCase):
         from agent.acceptance.revisions import Review
 
         self.engine = TaskRunner(None, self.env)
-        self.engine.state = {"request": "ccode should generate working C code", "acceptance": None}
+        self.engine.state = {"request": "Fix the requested function", "acceptance": None}
         with self.assertRaises(repair.ValidationErrors) as caught:
             self.engine.validate_work(
                 {
@@ -376,7 +517,7 @@ class LocalRepairTests(unittest.TestCase):
                 },
                 Review,
             )
-        for text in ("1600", "独立预期", "ARTIFACT_CHECKS"):
+        for text in ("1600", "独立预期"):
             self.assertIn(text, str(caught.exception))
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
@@ -397,7 +538,7 @@ class LocalRepairTests(unittest.TestCase):
             ]
         )
         self.assertEqual(result["status"], "verified_success", result)
-        self.assertNotIn(f.CODE, self.model.calls[1][-1].content)
+        self.assertNotIn(f.CODE, self.model.calls[2][-1].content)
 
     def test_rejected_draft_resume_does_not_repeat_completed_read(self):
         inspect = {
@@ -431,7 +572,7 @@ class LocalRepairTests(unittest.TestCase):
         result = self.run_replies([])
         self.assertEqual(result["status"], "verified_success", result)
         self.assertEqual(result["calls_this_invocation"], 1)
-        self.assertEqual(result["planner_calls"], 3)
+        self.assertEqual(result["planner_calls"], 4)
 
     def test_completed_correction_step_resume_does_not_repeat_write(self):
         plan = self.candidate()
@@ -473,8 +614,10 @@ class LocalRepairTests(unittest.TestCase):
             body = json.loads(request.content)
             requests.append(body)
             if len(requests) == 1:
-                name, arguments = "submit_plan", json.dumps(original, ensure_ascii=False, indent=2)
+                name, arguments = "get_boundary_hints", json.dumps({"keys": ["general"]})
             elif len(requests) == 2:
+                name, arguments = "submit_plan", json.dumps(original, ensure_ascii=False, indent=2)
+            elif len(requests) == 3:
                 notice = json.loads(
                     body["messages"][-1]["content"].split("] ", 1)[1].split("\n", 1)[0]
                 )
@@ -530,7 +673,7 @@ class LocalRepairTests(unittest.TestCase):
             engine = TaskRunner(model, self.env, state_dir=self.root / "state")
             result = engine.run([], "return 4", StepBudget(max_steps=8))
         self.assertEqual(result["status"], "verified_success", result)
-        self.assertEqual(len(requests), 3)
+        self.assertEqual(len(requests), 4)
         from agent.model.tools import CODING_TOOLS
 
         expected = wire_input([], CODING_TOOLS)["tools"]
@@ -541,7 +684,7 @@ class LocalRepairTests(unittest.TestCase):
         self.assertEqual(
             requests[1]["messages"][: len(requests[0]["messages"])], requests[0]["messages"]
         )
-        self.assertNotIn(original["steps"][0]["command"], requests[1]["messages"][-1]["content"])
+        self.assertNotIn(original["steps"][0]["command"], requests[2]["messages"][-1]["content"])
         accepted = engine.state["history"][-2:]
         wire = wire_input(messages_from_dict(accepted), WORK_TOOLS)
         self.assertEqual(

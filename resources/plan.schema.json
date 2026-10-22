@@ -21,21 +21,21 @@
             "type": "string"
           },
           "op": {
+            "description": "read: known original ranges; search: locate evidence through RAG; shell: editing, execution and runtime diagnostics, never evidence search.",
             "enum": [
               "read",
               "search",
               "shell"
             ],
-            "type": "string",
-            "description": "read: known original ranges; search: locate evidence through RAG; shell: editing, execution and runtime diagnostics, never evidence search."
+            "type": "string"
           },
           "path": {
-            "type": "string",
-            "description": "Authorized repository scope, $record path or host-registered $container namespace. Never widen the registered scope."
+            "description": "Authorized repository scope, $record path or host-registered $container namespace. Never widen the registered scope.",
+            "type": "string"
           },
           "query": {
-            "type": "string",
-            "description": "Search text: a complete literal string for exact, or a natural-language description for semantic."
+            "description": "Search text: one complete case-sensitive literal string.",
+            "type": "string"
           },
           "offset": {
             "minimum": 0,
@@ -48,12 +48,26 @@
             "type": "integer"
           },
           "mode": {
-            "description": "Search only. exact: case-sensitive literal matching with BM25 ranking. semantic: vector retrieval and reranking by meaning; requires an available index of the bound current project.",
+            "description": "exact uses one literal query; keywords uses explicit terms and an empty query. BM25 automatically ranks rg matches.",
             "enum": [
               "exact",
-              "semantic"
+              "keywords"
             ],
             "type": "string"
+          },
+          "match": {
+            "description": "whole_word for complete identifiers; substring for partial names, errors or fragments. Case-sensitive; no rewriting.",
+            "enum": [
+              "whole_word",
+              "substring"
+            ],
+            "type": "string"
+          },
+          "terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "intent": {
             "enum": [
@@ -89,8 +103,8 @@
             "type": "string"
           },
           "command": {
-            "type": "string",
-            "description": "Shell code for editing, execution or runtime diagnostics; do not search existing source, documents or saved logs here."
+            "description": "Shell code for editing, execution or runtime diagnostics; do not search existing source, documents or saved logs here.",
+            "type": "string"
           },
           "expected_exit": {
             "items": {
@@ -107,6 +121,8 @@
           "offset",
           "limit",
           "mode",
+          "match",
+          "terms",
           "intent",
           "required_entities",
           "required_kinds",
@@ -128,6 +144,116 @@
       },
       "type": "array"
     },
+    "execution_checks": {
+      "description": "Required for first generated acceptance: artifact type, real entry and consuming runtime. [] only for inspection, fixed user commands, or reuse of frozen checks. Every declaration must compile or syntax-check and then execute its real artifact. Invocation-only call and unchecked executable consumers are not supported. No task-name detection or self-reported pass.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$",
+            "type": "string"
+          },
+          "requirement_id": {
+            "type": "string"
+          },
+          "requirement_quote": {
+            "description": "Verbatim original requirement scope; empty binds the complete original request.",
+            "type": "string"
+          },
+          "artifact_type": {
+            "enum": [
+              "generated_code",
+              "repository_entry"
+            ],
+            "type": "string"
+          },
+          "imports": {
+            "type": "string"
+          },
+          "setup": {
+            "type": "string"
+          },
+          "expression": {
+            "type": "string"
+          },
+          "consumer": {
+            "enum": [
+              "command",
+              "c_expression",
+              "c_statement"
+            ],
+            "type": "string"
+          },
+          "entry_file": {
+            "type": "string"
+          },
+          "interpreter": {
+            "enum": [
+              "",
+              "python",
+              "node",
+              "shell"
+            ],
+            "type": "string"
+          },
+          "argv": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "variables": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "result_variable": {
+            "type": "string"
+          },
+          "cases": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "values": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "expected": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "values",
+                "expected"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "requirement_id",
+          "requirement_quote",
+          "artifact_type",
+          "imports",
+          "setup",
+          "expression",
+          "consumer",
+          "entry_file",
+          "interpreter",
+          "argv",
+          "variables",
+          "result_variable",
+          "cases"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
     "regression_command": {
       "type": "string"
     }
@@ -138,6 +264,7 @@
     "steps",
     "test_code",
     "test_driver",
+    "execution_checks",
     "regression_command"
   ],
   "type": "object"

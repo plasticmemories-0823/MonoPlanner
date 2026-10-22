@@ -3,11 +3,11 @@
 import ast
 from dataclasses import dataclass
 from agent.acceptance.oracles import oracle_issues
-from agent.acceptance.artifact_checks import load_artifact_checks
-from agent.acceptance.behavior import declaration_only
+from agent.acceptance.execution import checked_execution
+from agent.task.repair import ValidationErrors
 
 
-def _validate_test_code(code: str, required_consumer=None, required_calls=()) -> None:
+def _validate_test_code(code: str) -> None:
     try:
         tree = ast.parse(code, filename="test_acceptance.py")
         compile(tree, "test_acceptance.py", "exec")
@@ -18,21 +18,8 @@ def _validate_test_code(code: str, required_consumer=None, required_calls=()) ->
             "(1-based, Python source coordinates)"
         ) from exc
     issues = oracle_issues(tree)
-    errors = ["生成的验收缺少独立预期：" + "；".join(issues)] if issues else []
-    try:
-        checks = load_artifact_checks(code, required_consumer, required_calls)
-    except ValueError as exc:
-        errors.append(str(exc))
-        checks = []
-    if errors:
-        raise ValueError("\n".join(errors))
-    if checks and declaration_only(code):
-        return
-    if checks and not any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
-        for node in ast.walk(tree)
-    ):
-        raise ValueError("产物声明之外的代码需要实际测试，不能被忽略。")
+    if issues:
+        raise ValueError("生成的验收缺少独立预期：" + "；".join(issues))
 
     # 是否存在真实可运行的测试，由用例收集与执行结果确定，
     # 不能仅凭模块导入了某个测试基类判断。
@@ -72,9 +59,9 @@ class VerificationSpec:
     criteria: tuple[str, ...]
     command: str | None = None
     test_code: str | None = None
-    required_consumer: str | None = None
-    required_calls: tuple[str, ...] = ()
     test_driver: tuple[str, ...] = ()
+    execution_checks: tuple[dict, ...] = ()
+    requirement_digest: str = ""
 
     def __post_init__(self):
         if (
@@ -88,24 +75,32 @@ class VerificationSpec:
         try:
             object.__setattr__(self, "test_driver", validate_driver(self.test_driver))
         except ValueError as exc:
-            errors.append(str(exc))
+            errors.append((["/test_driver"], exc))
         if (self.command is None) == (self.test_code is None):
             raise ValueError("验收命令和生成的验收代码必须且只能指定一个。")
         if self.command is not None:
+            if self.execution_checks:
+                raise ValueError("Fixed command acceptance cannot specify execution_checks")
             if self.test_driver:
                 raise ValueError("Fixed command acceptance cannot specify a generated test_driver")
             if not isinstance(self.command, str) or not self.command.strip():
                 raise ValueError("验收命令不能为空。")
         else:
             if not isinstance(self.test_code, str) or not self.test_code.strip():
-                errors.append("验收代码不能为空。")
+                errors.append((["/test_code"], ValueError("验收代码不能为空。")))
             else:
                 try:
-                    _validate_test_code(self.test_code, self.required_consumer, self.required_calls)
+                    _validate_test_code(self.test_code)
                 except ValueError as exc:
-                    errors.append(str(exc))
+                    errors.append((["/test_code"], exc))
+            try:
+                object.__setattr__(self, "execution_checks", checked_execution(
+                    self.execution_checks, self.criteria,
+                ))
+            except (ValueError, SyntaxError) as exc:
+                errors.append((["/execution_checks"], ValueError("execution_checks: " + str(exc))))
         if errors:
-            raise ValueError("\n".join(errors))
+            raise ValidationErrors(errors)
 
 
 def tests_ready_for_candidate(report):
@@ -113,8 +108,10 @@ def tests_ready_for_candidate(report):
 
     此处检查执行证据，不证明断言在语义上正确。
     来源不明、夹具问题、用例缺失和基础环境故障仍会阻止冻结。
-    已记录的编译失败即使阻塞后续使用方用例，也必须保留为失败证据。
     """
+    execution = report.get("execution")
+    if execution is not None and not report.get("execution_ready", False):
+        return False
     ids, rows = report.get("test_ids"), report.get("test_results")
     if (
         report.get("generated_test_ids")
@@ -132,17 +129,6 @@ def tests_ready_for_candidate(report):
         ids = [key for key in ids if key not in skipped]
         rows = [row for row in rows if row["id"] not in skipped]
         report = {**report, "tests_run": report.get("tests_run", 0) - len(skipped)}
-    artifacts = {r["id"]: r for r in report.get("artifact_results", [])}
-    blocked_cases = set()
-    for identifier, row in artifacts.items():
-        prefix, separator, index = identifier.rpartition(":case:")
-        if (
-            row["status"] == "not_run"
-            and separator
-            and index.isdigit()
-            and artifacts.get(prefix + ":compile", {}).get("status") == "failed"
-        ):
-            blocked_cases.add(identifier)
     if (
         not report.get("test_evidence_valid")
         or not report.get("integrity_ok")
@@ -152,7 +138,7 @@ def tests_ready_for_candidate(report):
         or not isinstance(rows, list)
         or not rows
         or type(report.get("tests_run")) is not int
-        or report["tests_run"] != len(ids) - len(blocked_cases)
+        or report["tests_run"] != len(ids)
         or report.get("error_kind") not in (None, "test_error")
         or len(rows) != len(ids)
         or {r["id"] for r in rows} != set(ids)
@@ -160,8 +146,6 @@ def tests_ready_for_candidate(report):
         return False
     for row in rows:
         status, exceptions = row["status"], row.get("exceptions", [])
-        if status == "not_run" and row["id"] in blocked_cases:
-            continue
         if status not in {"passed", "failed", "error"}:
             return False
         if not isinstance(exceptions, list) or any(not isinstance(e, dict) for e in exceptions):

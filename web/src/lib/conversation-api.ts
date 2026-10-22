@@ -155,7 +155,7 @@ export class ConversationMonitor {
             (message) =>
               !message.id ||
               !["human", "ai"].includes(message.type) ||
-              !["user", "chat", "progress", "system"].includes(message.source || ""),
+              !["user", "chat", "progress", "system", "work_proposal"].includes(message.source || ""),
           ) ||
           new Set(snapshot.messages.map((message) => message.id)).size !== snapshot.messages.length
         ) {

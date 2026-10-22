@@ -1,6 +1,7 @@
 """任务执行测试进行真实修改和最终测试，不发起任何网络请求。"""
 
 import ast
+from copy import deepcopy
 import json
 from pathlib import Path
 import sys
@@ -13,9 +14,15 @@ from agent.execution.local import LocalEnvironment
 from agent.task.budget import StepBudget
 from agent.task.runner import TaskRunner
 from agent.task.contracts import WorkRequest
-from support import python_command
+from support import python_command, boundary_aware_reply
 
 CODE = "import unittest\nfrom sample import value\nclass ValueTests(unittest.TestCase):\n    def test_value(self):\n        self.assertEqual(value(), 4)\n"
+EXECUTION_CHECK = {
+    "id": "public_value", "requirement_quote": "", "artifact_type": "repository_entry",
+    "imports": "", "setup": "", "expression": "", "consumer": "command",
+    "entry_file": "sample.py", "interpreter": "python", "argv": [],
+    "variables": [], "result_variable": "", "cases": [],
+}
 
 
 def reply(plan):
@@ -59,11 +66,16 @@ class Model:
 
     def invoke(self, messages):
         self.calls.append(messages)
-        return confirmation(messages) or reply(next(self.plans))
+        return boundary_aware_reply(
+            self, messages, lambda: confirmation(messages) or reply(next(self.plans)),
+        )
 
 
 class TaskRunnerTests(unittest.TestCase):
     def setUp(self):
+        from support import confirmed_fixture
+
+        confirmed_fixture(self)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
@@ -86,6 +98,7 @@ class TaskRunnerTests(unittest.TestCase):
                 )
             ],
             "test_code": CODE,
+            "execution_checks": [deepcopy(EXECUTION_CHECK)],
             **extra,
         }
 
@@ -102,7 +115,7 @@ class TaskRunnerTests(unittest.TestCase):
         ]
         result = self.loop([plan]).run([], "value must return 4", StepBudget(max_steps=3))
         self.assertEqual(result["status"], "verified_success", result)
-        self.assertEqual(len(self.model.calls), 2)
+        self.assertEqual(len(self.model.calls), 3)
         self.assertEqual(len(result["rounds"]), 1)
         self.assertEqual(result["executor_model_calls"], 0)
         self.assertEqual(result["verifier_model_calls"], 0)
@@ -125,7 +138,7 @@ class TaskRunnerTests(unittest.TestCase):
             [], "value returns 4", StepBudget(max_steps=4)
         )
         self.assertEqual(result["status"], "verified_success", result)
-        self.assertEqual(len(self.model.calls), 3)
+        self.assertEqual(len(self.model.calls), 4)
         self.assertIn("return 0", str(self.model.calls[1]))
 
     def test_execution_failure_stops_remaining_steps(self):
@@ -137,7 +150,7 @@ class TaskRunnerTests(unittest.TestCase):
             ),
         ]
         result = self.loop([plan, {'kind': 'blocked', 'note': 'Observed execution failure'}]).run(
-            [], 'return 4', StepBudget(max_steps=3)
+            [], 'return 4', StepBudget(max_steps=4)
         )
         self.assertFalse((self.repo / 'must-not-exist').exists())
         self.assertEqual(result['rounds'], [])
@@ -151,8 +164,8 @@ class TaskRunnerTests(unittest.TestCase):
         self.assertEqual(
             [r['verification']['status'] for r in result['rounds']], ['failed', 'passed']
         )
-        self.assertEqual(len(self.model.calls), 3)
-        self.assertIn('AssertionError', str(self.model.calls[2]))
+        self.assertEqual(len(self.model.calls), 4)
+        self.assertIn('AssertionError', str(self.model.calls[3]))
 
     def test_frozen_test_cannot_be_weakened(self):
         bad = self.candidate(test_code=CODE.replace('value(), 4', 'value(), 2'))
@@ -193,9 +206,9 @@ class TaskRunnerTests(unittest.TestCase):
     def test_one_invalid_plan_can_be_corrected_in_total_budget(self):
         result = self.loop(
             [{'kind': 'inspect', 'note': 'empty', 'steps': []}, self.candidate()]
-        ).run([], 'return 4', StepBudget(max_steps=3))
+        ).run([], 'return 4', StepBudget(max_steps=4))
         self.assertEqual(result['status'], 'verified_success', result)
-        self.assertEqual(len(self.model.calls), 3)
+        self.assertEqual(len(self.model.calls), 4)
 
 
 if __name__ == '__main__':

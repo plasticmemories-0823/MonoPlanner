@@ -23,7 +23,7 @@ def trusted_ui(request):
         from agent.application.api import get_service
         saved = get_service().store.get(thread)
         if saved.get('read_only'):
-            raise ValueError("旧版对话只读；请新开对话设置权限或操作文件。")
+            raise ValueError("当前对话只读，不能设置权限或操作文件。")
     origin = request.headers.get('origin', '')
     parsed = urlsplit(origin)
     if (

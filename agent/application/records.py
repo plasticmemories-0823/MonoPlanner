@@ -25,6 +25,24 @@ def read_work_record(store, conversation, record, offset, limit):
     if not task:
         raise ValueError('当前对话没有工作记录')
     root = store.root / 'tasks' / task
+    if (root / 'engine-binding.json').exists():
+        from agent.runtime.bridge import read
+
+        return read(store.root, task, 'record', {'record': record, 'offset': offset, 'limit': limit})
+    return read_task_record(root, record, offset, limit)
+
+
+def read_task_record(root, record, offset, limit):
+    """由对应内核解析原生原件；查询仅允许已提交的操作结果与输出。"""
+    root = Path(root)
+    path = Path(record)
+    parts = path.parts
+    if (type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 16000
+            or path.is_absolute() or '..' in parts or ':' in record or '\\' in record
+            or not ((len(parts) == 4 and parts[0] == 'plans')
+                    or (len(parts) == 3 and parts[0] == 'assistant'))
+            or path.name not in {'result.json', 'stdout.log', 'stderr.log'}):
+        raise ValueError('Only committed task results and bounded output may be read')
     database = _safe_file(root, Path('history.sqlite3'))
     with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
         row = db.execute('SELECT sha256 FROM artifacts WHERE path=?', (path.as_posix(),)).fetchone()

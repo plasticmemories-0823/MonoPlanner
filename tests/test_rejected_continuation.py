@@ -16,6 +16,8 @@ class RejectedContinuationTests(unittest.TestCase):
     setUp = f.TaskRunnerTests.setUp
     run_replies = repairs.LocalRepairTests.run_replies
     load_state = repairs.LocalRepairTests.load_state
+    candidate = f.TaskRunnerTests.candidate
+    shell = f.TaskRunnerTests.shell
 
     def rejected(self, malformed=False):
         args = '{\n "kind": "inspect", "note": "Retained draft", "steps": [], "extra": 1\n}'
@@ -66,6 +68,112 @@ class RejectedContinuationTests(unittest.TestCase):
             ),
             1,
         )
+
+    def known_empty(self):
+        return AIMessage(
+            content='', additional_kwargs={'reasoning_content': 'Retained private analysis.'},
+            response_metadata={'finish_reason': 'stop'},
+            usage_metadata={'input_tokens': 20, 'output_tokens': 5, 'total_tokens': 25,
+                            'input_token_details': {'cache_read': 10}},
+        )
+
+    def test_known_empty_reply_gets_one_host_feedback_without_fake_tool_identity(self):
+        response = self.known_empty()
+        result = self.run_replies([response, f.reply(self.candidate())])
+        self.assertEqual(result['status'], 'verified_success', result)
+        state = self.load_state()
+        self.assertEqual(state.get('empty_response_repairs'), 1)
+        self.assertEqual(state['history'][1]['data']['additional_kwargs'], response.additional_kwargs)
+        self.assertEqual(state['history'][2]['type'], 'human')
+        self.assertIn('Host protocol feedback', state['history'][2]['data']['content'])
+        self.assertNotIn('allowed_paths', state['history'][2]['data']['content'])
+        self.assertFalse(state['history'][1]['data']['tool_calls'])
+        self.assertEqual(result['planner_calls'], 4)
+        self.assertEqual(result['usage']['unknown_calls'], 0)
+
+    def test_repeated_known_empty_reply_stops_after_one_correction(self):
+        result = self.run_replies([self.known_empty(), self.known_empty(), self.stop])
+        self.assertEqual(result['status'], 'empty_model_response', result)
+        self.assertEqual(len(self.model.calls), 2)
+        self.assertEqual(self.load_state()['empty_response_repairs'], 1)
+        self.assertIsNotNone(self.load_state()['response_pending'])
+        self.assertEqual(self.load_state()['plan_count'], 0)
+
+    def test_empty_reply_unknown_usage_does_not_trigger_correction(self):
+        response = self.known_empty()
+        response.usage_metadata = None
+        result = self.run_replies([response, self.stop])
+        self.assertEqual(result['status'], 'invalid_message_history', result)
+        self.assertEqual(len(self.model.calls), 1)
+        self.assertIsNotNone(self.load_state()['response_pending'])
+        self.assertFalse(self.load_state().get('empty_response_repairs'))
+
+    def test_known_empty_reply_resume_after_preparation_does_not_resend(self):
+        interrupt, error = interrupt_after_persist('plan_rejection_prepared')
+        with interrupt, self.assertRaises(error):
+            self.run_replies([self.known_empty()])
+        result = self.run_replies([self.stop])
+        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['calls_this_invocation'], 1)
+        self.assertEqual(result['planner_calls'], 2)
+        state = self.load_state()
+        self.assertEqual(state['empty_response_repairs'], 1)
+        self.assertEqual(sum(m['type'] == 'human' and 'Host protocol feedback' in m['data']['content']
+                             for m in state['history']), 1)
+
+    def test_known_empty_reply_record_failure_does_not_dispatch_correction(self):
+        original = TaskRunner.persist
+
+        def fail(engine, event, payload=None):
+            if event == 'plan_rejected':
+                raise OSError('Offline rejection persistence failure')
+            return original(engine, event, payload)
+
+        with patch.object(TaskRunner, 'persist', fail):
+            result = self.run_replies([self.known_empty(), self.stop])
+        self.assertEqual(result['status'], 'runtime_error', result)
+        self.assertEqual(len(self.model.calls), 1)
+
+    def test_empty_reply_correction_respects_original_request_budget(self):
+        from agent.task.budget import StepBudget
+
+        model = repairs.Model([self.known_empty(), self.stop])
+        self.engine = TaskRunner(model, self.env, state_dir=self.root / 'state')
+        result = self.engine.run([], 'return 4', StepBudget(max_steps=1))
+        self.assertEqual(result['status'], 'budget_exhausted', result)
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(self.load_state()['empty_response_repairs'], 1)
+
+    def test_empty_reply_correction_allowance_survives_valid_work_and_resume(self):
+        inspect = f.reply({'kind': 'inspect', 'note': 'Read the original', 'steps': [
+            {'id': 'read', 'op': 'read', 'path': 'sample.py'},
+        ]})
+        result = self.run_replies([self.known_empty(), inspect], pause_after_steps=1)
+        self.assertEqual(result['status'], 'paused', result)
+        self.assertEqual(self.load_state()['empty_response_repairs'], 1)
+        result = self.run_replies([self.known_empty(), self.stop])
+        self.assertEqual(result['status'], 'empty_model_response', result)
+        self.assertEqual(result['calls_this_invocation'], 1)
+        self.assertEqual(self.load_state()['plan_count'], 1)
+
+    def test_pause_before_empty_feedback_commit_preserves_original_until_resume(self):
+        from agent.task import control
+
+        interrupt, error = interrupt_after_persist('plan_rejection_prepared')
+        with interrupt, self.assertRaises(error):
+            self.run_replies([self.known_empty()])
+        before = self.load_state()
+        with control.active('empty-reply', 'pause') as signal:
+            signal.interrupt('pause')
+            result = self.run_replies([])
+        self.assertEqual(result['status'], 'paused', result)
+        self.assertFalse(self.model.calls)
+        self.assertEqual(self.load_state()['history'], before['history'])
+        self.assertEqual(self.load_state()['rejection_pending'], before['rejection_pending'])
+        result = self.run_replies([self.stop])
+        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['calls_this_invocation'], 1)
+        self.assertEqual(self.load_state()['empty_response_repairs'], 1)
 
     def test_complete_invalid_arguments_are_returned_with_thought_and_original_bytes(self):
         response = self.rejected()

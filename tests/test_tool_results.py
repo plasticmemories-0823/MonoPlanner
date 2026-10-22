@@ -65,13 +65,6 @@ class ToolResultTests(unittest.TestCase):
         self.assertEqual(result['next_offset'], 200)
         self.assertEqual(result['entries'][-1]['name'], ' a unchanged ')
 
-    def test_retired_search_tool_does_not_rewrite_result_collections(self):
-        value = {'hits': [
-            {'path': 'a.py', 'line': 1, 'text': 'old'},
-            {'path': 'a.py', 'line': 1, 'text': 'new'},
-        ]}
-        self.assertEqual(normalize_result('search_files', value), value)
-
     def test_path_case_and_different_lines_are_not_merged(self):
         value = {'hits': [
             {'path': 'a.py', 'line': 1, 'text': 'one'},

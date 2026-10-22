@@ -1,0 +1,149 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "project_path": {
+      "type": "string"
+    },
+    "create": {
+      "type": "boolean"
+    },
+    "request_message_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$",
+            "type": "string"
+          },
+          "artifact_type": {
+            "enum": [
+              "generated_code",
+              "repository_entry"
+            ],
+            "type": "string",
+            "description": "generated_code: a producer returns code for another runtime to consume. repository_entry: an actual project source entry, including newly written application files."
+          },
+          "target_runtime": {
+            "type": "string"
+          },
+          "entry": {
+            "type": "string"
+          },
+          "behavior": {
+            "type": "string"
+          },
+          "input_scope": {
+            "type": "string"
+          },
+          "imports": {
+            "type": "string",
+            "description": "Python statements invoking the original producer; no prose. Empty for repository_entry."
+          },
+          "setup": {
+            "type": "string",
+            "description": "Python statements invoking the original producer; no prose. Empty for repository_entry."
+          },
+          "expression": {
+            "type": "string",
+            "description": "Python expression invoking the original producer; no prose. Empty for repository_entry."
+          },
+          "variables": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_values": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "argv": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "quotes": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source_id",
+                "text"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "artifact_type",
+          "target_runtime",
+          "entry",
+          "behavior",
+          "input_scope",
+          "imports",
+          "setup",
+          "expression",
+          "variables",
+          "required_values",
+          "argv",
+          "quotes"
+        ],
+        "type": "object"
+      }
+    },
+    "withdrawals": {
+      "type": "array",
+      "description": "Explicit target removals only for a newly quoted human requirement change; otherwise empty.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "target_id": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "quote": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id",
+          "source_id",
+          "quote"
+        ]
+      }
+    }
+  },
+  "required": [
+    "project_path",
+    "create",
+    "request_message_ids",
+    "targets",
+    "withdrawals"
+  ]
+}

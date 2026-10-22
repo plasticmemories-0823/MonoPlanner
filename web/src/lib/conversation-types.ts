@@ -5,7 +5,8 @@ export type Message = {
   id?: string;
   type: "human" | "ai" | "system" | "tool";
   content: string | { type: string; text?: string; [key: string]: unknown }[];
-  source?: "user" | "chat" | "progress" | "system";
+  source?: "user" | "chat" | "progress" | "system" | "work_proposal";
+  proposal_status?: string;
 };
 
 export type ConversationTitle = {
@@ -93,11 +94,12 @@ export type ConversationSnapshot = {
 
 export type ConversationCommand = {
   id: string;
-  kind: "message" | "pause" | "resume" | "supplement" | "workspace";
+  kind: "message" | "pause" | "resume" | "supplement" | "workspace" | "confirm_work";
   text?: string;
   repo?: string;
   runtime_settings?: Record<string, unknown>;
   acceptance_pause_id?: string;
+  proposal_id?: string;
 };
 
 export type CommandReceipt = {
@@ -163,9 +165,11 @@ export function canSupplementWork(status?: string): boolean {
   );
 }
 
-/** 恢复只能来自显式控制；未知状态、普通聊天和补充不能扩展验收预算。 */
+/** 继续先核对原件；普通聊天、补充和重启都不能放行中断任务。 */
 export function canResumeWork(status?: string): boolean {
-  return ["paused", "awaiting_user", "output_limit_reached", "acceptance_limit_reached"].includes(
+  return ["paused", "awaiting_user", "output_limit_reached", "acceptance_limit_reached",
+    "interrupted", "model_request_unknown", "execution_unknown", "runtime_error",
+    "compaction_commit_unknown", "state_conflict"].includes(
     status || "",
   );
 }

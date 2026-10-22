@@ -129,7 +129,7 @@ class Chatbot:
                 result = json.loads(raw['data']['content'])
             except (ValueError, TypeError):
                 continue
-            if (isinstance(result, dict) and result.get('status') == 'awaiting_approval'
+            if (isinstance(result, dict) and result.get('status') in {'awaiting_approval', 'awaiting_confirmation'}
                     and isinstance(result.get('id'), str) and isinstance(result.get('target'), str)):
                 pending[result['id']] = result['target']
         if not pending:
@@ -245,6 +245,7 @@ class Chatbot:
         })
         started = time.monotonic()
         fragments, flushed = [], False
+        response_saved = False
 
         def display(status, text):
             if progress:
@@ -285,10 +286,18 @@ class Chatbot:
             else:
                 response = selected.invoke(messages)
             raw = message_to_dict(response)
+            from agent.storage.records import save, digest
+
+            receipt_path = self.store.root / 'application-records' / conversation / call / 'response.json'
+            _safe_tree(receipt_path, self.store.root)
+            save(receipt_path, {'call_id': call, 'conversation': conversation, 'lane': lane,
+                                'response': raw, 'digest': digest(raw),
+                                'seconds': time.monotonic() - started})
             self.store.model_message(conversation, lane, call + ':response', raw)
             self.store.finish_call(call, response_id=call + ':response',
                                    usage=response.usage_metadata,
                                    seconds=time.monotonic() - started)
+            response_saved = True
             if not progress:
                 from agent.rag.integration import audit_chat_citations
 
@@ -299,9 +308,12 @@ class Chatbot:
                         response.additional_kwargs.get('reasoning_content', '')
                         if not flushed else ''))
         except Exception as exc:
-            self.store.finish_call(call, seconds=time.monotonic() - started,
-                                   error=type(exc).__name__)
+            if not response_saved:
+                self.store.finish_call(call, seconds=time.monotonic() - started,
+                                       error=type(exc).__name__)
             display('interrupted', ''.join(fragments))
+            if response_saved and not isinstance(exc, OSError):
+                raise ChatStopped('response_processing_error', type(exc).__name__) from exc
             raise
         finally:
             close_model(model)
@@ -328,7 +340,7 @@ class Chatbot:
         calls = [*data.get('tool_calls', []), *data.get('invalid_tool_calls', [])]
         handed_off, waiting_approval = False, False
         mixed_write = len(calls) != 1 and any(call['name'] in {
-            'start_work', 'run_existing', 'open_file', 'launch_application', 'request_file_operation',
+            'prepare_work', 'run_existing', 'open_file', 'launch_application', 'request_file_operation',
         } for call in calls)
         from agent.task.control import current
         from agent.model.errors import ModelInterrupted
@@ -364,8 +376,14 @@ class Chatbot:
                 save_result(index, call, {'status': 'cancelled', 'actions_executed': False,
                                          'reason': 'Stopped before tool dispatch'})
                 continue
+            from agent.storage.records import save
+
+            intent = self.store.root / 'application-records' / conversation / (state['call_id'] + '-' + str(index)) / 'intent.json'
+            _safe_tree(intent, self.store.root)
+            save(intent, {'call': call, 'request_id': state['command'].get('id', lane)})
             name, args = call['name'], call['args']
             finished = False
+            dispatched_write = False
             try:
                 if mixed_write:
                     raise ValueError('Work handoff and external operations must be called alone')
@@ -403,16 +421,18 @@ class Chatbot:
                     })
                     finished = True
                     result = retrieve_chat(self, conversation, state['command']['id'], args)
-                elif name == 'start_work':
-                    if (set(args) != {'project_path', 'create'} or len(calls) != 1
-                            or not isinstance(args['project_path'], str)
-                            or type(args['create']) is not bool):
-                        raise ValueError('start_work requires project_path and create, alone')
-                    work = self.dispatch_work(conversation, state['command'], **args)
-                    result = {'task_id': work['task_id'], 'status': work['status'],
-                              'repo': work['repo'], 'project_path': work.get('project_path', '.'),
-                              'outcome': 'coding_handoff_saved'}
-                    handed_off = True
+                elif name == 'get_requirement_sources':
+                    from agent.application.requirements import source_messages
+
+                    if set(args) != {'source_ids'}:
+                        raise ValueError('get_requirement_sources requires source_ids')
+                    result = source_messages(self.store, conversation, args['source_ids'])
+                elif name == 'prepare_work':
+                    from agent.application.requirements import prepare
+
+                    if len(calls) != 1:
+                        raise ValueError('Prepare a delivery proposal alone')
+                    result = prepare(self.store, conversation, state['command'], **args)
                 elif name == 'run_existing':
                     if len(calls) != 1:
                         raise ValueError('run_existing must be called alone')
@@ -421,6 +441,7 @@ class Chatbot:
                     validate(name, args)
                     current_work = self.store.work(self.store.get(conversation)['work_id'])
                     project_path = current_work['project_path'] if current_work else '.'
+                    dispatched_write = True
                     work = self.dispatch_work(conversation, state['command'], kind='existing',
                                               arguments=args, project_path=project_path, create=False)
                     result = {'task_id': work['task_id'], 'status': work['status']}
@@ -428,14 +449,28 @@ class Chatbot:
                 else:
                     if name not in {item.name for item in CHAT_TOOLS}:
                         raise ValueError('Unknown tool')
+                    if self.invoke_tool == self._invoke_tool:
+                        from agent.server.assistant import validate
+
+                        validate(name, args)
+                    dispatched_write = name in {
+                        'open_file', 'launch_application', 'request_file_operation',
+                    }
                     result = self.invoke_tool(conversation, call,
                                               state['call_id'] + '-' + str(index))
                     finished = self.invoke_tool == self._invoke_tool
-            except (ValueError, KeyError, TypeError, OSError) as exc:
+            except (ValueError, KeyError, TypeError) as exc:
+                if dispatched_write:
+                    raise ChatStopped('tool_internal_error', type(exc).__name__) from exc
                 result = {'error': str(exc), 'actions_executed': False}
+            except (OSError, ModelInterrupted):
+                raise
+            except Exception as exc:
+                # 内部异常不能当作参数拒收，更不能声称可能已执行的操作没有发生。
+                raise ChatStopped('tool_internal_error', type(exc).__name__) from exc
             save_result(index, call, result, finished=finished)
             waiting_approval = waiting_approval or (
-                isinstance(result, dict) and result.get('status') == 'awaiting_approval')
+                isinstance(result, dict) and result.get('status') in {'awaiting_approval', 'awaiting_confirmation'})
         if stopped:
             raise ModelInterrupted(stopped, sent=False)
         return {'done': handed_off or waiting_approval, 'waiting_approval': waiting_approval}
@@ -452,15 +487,12 @@ class Chatbot:
             preflight_space(path, len(raw))
         path.parent.mkdir(parents=True, exist_ok=True)
         _safe_tree(path, root)
+        from agent.storage.records import immutable
+
         try:
-            with path.open('xb') as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except FileExistsError:
-            previous = _safe_file(root, path.relative_to(root)).read_bytes()
-            if previous != raw:
-                raise Conflict('Saved tool result differs from this operation; original was not overwritten')
+            immutable(path, raw)
+        except ValueError as exc:
+            raise Conflict('Saved tool result differs from this operation; original was not overwritten') from exc
 
     def _invoke_tool(self, conversation, call, operation):
         value = self.store.get(conversation)

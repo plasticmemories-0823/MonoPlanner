@@ -11,8 +11,18 @@ from agent.acceptance.final import verify_final
 from agent.acceptance import revisions
 from agent.storage.records import digest, save
 from agent.model.errors import ModelInterrupted, ModelRequestNotSent
-from agent.rag.rewrite import RewriteUnknown
 from agent.task import acceptance_limit
+
+
+def pending_phase(pending):
+    """按已保存的下一步选择节点，不重新排序计划或创造执行步骤。"""
+    plan = pending["plan"]
+    if plan["kind"] == "inspect":
+        return "search"
+    if pending["cursor"] >= len(plan["steps"]):
+        return "accept"
+    step = plan["steps"][pending["cursor"]]
+    return "search" if step["op"] in {"read", "search"} else "execute"
 
 
 def execute_pending(self):
@@ -28,6 +38,10 @@ def execute_pending(self):
 def _execute_pending(self):
     pending = self.state["pending"]
     plan = WorkRequest.model_validate(pending["plan"])
+    if plan.kind == "candidate":
+        from agent.task.requirements import guard
+
+        guard(self, self.state.get("verification_spec"))
     if pending["rows"] and pending["rows"][-1]["status"] == "failed":
         return self.finish_plan("execution_failed")
     if self.state["rounds"] and self.state["rounds"][-1]["plan"] == pending["id"]:
@@ -40,6 +54,9 @@ def _execute_pending(self):
         return acceptance_limit.pause(self)
     prior = {r["id"]: r for r in pending["rows"]}
     while pending["cursor"] < len(plan.steps):
+        dispatch = getattr(self, "_task_dispatch", None)
+        if dispatch and dispatch.active_phase != pending_phase(pending):
+            return
         self.budget.check_request(0)
         index = pending["cursor"]
         step = plan.steps[index]
@@ -86,11 +103,14 @@ def _execute_pending(self):
                     step, prior, directory, timeout, isolated=plan.kind == "inspect"
                 )
             )
+            save(directory / "execution-result.json", {
+                "request": step.model_dump(), "before": before, "result": row,
+            })
             source_runtime.record_lookup(self, step, row, directory)
-        except (ModelInterrupted, RewriteUnknown):
-            # 未知检索改写和执行中断保留 running_step，不能交回模型后自动续跑。
+        except ModelInterrupted:
+            # 执行中断保留 running_step，不能交回模型后自动续跑。
             raise
-        except SourceStorageError:
+        except (SourceStorageError, OSError):
             # 宿主源码副本/证据写入失败必须停止，不能作为项目失败交回模型再复制。
             raise
         except Exception as exc:
@@ -108,6 +128,8 @@ def _execute_pending(self):
             after=after,
             record=(directory / "result.json").relative_to(self.root).as_posix(),
         )
+        save(directory / "completion.json", {"request": step.model_dump(),
+                                               "result_digest": digest(row)})
         save(directory / "result.json", row)
         pending["rows"].append(row)
         pending["cursor"] += 1
@@ -136,17 +158,28 @@ def _execute_pending(self):
             self.persist("paused")
             return
     if plan.kind == "candidate":
-        return self.final_acceptance()
+        return  # 验收节点消费同一个已保存游标，不重放最后一步。
     return self.finish_plan("evidence_ready")
 
 
 def final_acceptance(self):
+    from agent.task import dialogue
+    from agent.task.requirements import guard
+
+    if dialogue.apply_controls(self):
+        return
+    guard(self, self.state.get("verification_spec"))
     if acceptance_limit.exhausted(self):
         return acceptance_limit.pause(self)
     pending = self.state["pending"]
     folder = self.root / "feedback" / pending["id"]
+    attempt = self.state.get("verification_attempt", 0)
+    if attempt:
+        folder = folder / ("recovery-%04d" % attempt)
     if self.optimize_source:
         source_runtime.boundary(self, "candidate_boundary", plan=pending["id"])
+    self.state['verification_running'] = True
+    self.persist('final_acceptance_preparing', {'plan': pending['id']})
     snapshot = SourceSnapshot.capture(
         self.environment.repo_root,
         folder / "candidate",
@@ -178,6 +211,10 @@ def final_acceptance(self):
         ),
     )
     report = revisions.compare(self, snapshot, report, folder / "acceptance-versions")
+    save(folder / "completion.json", {
+        "report_digest": digest(report), "candidate_digest": snapshot.digest,
+        "acceptance_digest": digest(self.state["verification_spec"]),
+    })
     save(folder / "result.json", report)
     snapshot.write_patch(self.baseline, self.root / "candidate.patch")
     self.state["rounds"].append(
@@ -188,11 +225,16 @@ def final_acceptance(self):
         "final_acceptance_finished",
         {"plan": pending["id"], "record": str(folder / "result.json"), "status": report["status"]},
     )
+    if dialogue.apply_controls(self):
+        return
+    guard(self, self.state.get("verification_spec"))
     self.finish_plan("verified_success" if report["status"] == "passed" else "verification_failed")
 
 
 def finish_plan(self, outcome):
     pending = self.state["pending"]
+    if outcome == "evidence_ready" and pending.get("plan", {}).get("kind") == "inspect":
+        self.state.pop("recovery_inspection_required", None)
     result = {
         "outcome": outcome,
         "plan": pending["id"],

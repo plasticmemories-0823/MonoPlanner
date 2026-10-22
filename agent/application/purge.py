@@ -79,7 +79,7 @@ def validate_deletion(store, db, conversation, tasks):
         if json.loads(row[0]).get('work_id') in identities:
             raise Conflict('任务记录被其他对话引用，不能删除。')
     paths = task_paths(store, identities, conversation['visibility'] == 'deleted')
-    paths.extend(path for area in ('application-records', 'file-operation-backups')
+    paths.extend(path for area in ('application-records', 'file-operation-backups', 'work-proposals')
                  if (path := directory(store.root / area, thread)) is not None)
     protect_projects(db, paths)
 
@@ -102,7 +102,7 @@ def cleanup(store, conversation, tasks, retain_environment=False):
     )
 
     paths = task_paths(store, tasks, check_state=False)
-    paths.extend(path for area in ('application-records', 'file-operation-backups')
+    paths.extend(path for area in ('application-records', 'file-operation-backups', 'work-proposals')
                  if (path := directory(store.root / area, conversation)) is not None)
     with store.connection() as db:
         protect_projects(db, paths)
@@ -119,10 +119,6 @@ def cleanup(store, conversation, tasks, retain_environment=False):
                         or linked(path) or linked(parent)):
                     raise ValueError('预览路径超出保存范围，未进行删除。')
                 previews.append(path)
-    from agent.rag.models import cancel_jobs
-
-    if not cancel_jobs(store.root, tasks, close=True, timeout=2)['stopped']:
-        raise Conflict('Background retrieval has not stopped; task records were preserved.')
     for task in tasks:
         result = release_task_resources('task:' + task, completed=True, root=store.root,
                                         docker=delete_owned_docker_resource)
@@ -138,6 +134,10 @@ def cleanup(store, conversation, tasks, retain_environment=False):
     for path in paths:
         if path.exists():
             remove_directory(path)
+    if (store.root / 'engines').exists():
+        from agent.runtime.bundles import collect
+
+        collect(store.root)
     with store.connection() as db:
         for table in ('desktop_requests', 'desktop_files', 'permissions', 'read_sources'):
             if table in tables:

@@ -29,6 +29,7 @@ import { ActivityRows, useActivity } from "./activity";
 import { ReadSources } from "./read-sources";
 import { ModelSettings } from "./model-settings";
 import { DesktopCards } from "./desktop-controls";
+import { DeliveryConfirmation } from "./delivery-confirmation";
 import { ExecutionPermissions } from "./execution-permissions";
 import { Resources } from "./resources";
 import { groupActivity } from "@/lib/work-diagnostics";
@@ -300,6 +301,9 @@ export function Thread() {
                             isLoading={isLoading}
                           />
                         )}
+                        {message.source === "work_proposal" && (
+                          <DeliveryConfirmation message={message} />
+                        )}
                         {renderActivity(activityGroups.get(message.id || "") || [])}
                       </Fragment>
                     ))}
@@ -310,7 +314,7 @@ export function Thread() {
                   )}
                   {stream.values.read_only && (
                     <p className="text-muted-foreground text-sm">
-                      旧版记录仅供查看，请新建对话继续工作。
+                      当前记录仅供查看，不能在只读状态下派发工作。
                     </p>
                   )}
                   <DesktopCards

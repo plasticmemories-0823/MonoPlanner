@@ -172,6 +172,38 @@ def test_close_cancels_all_workers_and_joins_threads(job_fixture):
         fixture.jobs.start(fixture.repos[2])
 
 
+def test_close_waits_for_thread_after_future_is_done(job_fixture):
+    fixture = job_fixture
+    fixture.jobs.start(fixture.repos[0])
+    assert fixture.entered.wait(2)
+    with fixture.jobs.lock:
+        future = next(iter(fixture.jobs.workers.values()))['future']
+    callback_entered, callback_release, closed = (
+        threading.Event(), threading.Event(), threading.Event())
+    results = []
+
+    def hold_thread(_future):
+        callback_entered.set()
+        callback_release.wait(3)
+
+    def close():
+        results.append(fixture.jobs.close())
+        closed.set()
+
+    future.add_done_callback(hold_thread)
+    closer = threading.Thread(target=close)
+    closer.start()
+    try:
+        assert callback_entered.wait(2)
+        assert future.done()
+        assert not closed.wait(.2)
+    finally:
+        callback_release.set()
+        closer.join(3)
+    assert closed.is_set() and results[0]['stopped']
+    assert all(not thread.is_alive() for thread in fixture.jobs.pool._threads)
+
+
 def test_orphaned_preparation_never_replays_on_status(job_fixture):
     fixture = job_fixture
     path = fixture.root / 'environment-jobs' / (

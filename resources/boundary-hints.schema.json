@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "keys": {
+      "type": "array",
+      "description": "One or more distinct catalog keys. Batch relevant categories; general is required before the first generated acceptance.",
+      "items": {
+        "type": "string",
+        "enum": ["general", "math", "numeric", "collections", "text", "state", "time", "permissions", "concurrency", "external_io", "generation", "interaction"]
+      }
+    }
+  },
+  "required": ["keys"],
+  "additionalProperties": false
+}

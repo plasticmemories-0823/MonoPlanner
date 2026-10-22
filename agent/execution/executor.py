@@ -10,6 +10,58 @@ from agent.source.snapshots import _safe_file
 from agent.storage.records import clip
 
 
+def recover_process_result(environment, root, directory, request):
+    """按本步骤的固定日志位置核对执行器回执，不再次运行命令。"""
+    if request['op'] != 'shell':
+        return None
+    logs = environment.artifact_root / 'plan-steps' / root.name / directory.name
+    stdout, stderr = logs / 'stdout.log', logs / 'stderr.log'
+    intent_path = stdout.with_suffix('.intent.json')
+    if not intent_path.exists():
+        return None
+    intent = json.loads(_safe_file(environment.artifact_root,
+                                   intent_path.relative_to(environment.artifact_root)).read_bytes())
+    if hasattr(environment, '_activated_argv'):
+        if (intent['command'] != request['command'] or not intent['shell']
+                or intent['container_id'] != environment._container_id):
+            raise ValueError('Saved process request differs from the pending operation')
+        status = Path(intent['process_result'])
+        status = _safe_file(environment.artifact_root, status.relative_to(environment.artifact_root))
+        if not status.exists():
+            return None
+        data = json.loads(status.read_bytes())
+        if data.get('request_digest') != intent['request_digest']:
+            raise ValueError('Process receipt identity changed')
+    else:
+        from agent.execution.process import shell_arguments
+
+        command, shell = shell_arguments(request['command'])
+        if (intent['command'] != command or intent['shell'] != shell
+                or intent['cwd'] != str(environment.repo_root)):
+            raise ValueError('Saved process request differs from the pending operation')
+        status = stdout.with_suffix('.completion.json')
+        if not status.exists():
+            return None
+        data = json.loads(_safe_file(environment.artifact_root,
+                                     status.relative_to(environment.artifact_root)).read_bytes())
+    if type(data.get('exit_code')) is not int:
+        return None
+    for name, path in (('stdout', stdout), ('stderr', stderr)):
+        raw = _safe_file(environment.artifact_root,
+                         path.relative_to(environment.artifact_root)).read_bytes()
+        from agent.storage.records import write_bytes
+
+        destination = directory / (name + '.log')
+        write_bytes(destination, raw)
+        data[name] = clip(raw.decode('utf-8', errors='replace'))
+        data[name + '_record'] = destination.relative_to(root).as_posix()
+    data['expected_exit'] = request['expected_exit']
+    ok = data['exit_code'] in request['expected_exit'] and not (
+        data.get('error') or data.get('timed_out'))
+    return {'status': 'succeeded' if ok else 'failed', 'data': data, 'seconds': 0,
+            'seconds_unknown': True, 'recovered_from_process_receipt': True}
+
+
 class OperationExecutor:
     """只运行提交的操作，不自行作出新的语义决策。"""
 
@@ -235,6 +287,7 @@ class OperationExecutor:
 
         return retrieve_work(getattr(self, 'retrieval_owner', self), {
             'query': step.query, 'path': step.path, 'mode': step.mode,
+            'match': step.match, 'terms': step.terms,
             'offset': step.offset, 'limit': step.limit, 'cursor': step.cursor,
             'intent': step.intent, 'required_entities': step.required_entities,
             'required_kinds': step.required_kinds,

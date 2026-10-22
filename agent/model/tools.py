@@ -46,15 +46,40 @@ def freeze_acceptance(**kwargs) -> dict:
 @tool(args_schema=REVIEW_SCHEMA["revise"])
 def revise_acceptance(**kwargs) -> dict:
     """Submit a complete acceptance revision and evidence-based reason, never workspace edits.
-    Before first freezing, correct test expectations and setup. After freezing,
-    correct only expected literals with exact original evidence and itemized corrections;
-    otherwise only module preparation may change when acceptance is not runnable.
+    Before first freezing, correct the draft normally. After freezing, provide valid
+    original evidence and itemized corrections to change model-generated tests, fixtures,
+    assertions, drivers, execution checks or regression commands. Original requirements,
+    confirmed delivery constraints and user-fixed commands remain protected.
     Every revision needs an original-source trial and a new freeze_acceptance.
     """
     return kwargs
 
 
-WORK_TOOLS = (submit_plan, repair_work, freeze_acceptance, revise_acceptance)
+BOUNDARY_SCHEMA = json.loads(
+    (PROJECT_ROOT / 'resources/boundary-hints.schema.json').read_text(encoding='utf-8')
+)
+
+
+@tool(args_schema=BOUNDARY_SCHEMA)
+def get_boundary_hints(keys: list[str]) -> dict:
+    """Read selected local boundary reminder cards; no model, network or project access.
+    Batch distinct keys. Read general before the first generated acceptance.
+    Catalog: general (scope, assumptions, counterexamples); math (domains, limits,
+    probabilities); numeric (precision, overflow, rounding, units); collections
+    (empty, singleton, indices, ordering); text (Unicode, escaping, parsing);
+    state (lifecycle, cleanup, recovery); time (zones, dates, clocks); permissions
+    (identity, scope, thresholds); concurrency (races, atomicity, idempotence);
+    external_io (partial results, failures, retries); generation (actual artifacts,
+    conversion, consumption); interaction (empty/loading/error/cancellation flows).
+    These are reminders, not requirements or expected answers. Reuse cards still
+    visible in context; read them again when their text is no longer available.
+    """
+    from agent.acceptance.boundaries import lookup
+
+    return lookup(keys)
+
+
+WORK_TOOLS = (submit_plan, repair_work, freeze_acceptance, revise_acceptance, get_boundary_hints)
 
 # ========================================================================
 # 联网搜索与公开网页读取工具
@@ -146,20 +171,33 @@ def request_file_operation(**kwargs) -> dict:
 
 
 @tool(args_schema={
-    'type': 'object', 'properties': {
-        'project_path': {'type': 'string', 'description':
-            'Confirmed path relative to the selected workspace. New projects normally use a new child folder; use . only when the user explicitly chooses the workspace root.'},
-        'create': {'type': 'boolean', 'description':
-            'True creates a new, not-yet-existing project folder after authorization; false uses an existing confirmed folder. Never overwrite a name collision.'},
-    },
-    'required': ['project_path', 'create'], 'additionalProperties': False,
+    "type": "object", "additionalProperties": False,
+    "properties": {"source_ids": {"type": "array", "items": {"type": "string"}}},
+    "required": ["source_ids"],
 })
-def start_work(project_path: str, create: bool) -> dict:
-    """Start authorized coding at the confirmed project location. Discuss the plan and location
-    before calling. For an active task supplement, repeat its project_path with create=false.
-    The host creates a new folder if requested, then prepares and binds that project only.
+def get_requirement_sources(source_ids: list[str]) -> dict:
+    """Read saved human requirement originals. Empty IDs list the source IDs and previews;
+    selected IDs return complete text. Only these originals may support delivery targets.
     """
-    return {'project_path': project_path, 'create': create}
+    return {"source_ids": source_ids}
+
+
+@tool(args_schema=json.loads(
+    (PROJECT_ROOT / "resources/work-requirements.schema.json").read_text("utf-8")
+))
+def prepare_work(**kwargs) -> dict:
+    """Present a delivery proposal grounded in complete original user messages.
+    Bind artifact type, runtime, public entry, invocation, input construction and required
+    input cases before acceptance. entry is module:function for generated code, or a
+    relative repository entry file. Do not narrow requirements or add unsupported assumptions.
+    generated_code means a producer returns code consumed by another runtime; ordinary
+    application source files use repository_entry. imports/setup/expression contain Python
+    invocation code, not natural-language descriptions; unused fields must be empty.
+    Quote exact saved user originals. This only proposes work; wait for human confirmation.
+    For a changed task retain unchanged target IDs and cite the new user change for updates.
+    Unsupported runtimes must be reported as capability gaps, never silently substituted.
+    """
+    return kwargs
 
 
 # ========================================================================
@@ -167,8 +205,10 @@ def start_work(project_path: str, create: bool) -> dict:
 # ========================================================================
 @tool(args_schema=ASSISTANT_SCHEMA['retrieve_evidence'])
 def retrieve_evidence(**kwargs) -> dict:
-    """Search authorized original text. mode=exact is literal and case-sensitive; semantic
-    requires a bound current project and available vector retrieval. path only limits scope;
+    """Search authorized original text with rg and automatic BM25 file ranking.
+    mode=exact uses query; mode=keywords uses terms and an empty query.
+    match=whole_word for complete identifiers; substring for fragments. Case-sensitive.
+    path only limits scope;
     query is not an inferred filename or symbol. Use cursor for returned search continuation,
     or offset for an initial hit offset. Returns original ranges, versions and coverage gaps.
     Each hit indexes one result; each result indexes one source. Text and source metadata appear once.
@@ -180,7 +220,7 @@ def retrieve_evidence(**kwargs) -> dict:
 
 CODING_TOOLS = (*WORK_TOOLS, web_search, web_fetch)
 CHAT_TOOLS = (
-    start_work,
+    prepare_work,
     web_search,
     web_fetch,
     list_files,
@@ -191,4 +231,5 @@ CHAT_TOOLS = (
     launch_application,
     request_file_operation,
     retrieve_evidence,
+    get_requirement_sources,
 )

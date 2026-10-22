@@ -69,7 +69,7 @@ class CandidateLimitTests(unittest.TestCase):
         self.assert_paused(state)
         self.assertIsNone(state['pending'])
         self.assertEqual(state['last_result']['outcome'], 'verification_failed')
-        self.assertEqual(len(self.model.calls), 2)
+        self.assertEqual(len(self.model.calls), 3)
         request, response = state['history'][-2:]
         self.assertEqual(request['data']['tool_calls'][0]['id'], response['data']['tool_call_id'])
 
@@ -163,7 +163,7 @@ class CandidateLimitTests(unittest.TestCase):
         result = self.run_plans([self.candidate()])
         self.assertEqual(result['status'], 'verified_success', result)
         self.assertEqual(len(result['rounds']), 1)
-        self.assertEqual(len(self.model.calls), 2)
+        self.assertEqual(len(self.model.calls), 3)
         self.assertIsNone(self.stored()['pending'])
 
     def test_completed_last_acceptance_is_paired_without_repeating_it(self):
@@ -228,9 +228,14 @@ class CandidateLimitTests(unittest.TestCase):
     def test_unknown_request_stays_blocked_after_marker_is_settled(self):
         self.run_plans([self.candidate(2)])
         continuation = self.resume()
-        self.change_state(lambda state: state.update(request_pending={
-            'call': 3, 'reservation': 100,
-        }))
+        def pending_request(state):
+            state['budget']['request_sequence'] += 1
+            state['budget']['used_steps'] += 1
+            state['budget']['inflight_reserved_tokens'] += 100
+            state['request_pending'] = {
+                'call': state['budget']['request_sequence'], 'reservation': 100, 'purpose': 'plan',
+            }
+        self.change_state(pending_request)
         for _ in range(2):
             result = self.run_plans([], controls=[continuation])
             self.assertEqual(result['status'], 'model_request_unknown', result)
@@ -262,51 +267,9 @@ class CandidateLimitTests(unittest.TestCase):
         self.assertEqual(len(state['rounds']), 1)
         self.assertIsNone(state['pending'])
 
-    def legacy_checkpoint(self):
-        """按已核验旧版的终态格式构造一次未执行候选被额度拒收的归档。"""
-        self.run_plans([self.candidate(2)])
-        archive = LocalHistory(self.root / 'state')
-        self.runner.history_store = archive
-        try:
-            with archive.lease():
-                self.runner.state = archive.load()
-                self.runner.state.pop('acceptance_limit')
-                self.runner.state.pop('acceptance_budget')
-                plan = self.candidate()
-                self.runner.accept_plan(WorkRequest.model_validate(plan),
-                                        message_to_dict(fixtures.reply(plan)))
-                self.runner.finish_plan('candidate_limit_reached')
-                self.runner.state['code_key'] = acceptance_limit.LEGACY_CODE_KEY
-                self.runner.persist('legacy_fixture_saved')
-        finally:
-            archive.close()
 
-    def test_supported_legacy_exhausted_task_resumes_without_replaying_history(self):
-        self.legacy_checkpoint()
-        before = self.stored()
-        projection = acceptance_limit.legacy_projection(self.root / 'state')
-        self.assertTrue(projection['active'])
-        result = self.run_plans([self.candidate()], controls=[{
-            'id': 'legacy-continue', 'kind': 'resume',
-            'acceptance_pause_id': projection['pause_id'],
-        }])
-        self.assertEqual(result['status'], 'verified_success', result)
-        state = self.stored()
-        self.assertEqual(state['history'][:len(before['history'])], before['history'])
-        self.assertEqual(state['rounds'][:1], before['rounds'])
-        self.assertEqual(len(state['rounds']), 2)
-        self.assertNotEqual(state['code_key'], acceptance_limit.LEGACY_CODE_KEY)
 
-    def test_legacy_upgrade_requires_human_and_known_engine(self):
-        self.legacy_checkpoint()
-        before = self.stored()
-        result = self.run_plans([])
-        self.assertEqual(result['status'], 'state_conflict')
-        self.assertEqual(self.stored(), before)
-        self.change_state(lambda state: state.update(code_key='unreviewed-engine'))
-        self.assertIsNone(acceptance_limit.legacy_projection(self.root / 'state'))
-        with self.assertRaisesRegex(ValueError, 'engine changed'):
-            self.run_plans([], controls=[{'id': 'continue', 'kind': 'resume'}])
+
 
     def test_pause_commit_survives_interruption_and_releases_history_lease(self):
         interrupt, Interrupted = interrupt_after_persist('plan_finished')

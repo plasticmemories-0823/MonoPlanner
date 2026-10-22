@@ -164,6 +164,8 @@ def fields(error, value):
     paths = []
     if "test_driver" in message:
         paths.append("/test_driver")
+    if "execution_checks" in message:
+        paths.append("/execution_checks")
     if "regression command" in message:
         paths.append("/regression_command")
     if any(word in message for word in ("验收", "产物", "预期", "Fixed task tests", "test_code")):
@@ -182,7 +184,9 @@ class ValidationErrors(ValueError):
         self.paths = sorted({path for paths, _ in errors for path in paths})
         self.issues = []
         for paths, error in errors:
-            if hasattr(error, "errors"):
+            if isinstance(error, ValidationErrors):
+                self.issues.extend(error.issues)
+            elif hasattr(error, "errors"):
                 for issue in error.errors():
                     location = "/" + "/".join(map(str, issue["loc"]))
                     self.issues.append(
@@ -190,6 +194,7 @@ class ValidationErrors(ValueError):
                     )
             else:
                 self.issues.append(", ".join(paths) + ": " + str(error))
+        self.issues = list(dict.fromkeys(self.issues))
         super().__init__("\n".join(self.issues))
 
 
@@ -209,18 +214,7 @@ def preview(value, paths, error):
                 cause = error.__cause__
                 match = re.search(r":(\d+)\b", str(error))
                 line = getattr(cause, "lineno", None) or (int(match[1]) if match else None)
-                indices = (
-                    [max(0, line - 2)]
-                    if line
-                    else [
-                        i
-                        for i, row in enumerate(rows)
-                        if any(
-                            word in row and word in str(error)
-                            for word in ("imports", "ARTIFACT_CHECKS")
-                        )
-                    ]
-                )
+                indices = [max(0, line - 2)] if line else []
                 text = (
                     "".join("".join(rows[i : i + 3]) for i in indices[:3])
                     if indices
@@ -235,6 +229,19 @@ def preview(value, paths, error):
 # ========================================================================
 # 被拒草稿的保存、读取与合并
 # ========================================================================
+def targets_current_draft(owner, response=None):
+    """只把当前单个修正调用绑定到仍有效的草稿，不借用其它回复的错误。"""
+    ref = owner.state.get("repair_draft")
+    data = (response or owner.state.get("response_pending") or {}).get("data", {})
+    calls = data.get("tool_calls", [])
+    return bool(
+        ref and len(calls) == 1 and not data.get("invalid_tool_calls")
+        and calls[0].get("name") == "repair_work"
+        and isinstance(calls[0].get("args"), dict)
+        and calls[0]["args"].get("draft_id") == ref["id"]
+    )
+
+
 def reject(owner, error):
     value = getattr(owner, "rejected_input", None)
     if value is not None:
@@ -263,6 +270,8 @@ def reject(owner, error):
         read(owner, ref)
         owner.state["repair_draft"] = ref
     ref = owner.state.get("repair_draft")
+    if value is None and not targets_current_draft(owner):
+        ref = None
     if not ref:
         return (
             "[Plan rejected; no actions executed] "
@@ -323,6 +332,33 @@ def merge(owner, arguments):
 # ========================================================================
 # 助手回复与拒绝结果的完整配对提交
 # ========================================================================
+def complete_empty_reply(owner, message):
+    """已完整结算且完全没有调用的空回复，与身份损坏或在途请求严格区分。"""
+    usage = message.usage_metadata or {}
+    tokens = [usage.get(key) for key in ('input_tokens', 'output_tokens', 'total_tokens')]
+    cached = (usage.get('input_token_details') or {}).get('cache_read')
+    budget = getattr(owner, 'budget', None)
+    return bool(
+        message.content == ''
+        and message.response_metadata.get('finish_reason') == 'stop'
+        and all(type(value) is int and value >= 0 for value in tokens)
+        and tokens[2] == tokens[0] + tokens[1]
+        and type(cached) is int and 0 <= cached <= tokens[0]
+        and budget is not None
+        and not budget.unknown_usage_steps
+        and not budget.inflight_reserved_tokens
+        and not budget.unknown_reserved_tokens
+        and not budget.unknown_service_cost_micros
+        and not budget.inflight_service_cost_micros
+        and not any(owner.state.get(key) for key in (
+            'pending', 'acceptance_release', 'web_pending',
+            'request_pending', 'running_step', 'verification_running',
+            'acceptance_running', 'assistant_running', 'web_running',
+            'web_request_pending', 'compaction_pending',
+        ))
+    )
+
+
 def prepare_rejection(owner, error):
     """提交配对的拒绝结果前，先记录完整回复。"""
     from langchain_core.messages import messages_from_dict
@@ -346,14 +382,32 @@ def prepare_rejection(owner, error):
         )
     calls = original_calls(message)
     if not calls:
-        raise ModelRequestNotSent(
-            'invalid_message_history', 'No trustworthy tool identity; reply retained.'
+        if not complete_empty_reply(owner, message):
+            raise ModelRequestNotSent(
+                'invalid_message_history', 'No trustworthy tool identity; reply retained.'
+            )
+        if owner.state.get('empty_response_repairs', 0) >= 1:
+            raise ModelRequestNotSent(
+                'empty_model_response',
+                'Another complete empty reply was received; no further automatic correction.',
+            )
+        notice = (
+            '[Host protocol feedback; no actions executed] '
+            'The complete reply contained no executable tool call. '
+            'Submit exactly one valid work tool call. No task requirements have changed.'
         )
-    notice = (
-        '[Acceptance review rejected; no workspace edits] ' + str(error)
-        if getattr(owner, 'reviewing', False)
-        else reject(owner, error)
-    )
+    else:
+        notice = (
+            '[Acceptance review rejected; no workspace edits] ' + str(error)
+            if getattr(owner, 'reviewing', False)
+            else reject(owner, error)
+        )
+        if (getattr(owner, 'reviewing', False) and len(calls) == 1
+                and calls[0].get('function', {}).get('name') == 'revise_acceptance'):
+            from agent.acceptance.evidence import REVISION_GUIDANCE
+
+            if REVISION_GUIDANCE not in notice:
+                notice += '. ' + REVISION_GUIDANCE
     history = owner.state['history']
     owner.state['rejection_pending'] = {
         'response': response,
@@ -363,12 +417,14 @@ def prepare_rejection(owner, error):
         'history_length': len(history),
         'prefix_digest': digest(history),
     }
+    if not calls:
+        owner.state['rejection_pending']['kind'] = 'empty_response'
     owner.persist('plan_rejection_prepared')
     finish_rejection(owner)
 
 
 def finish_rejection(owner):
-    from langchain_core.messages import ToolMessage, message_to_dict, messages_from_dict
+    from langchain_core.messages import HumanMessage, ToolMessage, message_to_dict, messages_from_dict
     from agent.model.payload import original_calls
     from agent.task import dialogue
 
@@ -385,23 +441,27 @@ def finish_rejection(owner):
         )
     if owner.interactive:
         dialogue.publish(owner, pending['response'])
-    # 单个检查点保存整个交互周期，不留下未配对的助手消息。
-    history.extend(
-        [
-            pending['response'],
-            *[
-                message_to_dict(
-                    ToolMessage(
-                        content=pending['notice'],
-                        name=call['function']['name'],
-                        tool_call_id=call['id'],
-                        status='error',
-                    )
-                )
-                for call in pending['calls']
-            ],
+    if pending.get('kind') == 'empty_response':
+        if (pending['calls'] or owner.state.get('empty_response_repairs', 0)
+                or not complete_empty_reply(owner, messages_from_dict([pending['response']])[0])):
+            raise ModelRequestNotSent(
+                'state_conflict', 'Empty reply correction changed; no request sent.'
+            )
+        # 没有工具调用时只追加宿主协议反馈，不伪造调用身份或工具执行结果。
+        results = [message_to_dict(HumanMessage(content=pending['notice']))]
+        owner.state['empty_response_repairs'] = 1
+    else:
+        if not pending['calls']:
+            raise ModelRequestNotSent('state_conflict', 'Rejected tool reply has no call identity.')
+        results = [
+            message_to_dict(ToolMessage(
+                content=pending['notice'], name=call['function']['name'],
+                tool_call_id=call['id'], status='error',
+            ))
+            for call in pending['calls']
         ]
-    )
+    # 单个检查点保存整个交互周期，不留下未配对的助手消息。
+    history.extend([pending['response'], *results])
     owner.state.update(
         response_pending=None,
         repair_count=owner.state['repair_count'] + 1,

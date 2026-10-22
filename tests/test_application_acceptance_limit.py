@@ -189,20 +189,6 @@ def test_acceptance_notice_does_not_require_progress_model(work):
         scheduler.close()
 
 
-def test_legacy_projection_only_checks_exact_stalled_reason(work):
-    store, conversation, job = work
-    store.work_state(job['task_id'], 'stalled', reason='No new progress', acceptance_limit=None)
-    with patch('agent.task.acceptance_limit.legacy_projection') as project:
-        store.project_acceptance_limits()
-        project.assert_not_called()
-    store.work_state(job['task_id'], 'stalled', reason='Final candidate attempt limit reached')
-    with patch('agent.task.acceptance_limit.legacy_projection', return_value=None):
-        store.project_acceptance_limits()
-    assert store.work(job['task_id'])['status'] == 'stalled'
-    with patch('agent.task.acceptance_limit.legacy_projection', return_value=limit()) as project:
-        store.project_acceptance_limits()
-        project.assert_called_once_with(store.root / 'tasks' / job['task_id'])
-    assert store.work(job['task_id'])['status'] == STATUS
 
 
 def test_public_progress_facts_include_only_acceptance_summary():
@@ -225,19 +211,6 @@ def test_coalesced_clicks_do_not_block_new_decision_after_cancelled_dispatch(wor
     assert [row['id'] for row in store.commands(task=job['task_id'])] == [fresh['id']]
 
 
-def test_legacy_projection_cannot_overwrite_a_concurrent_state_change(work):
-    store, conversation, job = work
-    store.work_state(job['task_id'], 'stalled', reason='Final candidate attempt limit reached',
-                     acceptance_limit=None)
-
-    def project(_directory):
-        store.work_state(job['task_id'], 'execution_unknown', reason='Concurrent safety stop')
-        return limit()
-
-    with patch('agent.task.acceptance_limit.legacy_projection', side_effect=project):
-        store.project_acceptance_limits()
-    assert store.work(job['task_id'])['status'] == 'execution_unknown'
-    assert store.work(job['task_id'])['reason'] == 'Concurrent safety stop'
 
 
 def test_chatbot_status_includes_public_acceptance_budget_after_reload(work):

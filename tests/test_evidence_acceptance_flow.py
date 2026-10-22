@@ -59,17 +59,17 @@ class EvidenceAcceptanceFlow(unittest.TestCase):
             self.correct, review, f.reply(self.candidate(test_code='')),
         ])
         self.assertEqual(result['status'], 'verified_success', result)
-        self.assertEqual(result['planner_calls'], 5)
+        self.assertEqual(result['planner_calls'], 6)
         self.assertEqual(len(result['rounds']), 2)  # 修订不抹掉已消耗的验收轮次。
         self.assertEqual(len(self.state()['acceptance_versions']), 2)
         data = self.comparison(result)
         old, new = data['versions']
         self.assertEqual(old['candidate']['status'], 'failed')
         self.assertEqual(old['effective_candidate']['status'], 'passed')
-        self.assertEqual(old['superseded_expectations_by'], [new['trial_id']])
+        self.assertEqual(old['superseded_acceptance_by'], [new['trial_id']])
         self.assertEqual(data['conflicts'], [])
         version = revisions.checked(self.engine.root, self.state()['active_acceptance'])
-        correction = version['expectation_correction']
+        correction = version['acceptance_correction']
         self.assertEqual(correction['rule_version'], RULE_VERSION)
         self.assertFalse(correction['semantic_correctness_proven'])
         self.assertEqual(correction['evidence'][0]['quote'], 'return 4')
@@ -141,17 +141,16 @@ class EvidenceAcceptanceFlow(unittest.TestCase):
         self.assertEqual(result['verification']['status'], 'failed')
         self.assertIn('test_unchanged', str(result['verification']))
 
-    def test_prepare_only_conflict_survives_later_expectation_correction(self):
+    def test_correction_does_not_remove_undeclared_setup_failure(self):
         setup = "from sample import value\nif value() != 0:\n    raise RuntimeError('setup conflict')\n"
         result = self.run_replies(self.initial(setup + WRONG) + [
-            lambda m: review(m, 'revise_acceptance', WRONG), review,
-            self.correct, review, f.reply(self.candidate(test_code='')),
-            f.reply({'kind': 'blocked', 'note': 'The original setup conflict remains'}),
+            lambda m: self.correct(m, code=setup + f.CODE), review,
+            f.reply(self.candidate(test_code='')),
+            f.reply({'kind': 'blocked', 'note': 'Unchanged setup still fails'}),
         ])
         self.assertEqual(result['status'], 'task_blocked', result)
         data = self.comparison(result)
-        self.assertEqual(data['conflicts'], [data['versions'][0]['trial_id']])
-        self.assertTrue(data['versions'][0]['superseded_expectations_by'])
+        self.assertIn(setup, data['versions'][0]['effective_spec']['test_code'])
         self.assertNotEqual(data['versions'][0]['effective_candidate']['status'], 'passed')
 
     def test_multiple_corrections_and_setup_revision_keep_supersession_chain(self):
@@ -164,7 +163,7 @@ class EvidenceAcceptanceFlow(unittest.TestCase):
         self.assertEqual(result['status'], 'verified_success', result)
         data = self.comparison(result)
         self.assertEqual(len(data['versions']), 3)
-        self.assertEqual(len(data['versions'][0]['superseded_expectations_by']), 2)
+        self.assertEqual(len(data['versions'][0]['superseded_acceptance_by']), 2)
         self.assertFalse(data['conflicts'])
 
     def test_pending_correction_and_frozen_version_resume_without_replay(self):
@@ -184,7 +183,7 @@ class EvidenceAcceptanceFlow(unittest.TestCase):
         result = self.run_replies([review, f.reply(self.candidate(test_code=''))])
         self.assertEqual(result['status'], 'verified_success', result)
         self.assertEqual(result['calls_this_invocation'], 2)
-        self.assertEqual(result['planner_calls'], 5)
+        self.assertEqual(result['planner_calls'], 6)
         self.assertEqual(len(self.state()['acceptance_trials']), 2)
 
     def test_evidence_fingerprint_tampering_stops_before_freeze(self):
@@ -192,7 +191,7 @@ class EvidenceAcceptanceFlow(unittest.TestCase):
             trial = self.engine.state['acceptance_trial']
             path = self.engine.root / trial['ref']['record']
             record = json.loads(path.read_text('utf-8'))
-            record['expectation_correction']['evidence'][0]['quote'] = 'return 2'
+            record['acceptance_correction']['evidence'][0]['quote'] = 'return 2'
             path.write_text(json.dumps(record), encoding='utf-8')
             return review(messages)
 
@@ -205,7 +204,7 @@ class EvidenceAcceptanceFlow(unittest.TestCase):
         from agent.settings import PROJECT_ROOT
 
         original = code_key()
-        for name in ['agent/acceptance/evidence.py', 'agent/acceptance/expectations.py']:
+        for name in ['agent/acceptance/evidence.py', 'agent/acceptance/corrections.py']:
             changed = self.root / 'changed.py'
             changed.write_bytes((PROJECT_ROOT / name).read_bytes() + b'\n')
 

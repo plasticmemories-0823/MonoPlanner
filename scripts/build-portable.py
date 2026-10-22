@@ -1,7 +1,6 @@
 """使用已准备的固定版本运行时，构建可离线启动的 Windows 便携包。"""
 
 import argparse
-import csv
 from email.parser import Parser
 import hashlib
 import json
@@ -80,44 +79,14 @@ def copy_launcher_inputs(destination):
 # 固定 Python 运行时与依赖
 # ============================================================
 def copy_python_runtime(source, destination):
-    """只分发固定解释器及锁文件中的生产依赖。"""
-    copy_tree(source, destination, exclude={'Lib', 'Scripts'})
-    copy_tree(source / 'Lib', destination / 'Lib', exclude={'site-packages'})
-    packages = source / 'Lib/site-packages'
-    target = destination / 'Lib/site-packages'
-    normalized = lambda name: re.sub(r'[-_.]+', '-', name).lower()
-    locked = {}
-    for line in (ROOT / 'requirements.lock').read_text(encoding='utf-8').splitlines():
-        match = re.match(r'([\w.-]+)(?:\[[^]]+\])?==([^ ;]+)', line)
-        if match:
-            locked[normalized(match[1])] = match[2]
-    found = set()
-    for metadata in packages.glob('*.dist-info/METADATA'):
-        values = Parser().parsestr(metadata.read_text(encoding='utf-8'))
-        name = normalized(values['Name'])
-        if name not in locked:
-            continue
-        if values['Version'] != locked[name]:
-            raise ValueError('Runtime version differs from lock: ' + name)
-        found.add(name)
-        with (metadata.parent / 'RECORD').open(encoding='utf-8', newline='') as record:
-            for relative, *_ in csv.reader(record):
-                path = packages / relative
-                if (
-                    not path.resolve().is_relative_to(packages.resolve())
-                    or path.suffix == '.pyc'
-                    or path.name == 'direct_url.json'
-                ):
-                    continue
-                output = target / path.relative_to(packages)
-                if not path.is_file():
-                    raise ValueError('Production runtime file is missing: ' + relative)
-                output.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, output)
-    if found != set(locked):
-        raise ValueError(
-            'Production runtime dependencies missing: ' + ', '.join(sorted(set(locked) - found))
-        )
+    """与冻结内核共用生产依赖清单，不复制开发安装器。"""
+    from agent.runtime.distribution import python_files
+
+    files, found = python_files(source, ROOT / 'requirements.lock')
+    for path in files:
+        output = destination / path.relative_to(source.resolve())
+        output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, output)
     return found
 
 
@@ -203,7 +172,11 @@ def build(destination, make_zip=True):
         source = ROOT / name
         if source.is_file():
             shutil.copy2(source, destination / name)
-    for name in ('third-party.md', 'security.md', 'assets/workspace.png'):
+    for name in (
+        'third-party.md', 'security.md', 'managed-execution.md',
+        'boundary-hints.md', 'confirmed-delivery.md', 'work-graph.md', 'rag.md',
+        'upgrade-compatibility.md', 'crash-continuation.md', 'assets/workspace.png',
+    ):
         source = ROOT / 'docs' / name
         target = destination / 'docs' / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -216,17 +189,27 @@ def build(destination, make_zip=True):
         'python/python.exe',
         'node/node.exe',
         'git/cmd/git.exe',
+        'ripgrep/rg.exe',
         'MonoPlanner.FilePicker.exe',
         'MonoPlanner.Applications.exe',
         'WebView2Loader.dll',
     )
     if any(not (runtime / name).is_file() for name in required):
         raise ValueError('Prepare all fixed runtimes before packaging; no first-run installation')
+    from agent.rag.ripgrep import executable
+
+    executable()
+    rg_manifest = json.loads((ROOT / 'resources/ripgrep.json').read_text('utf-8'))
+    for name, expected in rg_manifest['files'].items():
+        source = runtime / 'ripgrep' / name
+        if not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+            raise ValueError('Fixed ripgrep runtime or license is missing/changed: ' + name)
     runtime_entries = {
         'python',
         'node',
         'git',
         'webview',
+        'ripgrep',
         'MonoPlanner.FilePicker.exe',
         'MonoPlanner.Applications.exe',
         'WebView2Loader.dll',
@@ -261,6 +244,7 @@ def build(destination, make_zip=True):
         'python': '3.13.15',
         'node': '24.14.0',
         'git': '2.53.0.2',
+        'ripgrep': '15.2.0',
         'webview2_sdk': '1.0.4258.31',
         'webview2_fixed': '155.0.4283.45',
         'startup_installs_dependencies': False,
@@ -388,17 +372,10 @@ def build(destination, make_zip=True):
     def shipped(path):
         name = path.relative_to(destination).as_posix()
         runtime_entries = {
-            'python',
-            'node',
-            'git',
-            'webview',
-            'MonoPlanner.FilePicker.exe',
-            'MonoPlanner.Applications.exe',
-            'WebView2Loader.dll',
-            'Microsoft.Web.WebView2.Core.dll',
-            'Microsoft.Web.WebView2.WinForms.dll',
-            'LICENSE.txt',
-            'version.txt',
+            'python', 'node', 'git', 'webview', 'ripgrep',
+            'MonoPlanner.FilePicker.exe', 'MonoPlanner.Applications.exe',
+            'WebView2Loader.dll', 'Microsoft.Web.WebView2.Core.dll',
+            'Microsoft.Web.WebView2.WinForms.dll', 'LICENSE.txt', 'version.txt',
         }
         if (
             name.startswith('launcher/runtime/')

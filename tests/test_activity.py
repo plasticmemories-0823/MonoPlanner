@@ -62,6 +62,25 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(waiting[-1]['detail'], '')
         self.assertEqual(waiting[-1]['after_id'], 'first')
 
+    def test_boundary_lookup_is_visible_without_triggering_an_extra_model_call(self):
+        from langchain_core.messages import AIMessage
+
+        lookup = AIMessage(
+            content='', tool_calls=[{
+                'name': 'get_boundary_hints', 'id': 'boundary-call',
+                'args': {'keys': ['general', 'state']},
+            }],
+        )
+        model = ScriptedModel([lookup, text_reply()])
+        self.run_model(model)
+        display = self.read()
+        rows = [row for row in display['items'] if row['kind'] == 'operation']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['detail'], 'general, state')
+        self.assertEqual(rows[0]['status'], 'completed')
+        self.assertEqual(len(model.calls), 2)
+        self.assertEqual(self.read(display['cursors'])['items'], [])
+
     def test_side_conversation_web_operations_follow_their_user_message(self):
         record = {
             'state': {

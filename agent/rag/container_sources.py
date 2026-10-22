@@ -343,6 +343,13 @@ class ContainerSources:
         if not exists:
             self._cache_used += len(raw)
 
+    def cached_path(self, meta):
+        for folder in ('originals', 'cache'):
+            path = self.base / folder / meta['sha256']
+            if path.exists():
+                return _safe_tree(path, self.root)
+        raise ContainerSourceError('container_scan_expired_restart_query', meta['path'])
+
     def cached(self, meta):
         for folder in ('originals', 'cache'):
             path = self.base / folder / meta['sha256']
@@ -443,8 +450,7 @@ class ContainerSources:
                           'reasons': ['container_source_enumeration_pending'],
                           'scanned_sources': len(state['entries']),
                           'notice': 'Source enumeration is incomplete. Continue with the same query '
-                                    'and scope; no absence of evidence has been established.',
-                          'rewrite': {'status': 'not_triggered'}}
+                                    'and scope; no absence of evidence has been established.'}
         return state['entries'], {'grant': grant, 'excluded_sources': state['excluded'],
                                   'scan_id': state['id'], 'search_cursor': state['search_cursor']}
 

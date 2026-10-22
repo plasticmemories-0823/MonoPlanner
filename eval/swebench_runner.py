@@ -455,12 +455,17 @@ def run_instance(task, image, directory, model, ledger, args, secrets):
             report_time_reserve=30,
         )
         controller = create_task_controller(recorder, environment, directory, args)
-        outcome = controller.run(
-            [],
-            "Please implement a code fix for this repository issue:\n\n"
-            + task["problem_statement"],
-            budget,
-        )
+        request = "Please implement a code fix for this repository issue:\n\n" + task["problem_statement"]
+        if getattr(args, 'requirements', None):
+            from agent.task.requirements import confirmed
+
+            declarations = json.loads(Path(args.requirements).read_text(encoding='utf-8-sig'))
+            controller.confirmed_requirements = confirmed(
+                request, declarations[task['instance_id']]['targets'],
+                confirmation={'id': 'evaluation:' + task['instance_id'],
+                              'text': 'Operator explicitly supplied the confirmed requirements file'},
+            )
+        outcome = controller.run([], request, budget)
         serializable = {
             **outcome,
             "messages": messages_to_dict(outcome["messages"]),
@@ -531,6 +536,7 @@ def run_instance(task, image, directory, model, ledger, args, secrets):
 # ============================================================
 def _argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--requirements", help="Confirmed delivery targets by instance ID; no automatic inference")
     parser.add_argument("--tasks", required=True)
     parser.add_argument("--images", required=True)
     parser.add_argument("--run-dir", required=True)

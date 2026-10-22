@@ -17,7 +17,9 @@ from agent.source.snapshots import (
 
 
 def _save(path, value):
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    from agent.storage.records import save
+
+    save(path, value)
 
 
 def _digest(value):
@@ -70,7 +72,9 @@ class SourceVersions:
                 data = path.read_bytes()
                 if hashlib.sha256(data).hexdigest() != sha:
                     raise RuntimeError("Source changed while recording test evidence: " + name)
-                blob.write_bytes(data)
+                from agent.storage.records import immutable
+
+                immutable(blob, data)
         state = {"files": files, "excluded": excluded}
         digest = _digest(state)
         manifest = self.root / "states" / (digest + ".json")

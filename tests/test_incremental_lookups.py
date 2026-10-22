@@ -165,7 +165,7 @@ class IncrementalLookupTests(unittest.TestCase):
                 self.assertEqual(mapped['dependencies'][0]['path'], 'sample.py')
             else:
                 self.assertEqual([s['name'] for s in mapped['symbols']], ['first', 'second'])
-        self.assertEqual(result['planner_calls'], 3)
+        self.assertEqual(result['planner_calls'], 4)
 
     def test_authorized_source_edit_retires_stale_map_details(self):
         self.reader()
@@ -226,7 +226,16 @@ class IncrementalLookupTests(unittest.TestCase):
         from agent.task.contracts import Operation
         from unittest.mock import patch
 
-        with patch('os.walk', side_effect=AssertionError('no global scan')):
+        import os
+        walk = os.walk
+
+        def only_owned_temp_cleanup(path, *args, **kwargs):
+            # 新流式扫描清理自己的临时 SQLite/模式文件，不等于重新扫描项目。
+            if not Path(path).name.startswith(('monoplanner-search-', 'monoplanner-rg-')):
+                raise AssertionError('no project or global scan')
+            return walk(path, *args, **kwargs)
+
+        with patch('os.walk', side_effect=only_owned_temp_cleanup):
             result = mapped.observe(
                 reader.search(Operation(id='locate', op='search', query='needle'))
             )

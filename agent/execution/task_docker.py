@@ -29,6 +29,8 @@ def inspected_host_path(source):
 # 任务专属环境与只读资料
 # ============================================================
 class TaskDocker(DockerEnvironment):
+    recover_partial_effects = True
+
     def __init__(
         self, repo, image, task_root, *, runtime=None, read_sources=(), managed=None,
         project_scope=None,
@@ -382,3 +384,25 @@ class TaskDocker(DockerEnvironment):
         save(self.binding_path, self._binding(self._container_id))
         self._check_runtime(first_start=True)
         return self
+
+    def recover_stopped(self, record):
+        """显式继续才接管原容器；构造时已逐项核对绑定、挂载及隔离。"""
+        self._prepare_project_masks(allow_create=False, full_check=True)
+        actual = self._continuation_container()
+        before = {'container_id': self._container_id,
+                  'identity': self._continuation_identity(actual), 'state': actual['State']}
+        if actual['State'].get('Running'):
+            result = self._docker(['stop', '--time', '5', self._container_id],
+                                  capture_output=True, text=True)
+            if result.returncode:
+                raise RuntimeError('Could not stop the original task container before recovery')
+        stopped = self._continuation_container()
+        if (stopped['State'].get('Running')
+                or self._continuation_identity(stopped) != before['identity']):
+            raise ValueError('Task container changed during recovery')
+        save(record, {'before': before, 'stopped': stopped['State']})
+        result = self._docker(['start', self._container_id], capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError('Could not restart the original task container')
+        self.running, self._closed = True, False
+        self.start()

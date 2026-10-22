@@ -47,6 +47,58 @@ def tools(store, conversation):
     return [raw['data'] for _, raw in store.model_history(conversation) if raw['type'] == 'tool']
 
 
+def test_invalid_requirement_code_is_paired_then_corrected_without_replay(setup):
+    from tests.test_requirement_delivery import target
+
+    store, conversation, _ = setup
+    item = incoming('Generate runnable code')
+    store.submit(conversation, item)
+    candidate = target()
+    candidate['quotes'][0]['source_id'] = item['id']
+    arguments = dict(project_path='.', create=False, request_message_ids=[item['id']],
+                     targets=[candidate], withdrawals=[])
+    invalid = deepcopy(arguments)
+    invalid['targets'][0]['imports'] = 'No imports；only standard library'
+    model = ScriptedModel([
+        reply(call('prepare_work', 'invalid', **invalid)),
+        reply(call('prepare_work', 'corrected', **arguments)),
+        text_reply(),
+    ])
+    bot = Chatbot(store, lambda *_: pytest.fail('A proposal cannot start work'),
+                  factory=lambda _: model)
+    result = bot.run(conversation, item)
+    assert result['waiting_approval'] and len(model.calls) == 2
+    saved = tools(store, conversation)
+    assert [row['tool_call_id'] for row in saved] == ['invalid', 'corrected']
+    rejected = json.loads(saved[0]['content'])
+    assert rejected['actions_executed'] is False
+    assert 'targets[0]' in rejected['error'] and 'imports' in rejected['error']
+    assert store.usage(conversation)['chat']['unknown_calls'] == 0
+    following = incoming('Explain the proposal')
+    store.submit(conversation, following)
+    bot.run(conversation, following)
+    assert len(model.calls) == 3 and len(originals(store, conversation)) == 2
+
+
+@pytest.mark.parametrize('failure', [RuntimeError, ValueError, TypeError])
+def test_internal_tool_failure_is_not_a_model_unknown_or_unexecuted_result(setup, failure):
+    store, conversation, _ = setup
+    model = ScriptedModel([reply(call('request_file_operation'))])
+    scheduler = Scheduler(store, model_factory=lambda _: model)
+    scheduler.chatbot.invoke_tool = lambda *_: (_ for _ in ()).throw(failure('internal'))
+    item = incoming()
+    store.submit(conversation, item)
+    try:
+        scheduler._chat(conversation, item)
+        assert store.get(conversation)['chat_status'] == 'tool_internal_error'
+        assert store.usage(conversation)['chat']['unknown_calls'] == 0
+        assert not tools(store, conversation) and len(model.calls) == 1
+        scheduler.tick()
+        assert len(model.calls) == 1
+    finally:
+        scheduler.close()
+
+
 def test_chat_archives_before_normalizing_and_keeps_calls_separate(setup, monkeypatch):
     from agent.application import chat
 
@@ -108,7 +160,6 @@ def test_chat_search_keeps_audit_local_and_sends_shared_sources(setup, monkeypat
         reply(call('retrieve_evidence', query='needle', path='.', mode='exact')),
         text_reply(),
     ])
-    monkeypatch.setattr(integration, '_models', lambda *_: pytest.fail('Exact loaded a model'))
     bot = Chatbot(store, lambda *_: pytest.fail('Unexpected handoff'), factory=lambda _: model)
     item = incoming()
     store.submit(conversation, item)
@@ -148,14 +199,14 @@ def test_noncollection_execution_and_approval_results_are_unchanged(setup, name,
     assert len(model.calls) == (1 if state['waiting_approval'] else 2)
 
 
-@pytest.mark.parametrize('name', ['start_work', 'run_existing', 'get_work_status',
+@pytest.mark.parametrize('name', ['prepare_work', 'run_existing', 'get_work_status',
                                   'get_read_sources', 'read_work_events', 'read_work_record'])
 def test_builtin_handoff_and_status_tools_also_save_raw_results(setup, monkeypatch, name):
     from agent.application import chat, records
 
     store, conversation, _ = setup
     task = {'task_id': 'a' * 32, 'status': 'queued', 'repo': 'project', 'project_path': '.'}
-    arguments = {'start_work': {'project_path': '.', 'create': False},
+    arguments = {'prepare_work': {'project_path': '.', 'create': False},
                  'run_existing': {'entry': 'task.py', 'args': [], 'timeout': 10, 'usage_file': ''},
                  'read_work_events': {'after': 0, 'limit': 50},
                  'read_work_record': {'record': 'record', 'offset': 0, 'limit': 10}}.get(name, {})
@@ -246,7 +297,12 @@ def test_result_storage_failure_stops_dispatch_and_restart_does_not_replay(setup
                 'status': 'completed', 'actions_executed': True,
             }
         scheduler.tick()
+        if failure == 'message':
+            with pytest.raises(OSError, match='database full'):
+                store.recover_interrupted()
+            monkeypatch.setattr(store, 'model_message', original_message)
         store.recover_interrupted()
+        assert tools(store, conversation)
         scheduler.tick()
         assert executed == ['done'] and len(model.calls) == 1
     finally:
@@ -308,7 +364,8 @@ def test_completed_tool_event_save_failure_keeps_actual_result_and_stops(setup, 
     from agent.application import chat
 
     store, conversation, _ = setup
-    model = ScriptedModel([reply(call('request_file_operation')), text_reply()])
+    model = ScriptedModel([reply(call('request_file_operation', operation='create',
+                                     path='a.txt', destination='', content='data')), text_reply()])
     result = {'status': 'completed', 'actions_executed': True}
     executed = []
     monkeypatch.setattr(chat, 'invoke_assistant',
@@ -367,7 +424,7 @@ def test_normal_completion_event_is_once_after_raw_and_model_result(setup, monke
     from agent.application import chat
 
     store, conversation, _ = setup
-    model = ScriptedModel([reply(call('list_files')), text_reply()])
+    model = ScriptedModel([reply(call('list_files', path='.', offset=0, limit=10)), text_reply()])
     result = {'entries': [{'path': 'a'}, {'path': 'a'}]}
     monkeypatch.setattr(chat, 'invoke_assistant', lambda *_: result)
     original_event = store.record_event
@@ -386,3 +443,37 @@ def test_normal_completion_event_is_once_after_raw_and_model_result(setup, monke
     store.submit(conversation, item)
     bot.run(conversation, item)
     assert len(completed) == 1 and completed[0]['status'] == 'completed'
+
+
+def test_restart_reconciles_saved_response_before_sql_without_an_api_call(setup, monkeypatch):
+    from agent.application import chat
+    from agent.storage.records import save
+
+    class Crash(BaseException):
+        pass
+
+    store, conversation, _ = setup
+    item = incoming()
+    store.submit(conversation, item)
+    model = ScriptedModel([reply(call('read_file', path='x', offset=0, limit=2))])
+    invoked = []
+    bot = Chatbot(store, lambda *_: None, factory=lambda _: model,
+                  invoke_tool=lambda *_: invoked.append(1))
+
+    def crash_after_save(path, value):
+        save(path, value)
+        if Path(path).name == 'response.json':
+            raise Crash()
+
+    with monkeypatch.context() as changes:
+        changes.setattr('agent.storage.records.save', crash_after_save)
+        with pytest.raises(Crash):
+            bot.run(conversation, item)
+    store.recover_interrupted()
+    assert not invoked and len(model.calls) == 1
+    assert store.usage(conversation)['chat']['unknown_calls'] == 0
+    result = json.loads(tools(store, conversation)[0]['content'])
+    assert result['actions_executed'] is False
+    before = store.model_history(conversation)
+    store.recover_interrupted()
+    assert store.model_history(conversation) == before

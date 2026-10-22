@@ -17,8 +17,10 @@ from agent.task.acceptance_limit import STATUS as ACCEPTANCE_LIMIT
 ACTIVE = {'queued', 'running', 'needs_plan', 'executing', 'pausing'}
 TERMINAL = {'verified_success', 'task_blocked', 'task_cancelled', 'chat_complete',
             'existing_complete', 'stalled', 'budget_exhausted', 'preparation_failed'}
-UNKNOWN = {'model_request_unknown', 'execution_unknown', 'state_conflict'}
-RESUMABLE = {'paused', 'awaiting_user', 'output_limit_reached', ACCEPTANCE_LIMIT}
+UNKNOWN = {'model_request_unknown', 'execution_unknown', 'state_conflict', 'interrupted'}
+RESUMABLE = {'paused', 'awaiting_user', 'output_limit_reached', ACCEPTANCE_LIMIT,
+             'interrupted', 'model_request_unknown', 'execution_unknown', 'runtime_error',
+             'compaction_commit_unknown', 'state_conflict'}
 SUPPLEMENTABLE = (ACTIVE - {'pausing'}) | {'paused', 'awaiting_user'}
 WORK_STATE_FIELDS = {
     'status', 'reason', 'updated_at', 'revision', 'usage', 'control_unconfirmed', 'acceptance_limit',
@@ -48,6 +50,9 @@ class ApplicationStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / 'application.sqlite3'
+        from agent.storage.schema import initialize
+
+        initialize(self.path)
         if self.path.is_symlink():
             raise ValueError('Application database cannot be a link')
         with self.connection() as db:
@@ -62,6 +67,7 @@ class ApplicationStore:
                     seq INTEGER PRIMARY KEY, id TEXT NOT NULL,
                     conversation TEXT NOT NULL, kind TEXT NOT NULL,
                     body TEXT NOT NULL, state TEXT NOT NULL, task_id TEXT,
+                    acceptance_pause_id TEXT,
                     UNIQUE(conversation,id));
                 CREATE TABLE IF NOT EXISTS app_events (
                     seq INTEGER PRIMARY KEY, conversation TEXT NOT NULL,
@@ -89,32 +95,13 @@ class ApplicationStore:
                 CREATE TABLE IF NOT EXISTS app_titles (
                     conversation TEXT PRIMARY KEY, data TEXT NOT NULL);
             ''')
-            db.execute('BEGIN IMMEDIATE')
-            columns = {row['name'] for row in db.execute('PRAGMA table_info(app_commands)')}
-            if 'acceptance_pause_id' not in columns:
-                db.execute('ALTER TABLE app_commands ADD COLUMN acceptance_pause_id TEXT')
-        self.project_acceptance_limits()
-
-    def project_acceptance_limits(self):
-        """仅迁移已验证的旧轮次耗尽展示；不修改或执行内核检查点。"""
-        from agent.task.acceptance_limit import legacy_projection
-
-        with self.connection() as db:
-            rows = db.execute(
-                "SELECT id,data FROM app_work_state WHERE json_extract(data,'$.status')='stalled' "
-                "AND json_extract(data,'$.reason')='Final candidate attempt limit reached'"
-            ).fetchall()
-        for row in rows:
-            limit = legacy_projection(self.root / 'tasks' / row['id'])
-            if limit:
-                previous = json.loads(row['data'])
-                self.work_state(row['id'], ACCEPTANCE_LIMIT, acceptance_limit=limit,
-                                expected_revision=previous['revision'],
-                                event='acceptance_limit_migrated')
 
     @contextmanager
     def connection(self):
         with closing(sqlite3.connect(self.path, timeout=15)) as db:
+            from agent.storage.schema import require_version
+
+            require_version(db)
             db.row_factory = sqlite3.Row
             db.execute('PRAGMA synchronous=FULL')
             db.execute('PRAGMA busy_timeout=15000')
@@ -158,12 +145,6 @@ class ApplicationStore:
             old = db.execute('SELECT data FROM app_conversations WHERE id=?', (conversation,)).fetchone()
             if old:
                 return json.loads(old['data'])
-            legacy_path = self.root / 'conversations.sqlite3'
-            if legacy_path.is_file():
-                with closing(sqlite3.connect(legacy_path.as_uri() + '?mode=ro', uri=True)) as legacy:
-                    if legacy.execute("SELECT 1 FROM sqlite_master WHERE name='sessions'").fetchone():
-                        if legacy.execute('SELECT 1 FROM sessions WHERE thread=?', (conversation,)).fetchone():
-                            raise Conflict('旧版本会话仅可查看；请使用新的会话编号')
             value = {
                 'thread_id': conversation, 'created_at': timestamp(), 'updated_at': timestamp(),
                 'repo': repo, 'runtime_settings': settings, 'status': 'idle',
@@ -183,50 +164,9 @@ class ApplicationStore:
     def list(self):
         with self.connection() as db:
             values = [json.loads(row[0]) for row in db.execute('SELECT data FROM app_conversations')]
-        known = {v['thread_id'] for v in values}
-        values.extend(v for v in self.legacy() if v['thread_id'] not in known)
         return sorted((v for v in values if v['visibility'] != 'purged'),
                       key=lambda v: v['updated_at'], reverse=True)
 
-    def legacy(self, conversation=None):
-        """旧会话只读展示，既不迁移检查点，也不接管原运行任务。"""
-        path = self.root / 'conversations.sqlite3'
-        if not path.is_file() or path.is_symlink():
-            return []
-        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
-            db.row_factory = sqlite3.Row
-            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if 'sessions' not in tables:
-                return []
-            query, args = 'SELECT thread,data FROM sessions', ()
-            if conversation:
-                query += ' WHERE thread=?'
-                args = (conversation,)
-            results = []
-            for row in db.execute(query, args):
-                saved = json.loads(row['data'])
-                if saved.get('application_managed'):
-                    continue
-                title = None
-                if 'conversation_titles' in tables:
-                    record = db.execute('SELECT data FROM conversation_titles WHERE thread=?',
-                                        (row['thread'],)).fetchone()
-                    title = json.loads(record[0]) if record else None
-                visible = db.execute('SELECT visibility FROM presentation WHERE thread=?',
-                                     (row['thread'],)).fetchone() if 'presentation' in tables else None
-                messages = [{'id': m['data'].get('id', ''), 'type': m['type'],
-                             'content': m['data']['content'], 'source': 'user' if m['type'] == 'human' else 'chat'}
-                            for m in saved.get('public_messages', [])]
-                results.append({
-                    'thread_id': row['thread'], 'created_at': '', 'updated_at': '',
-                    'repo': saved.get('repo', ''), 'runtime_settings': saved.get('runtime_settings', {}),
-                    'status': saved.get('status', 'paused'), 'chat_status': 'idle',
-                    'work_id': saved.get('task_id'), 'read_only': True,
-                    'title': {key: (title or {}).get(key, default) for key, default in
-                              (('title', '旧版对话'), ('status', 'complete'), ('revision', 0))},
-                    'visibility': visible[0] if visible else 'active', 'messages': messages,
-                })
-        return results
 
     @staticmethod
     def _message(db, conversation, message_id, role, content, source):
@@ -251,14 +191,21 @@ class ApplicationStore:
 
     def submit(self, conversation, command):
         conversation = identity(conversation)
-        allowed = {'id', 'kind', 'text', 'repo', 'runtime_settings', 'acceptance_pause_id'}
+        allowed = {'id', 'kind', 'text', 'repo', 'runtime_settings', 'acceptance_pause_id', 'confirmed_requirements', 'proposal_id'}
         if not isinstance(command, dict) or set(command) - allowed:
             raise ValueError('Invalid command fields')
         command = dict(command)
         command['id'] = identity(command.get('id'))
         kind = command.get('kind')
-        if kind not in {'message', 'pause', 'resume', 'supplement', 'workspace'}:
+        if kind not in {'message', 'pause', 'resume', 'supplement', 'workspace', 'confirm_work'}:
             raise ValueError('Invalid command kind')
+        if kind == 'confirm_work':
+            if (not isinstance(command.get('proposal_id'), str) or len(command['proposal_id']) != 64
+                    or any(c not in '0123456789abcdef' for c in command['proposal_id'])):
+                raise ValueError('Confirm the exact displayed work proposal')
+            command['text'] = '确认工作方案 ' + command['proposal_id']
+        elif 'proposal_id' in command:
+            raise ValueError('Only explicit human confirmation carries a proposal identity')
         if kind in {'message', 'supplement'} and (
             not isinstance(command.get('text'), str) or not command['text'].strip()
         ):
@@ -277,6 +224,12 @@ class ApplicationStore:
             or not 1 <= len(command['acceptance_pause_id']) <= 200
         ):
             raise ValueError('Invalid acceptance pause identity')
+        if 'confirmed_requirements' in command:
+            from agent.task.requirements import checked
+
+            if kind != 'supplement':
+                raise ValueError('Only confirmed supplements can update delivery requirements')
+            checked(command['confirmed_requirements'])
         body = encode(command)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -296,10 +249,18 @@ class ApplicationStore:
             if kind in {'pause', 'resume', 'supplement'} and not task:
                 if kind != 'pause':
                     raise Conflict('There is no work task to control')
-            if kind == 'resume' and task and task['status'] in UNKNOWN:
-                raise Conflict('Unknown work results require inspection, not replay')
             if kind == 'resume' and task and task['status'] not in RESUMABLE:
                 raise Conflict('当前任务不处于可恢复状态')
+            if kind == 'resume' and task:
+                deferred = db.execute(
+                    "SELECT id,body FROM app_commands WHERE task_id=? AND kind='supplement' "
+                    "AND state='deferred' ORDER BY seq", (task['task_id'],),
+                ).fetchall()
+                if any(not json.loads(row['body']).get('confirmed_requirements') for row in deferred):
+                    raise Conflict('崩溃前的需求补充尚未确认，原文已保留；请先在聊天中确认更新后的方案，再继续。')
+                for row in deferred:
+                    db.execute("UPDATE app_commands SET state='pending' WHERE conversation=? AND id=?",
+                               (conversation, row['id']))
             acceptance_pause_id = None
             duplicate_resume = False
             if kind == 'resume' and task:
@@ -318,7 +279,8 @@ class ApplicationStore:
                         (task['task_id'], acceptance_pause_id),
                     ).fetchone())
             if kind == 'supplement' and task and task['status'] not in SUPPLEMENTABLE:
-                raise Conflict('当前任务不能接收补充；输出或验收轮次达到上限时请先点击继续任务')
+                if not (command.get('confirmed_requirements') and task['status'] in RESUMABLE):
+                    raise Conflict('当前任务不能接收补充；输出或验收轮次达到上限时请先点击继续任务')
             if kind in {'workspace', 'message'}:
                 before_configuration = (value['repo'], value['runtime_settings'])
                 if 'repo' in command and command['repo'] != value['repo']:
@@ -329,14 +291,25 @@ class ApplicationStore:
                     value['runtime_settings'] = command['runtime_settings']
                 if before_configuration != (value['repo'], value['runtime_settings']):
                     value['configuration_revision'] = value.get('configuration_revision', 0) + 1
+            deferred_supplement = (kind == 'supplement' and task
+                                   and task['status'] not in SUPPLEMENTABLE)
             db.execute(
                 'INSERT INTO app_commands(id,conversation,kind,body,state,task_id,acceptance_pause_id) '
                 'VALUES(?,?,?,?,?,?,?)',
                 (command['id'], conversation, kind, body,
-                 'coalesced' if duplicate_resume else 'pending',
+                 'coalesced' if duplicate_resume else 'deferred' if deferred_supplement else 'pending',
                  task['task_id'] if task and kind != 'message' else None, acceptance_pause_id),
             )
-            if kind in {'message', 'supplement'}:
+            if kind == 'supplement' and command.get('confirmed_requirements'):
+                included = {source['id'] for source in command['confirmed_requirements']['sources']}
+                for saved in db.execute("SELECT id,body FROM app_commands WHERE task_id=? "
+                                        "AND kind='supplement' AND state='deferred'",
+                                        (task['task_id'],)).fetchall():
+                    if (saved['id'] in included
+                            and not json.loads(saved['body']).get('confirmed_requirements')):
+                        db.execute("UPDATE app_commands SET state='coalesced' WHERE conversation=? AND id=?",
+                                   (conversation, saved['id']))
+            if kind in {'message', 'supplement', 'confirm_work'}:
                 self._message(db, conversation, command['id'], 'human', command['text'], 'user')
                 if not value['title']['revision']:
                     value['title'] = {'title': ' '.join(command['text'].split())[:80],
@@ -424,6 +397,8 @@ class ApplicationStore:
                         or current['project_location']['create'] != create
                         or current['kind'] != kind or current['arguments'] != arguments):
                     raise Conflict('同一开工消息已经绑定项目，不能改为另一个位置。')
+                if (work_options or {}).get('confirmed_requirements') != current.get('confirmed_requirements'):
+                    raise Conflict('The saved work confirmation cannot be replaced')
                 return current
             if current and current['status'] not in TERMINAL:
                 raise Conflict('A work task already exists; send an explicit supplement')
@@ -434,6 +409,13 @@ class ApplicationStore:
             if not command:
                 raise ValueError('Work requires a saved user input')
             request = json.loads(command['body'])['text']
+            options = dict(work_options or {})
+            original_request = options.pop('original_request', None)
+            if original_request is not None:
+                from agent.task.requirements import checked
+
+                checked(options.get('confirmed_requirements'), original_request)
+                request = original_request
             history = [json.loads(row['data']) for row in db.execute(
                 'SELECT data FROM app_messages WHERE conversation=? ORDER BY seq', (conversation,))]
             public = [{'type': row['type'], 'data': {'content': row['content'], 'id': row['id'],
@@ -451,8 +433,7 @@ class ApplicationStore:
                                           workspace_binding(location['repo'], root=self.root)),
                     'status': 'queued', 'reason': '', 'created_at': timestamp(),
                     'updated_at': timestamp(), 'revision': 1, 'usage': {}}
-            options = work_options or {}
-            if set(options) - {'verify_command', 'acceptance', 'budget', 'pause_after_steps'}:
+            if set(options) - {'verify_command', 'acceptance', 'budget', 'pause_after_steps', 'confirmed_requirements'}:
                 raise ValueError('Unexpected frozen work option')
             work.update(options)
             # 交接原文只插入一次。后续推进只更新下面的小状态行，不重写完整讨论。
@@ -486,7 +467,13 @@ class ApplicationStore:
             limit = work.get('acceptance_limit') or {}
             if limit.get('active') and work['status'] in {'paused', 'awaiting_user'}:
                 work['status'] = ACCEPTANCE_LIMIT
-            # 终止未确认属于持久保护，后来的正常收尾或再次暂停不能将它变为可恢复。
+            if facts.get('event') == 'task_resumed' and any(
+                db.execute("SELECT 1 FROM app_commands WHERE task_id=? AND id=? AND kind='resume'",
+                           (task, command)).fetchone() for command in applied_inputs
+            ):
+                # 原内核通过环境、回执和检查点核验后才能发出此事件。
+                work['control_unconfirmed'] = []
+            # 普通收尾和重复暂停不能消除未确认保护；明确续接仍要走原生核验。
             if work.get('control_unconfirmed'):
                 work['status'] = 'execution_unknown'
                 work['reason'] = '任务终止未确认，已保留现场；不能直接恢复或重放操作。'
@@ -646,6 +633,9 @@ class ApplicationStore:
                     not_sent=False):
         with self.connection() as db:
             old = db.execute('SELECT state FROM app_calls WHERE id=?', (call,)).fetchone()
+            if old and old[0] == 'complete' and response_id is None:
+                # 后续展示或工具处理异常不能抹掉已经结算的响应及用量。
+                return
             state = ('not_sent' if not_sent else 'complete' if response_id else
                      'unknown' if old and old[0] == 'sent' else 'not_sent')
             db.execute('UPDATE app_calls SET state=?,response_id=?,usage=?,seconds=?,error=? WHERE id=?',
@@ -725,10 +715,11 @@ class ApplicationStore:
             db.execute('BEGIN IMMEDIATE')
             rows = db.execute("SELECT conversation,id,kind FROM app_commands WHERE state='pending'").fetchall()
             for row in rows:
-                db.execute("UPDATE app_commands SET state='failed' WHERE conversation=? AND id=?",
-                           (row['conversation'], row['id']))
+                state = 'deferred' if row['kind'] == 'supplement' else 'failed'
+                db.execute("UPDATE app_commands SET state=? WHERE conversation=? AND id=?",
+                           (state, row['conversation'], row['id']))
                 self._event(db, row['conversation'], 'command_state', {
-                    'id': row['id'], 'state': 'failed', 'error': error,
+                    'id': row['id'], 'state': state, 'error': error,
                 })
                 if row['kind'] == 'message':
                     value = self._get(db, row['conversation'])
@@ -760,12 +751,15 @@ class ApplicationStore:
         # 上次可能在磁盘已满时退出，无法保存停止回执。未派发原文仍保留，
         # 但重新打开应用不能自动发起付费请求、准备环境或继续旧补充。
         self.stop_pending(error='ServiceInterrupted')
-        self.project_acceptance_limits()
+        from agent.application.recovery import reconcile_chat
+
+        reconcile_chat(self)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute("UPDATE app_calls SET state='unknown',error='ServiceInterrupted' WHERE state='sent'")
             db.execute("UPDATE app_calls SET state='not_sent',error='ServiceInterrupted' WHERE state='reserved'")
-            db.execute("UPDATE app_commands SET state='unknown' WHERE state='running'")
+            db.execute("UPDATE app_commands SET state=CASE WHEN kind='supplement' "
+                       "THEN 'deferred' ELSE 'unknown' END WHERE state='running'")
             db.execute('UPDATE app_progress SET inflight=0,reported_seq=pending_seq WHERE inflight=1')
             for row in db.execute('SELECT conversation,data FROM app_titles').fetchall():
                 title = json.loads(row['data'])
@@ -782,17 +776,23 @@ class ApplicationStore:
             for value in conversations:
                 work = self._work(db, value['work_id'])
                 if work and work['status'] in ACTIVE:
-                    work.update(status='execution_unknown', reason='服务中断，需核对原任务记录后继续')
+                    work.update(status='interrupted', reason='服务中断，断点已保留。点击继续后核对回执，已完成操作不重放；未知模型用量继续保留。')
                     self._put_work_state(db, work)
                     value['status'] = work['status']
                 if value['chat_status'] == 'running':
-                    value['chat_status'] = 'model_request_unknown'
+                    unknown = db.execute("SELECT 1 FROM app_calls WHERE conversation=? "
+                                         "AND lane='chat' AND state='unknown' LIMIT 1",
+                                         (value['thread_id'],)).fetchone()
+                    value['chat_status'] = 'model_request_unknown' if unknown else 'interrupted'
                 self._put(db, value)
             # 旧的补充或恢复若已失去执行对象，明确结束命令，不能让退出检查永远繁忙。
-            pending = db.execute("SELECT conversation,id,kind,task_id FROM app_commands "
-                                 "WHERE state='pending' AND kind IN ('resume','supplement')").fetchall()
+            pending = db.execute("SELECT conversation,id,kind,task_id,state FROM app_commands "
+                                 "WHERE state IN ('pending','deferred') "
+                                 "AND kind IN ('resume','supplement')").fetchall()
             for row in pending:
                 work = self._work(db, row['task_id'])
+                if row['state'] == 'deferred' and work and work['status'] not in TERMINAL:
+                    continue
                 allowed = RESUMABLE if row['kind'] == 'resume' else SUPPLEMENTABLE
                 if work is None or work['status'] not in allowed:
                     db.execute("UPDATE app_commands SET state='failed' WHERE conversation=? AND id=?",
@@ -804,17 +804,19 @@ class ApplicationStore:
     def snapshot(self, conversation):
         conversation = identity(conversation)
         with self.connection() as db:
-            try:
-                value = self._get(db, conversation)
-            except KeyError:
-                legacy = self.legacy(conversation)
-                if not legacy:
-                    raise
-                return {**legacy[0], 'work': None, 'usage': {}, 'activities': [],
-                        'workspace_bound': True, 'event_cursor': 0, 'pending_messages': []}
+            value = self._get(db, conversation)
             work = self._work(db, value['work_id'])
             messages = [json.loads(row['data']) for row in db.execute(
                 'SELECT data FROM app_messages WHERE conversation=? ORDER BY seq', (conversation,))]
+            confirmations = {}
+            for row in db.execute(
+                "SELECT body,state FROM app_commands WHERE conversation=? AND kind='confirm_work' ORDER BY seq",
+                (conversation,),
+            ):
+                confirmations[json.loads(row['body'])['proposal_id']] = row['state']
+            for message in messages:
+                if message.get('source') == 'work_proposal':
+                    message['proposal_status'] = confirmations.get(message['id'].split(':', 1)[1], '')
             cursor = db.execute('SELECT MAX(seq) FROM app_events WHERE conversation=?',
                                 (conversation,)).fetchone()[0] or 0
             activities = {}

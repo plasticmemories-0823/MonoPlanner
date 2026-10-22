@@ -12,6 +12,7 @@ license files remain beside each runtime and in Python distribution metadata.
 | MinGit | 2.53.0.2 | GPLv2 and component notices, `launcher/runtime/git/LICENSE.txt` and `mingw64/share/licenses`; source https://github.com/git-for-windows/git/releases/tag/v2.53.0.windows.2 |
 | WebView2 SDK | 1.0.4258.31 | Microsoft SDK notices, `launcher/runtime/LICENSE.txt` |
 | WebView2 Fixed Runtime | 155.0.4283.45 | Microsoft Software License Terms, https://developer.microsoft.com/en-us/microsoft-edge/webview2/ ; runtime third-party notices remain in its folder |
+| ripgrep | 15.2.0 | MIT or Unlicense; `launcher/runtime/ripgrep/COPYING`, `LICENSE-MIT`, `UNLICENSE`; https://github.com/BurntSushi/ripgrep/releases/tag/15.2.0 |
 | Agent Chat UI | vendored source | MIT, `web/LICENSE` and `web/UPSTREAM.md` |
 
 Microsoft's WebView2 SDK license and Runtime license are different. The SDK
@@ -33,3 +34,4 @@ library; LangGraph Agent Server, its CLI and in-memory service runtime are not
 included in the production dependency closure. Each shipped Python package
 retains its original metadata and license files. The generated dependency
 manifest is authoritative for the particular portable build.
+

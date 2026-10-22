@@ -216,7 +216,7 @@ class OutputLimitTests(unittest.TestCase):
 
     def test_model_cannot_resume_work_when_user_only_asks_a_question(self):
         start = AIMessage(content='', tool_calls=[{
-            'name': 'start_work', 'id': 'unexpected-resume',
+            'name': 'prepare_work', 'id': 'unexpected-resume',
             'args': {'project_path': '.', 'create': False},
         }])
         store, conversation, model, scheduler, work = self.chat(
@@ -235,7 +235,8 @@ class OutputLimitTests(unittest.TestCase):
         model = Replies([truncated()])
         self.invoke(model)
         def edit(state):
-            state['verification_spec'] = {'test_code': 'original'}
+            from test_task_runner import EXECUTION_CHECK
+            state['verification_spec'] = {'test_code': 'original', 'execution_checks': [dict(EXECUTION_CHECK)]}
             state['regression_command'] = 'original regression'
         self.saved_state(edit)
         (self.artifacts / 'frozen-acceptance.json').write_text(

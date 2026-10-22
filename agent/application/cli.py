@@ -27,6 +27,10 @@ class ConsoleConversation:
                         if isinstance(model, ConfiguredModel) else model)
 
             def work(job, emit, controls):
+                if isinstance(model, ConfiguredModel):
+                    from agent.runtime.bridge import run_work as run_frozen
+
+                    return run_frozen(job, emit, controls)
                 selected = factory(job['settings'])
                 try:
                     return run_work(job, emit, controls, model=selected)
@@ -48,7 +52,8 @@ class ConsoleConversation:
         original = self.scheduler.dispatch_work
 
         def dispatch(conversation, incoming, **kwargs):
-            return original(conversation, incoming, work_options={
+            supplied = kwargs.pop('work_options', {})
+            return original(conversation, incoming, work_options={**supplied,
                 'verify_command': verify_command, 'acceptance': acceptance,
                 'budget': {'max_steps': budget.max_steps},
             }, **kwargs)

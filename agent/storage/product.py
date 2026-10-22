@@ -12,12 +12,18 @@ class ProductDatabase:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / 'application.sqlite3'
+        from agent.storage.schema import initialize
+
+        initialize(self.path)
         if self.path.is_symlink():
             raise ValueError('Product database cannot be a link')
 
     @contextmanager
     def connection(self):
         with closing(sqlite3.connect(self.path, timeout=15)) as db:
+            from agent.storage.schema import require_version
+
+            require_version(db)
             db.row_factory = sqlite3.Row
             db.execute('PRAGMA synchronous=FULL')
             db.execute('PRAGMA busy_timeout=15000')
@@ -53,24 +59,5 @@ class ProductDatabase:
         value = self.session(thread, db)
         if value and value['visibility'] in {'purging', 'purged'}:
             raise ValueError('Conversation is being deleted')
-        if value is None and self.legacy_row('sessions', thread):
-            raise ValueError('旧版本对话只读，请新开对话进行操作。')
 
-    def legacy_row(self, table, thread):
-        rows = self.legacy_rows(table, thread)
-        return rows[0] if rows else None
 
-    def legacy_rows(self, table, thread):
-        """仅用于旧对话展示权限和资料，不迁移或写入旧数据库。"""
-        if table not in {'sessions', 'permissions', 'read_sources', 'desktop_requests', 'desktop_files'}:
-            raise ValueError('Unsupported legacy view')
-        path = self.root / 'conversations.sqlite3'
-        if not path.is_file() or path.is_symlink():
-            return []
-        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
-            db.row_factory = sqlite3.Row
-            if not self.table(db, table):
-                return []
-            rows = db.execute('SELECT * FROM ' + table + ' WHERE thread=?',
-                              (self.thread(thread),)).fetchall()
-            return [dict(row) for row in rows]

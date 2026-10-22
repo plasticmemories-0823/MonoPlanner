@@ -48,7 +48,12 @@ def guard_archive(state):
 
 
 def requirements(state):
-    return {key: state.get(key) for key in ('request', 'acceptance', 'verify_command')}
+    result = {key: state.get(key) for key in ('request', 'acceptance', 'verify_command')}
+    if state.get('initial_requirements'):
+        from agent.task.requirements import model_view
+
+        result['confirmed_requirements'] = model_view(state['initial_requirements'])
+    return result
 
 
 # ========================================================================
@@ -259,6 +264,10 @@ def commit(loop, pending):
     }
     if state.get('user_updates'):
         body['requirements']['user_updates'] = state['user_updates']
+    if state.get('requirements') and state['requirements'].get('revision', 1) > 1:
+        from agent.task.requirements import model_view
+
+        body['requirements']['latest_confirmed_delivery'] = model_view(state['requirements'])
     raw = json.dumps(body, ensure_ascii=False, sort_keys=True).encode('utf-8')
     reference = {
         'path': 'compactions/' + pending['id'] + '/summary.json',
@@ -296,12 +305,9 @@ def commit(loop, pending):
     loop.persist('compaction_commit_started', {'id': pending['id']})
     path = loop.root / reference['path']
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('xb') as stream:
-        import os
+    from agent.storage.records import immutable
 
-        stream.write(raw)
-        stream.flush()
-        os.fsync(stream.fileno())
+    immutable(path, raw)
     if loop.history_store:
         loop.history_store.register_derived(path, 'compaction', state['source'])
 

@@ -168,7 +168,7 @@ test("failed saves preserve the current environment and do not retry the mutatio
   assert.deepEqual(busy, [true, false]);
 });
 
-test("manual save reads back the selected binding without starting preparation", async (t) => {
+test("manual save reads back the preserved legacy binding without starting preparation", async (t) => {
   const calls = [];
   const binding = {
     image: "sha256:legacy",

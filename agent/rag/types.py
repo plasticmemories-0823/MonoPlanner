@@ -15,9 +15,9 @@ def canonical(value) -> str:
 
 RAG_PARENT_MEMORY_BYTES = 256 * 1024 * 1024
 CANDIDATE_MEMORY_BYTES = 32 * 1024 * 1024
-VECTOR_MEMORY_BYTES = 64 * 1024 * 1024
-# 来源头、向量缓存、命中页分别保留既有候选级空间；SQLite 与消息包装另留 8 MiB。
-SOURCE_FIXED_MEMORY_BYTES = 2 * CANDIDATE_MEMORY_BYTES + VECTOR_MEMORY_BYTES + 8 * 1024 * 1024
+
+# 旧只读适配仍保留保守的正文分配额度；rg 文件扫描不整体分配原文。
+SOURCE_FIXED_MEMORY_BYTES = 136 * 1024 * 1024
 # 混合 Unicode 字符串可占原始 UTF-8 的四倍；包含旧正文、读取、校验及临时复制。
 SOURCE_TRANSIENT_MULTIPLIER = 16
 
@@ -82,6 +82,8 @@ class Query:
     source_versions: Mapping[str, str]
     intent: str = "diagnostic"
     mode: str = "exact"
+    match: str = "whole_word"
+    terms: tuple[str, ...] = ()
     cursor: str = ""
     limit: int = 80
     offset: int = 0
@@ -94,29 +96,17 @@ class Query:
 
 @dataclass(frozen=True)
 class RagConfig:
-    chunk_target: int = 256
-    chunk_hard_limit: int = 512
-    chunk_overlap: int = 64
-    recall_top_k: int = 100
-    rerank_k: int = 20
     message_token_limit: int = 8192
-    rewrite_threshold: float = 0.15
-    max_document_bytes: int = 4 * 1024 * 1024
-    max_index_bytes: int = 256 * 1024 * 1024
+    max_document_bytes: int = 64 * 1024 * 1024
+    max_index_bytes: int = 64 * 1024 * 1024
+    scan_timeout_seconds: int = 30
 
     def __post_init__(self):
-        if not 0 < self.chunk_target <= self.chunk_hard_limit <= 512:
-            raise ValueError("Chunk target must fit the hard input limit (at most 512 tokens).")
-        if not 0 <= self.chunk_overlap <= 64:
-            raise ValueError("Chunk overlap must be between 0 and 64 tokens.")
-        if not 1 <= self.rerank_k <= self.recall_top_k <= 200:
-            raise ValueError("Require 1 <= rerank_k <= recall_top_k <= 200.")
         if not 1 <= self.message_token_limit <= 8192:
             raise ValueError("The retrieval message limit cannot exceed 8192 tokens.")
-        if not 0 <= self.rewrite_threshold <= 1:
-            raise ValueError("Rewrite threshold must be in [0, 1].")
-        if self.max_document_bytes <= 0 or self.max_index_bytes <= 0:
-            raise ValueError("Index resource limits must be positive.")
+        if min(self.max_document_bytes, self.max_index_bytes, self.scan_timeout_seconds) <= 0:
+            raise ValueError("Search resource limits must be positive.")
+
 
 @dataclass(frozen=True)
 class Chunk:
@@ -144,12 +134,6 @@ class Chunk:
     def render(self) -> str:
         return canonical(self.payload())
 
-    def embedding_text(self) -> str:
-        """语义编码只保留有意义的来源头；版本与哈希在交付消息中完整保留。"""
-        header = canonical({"path": self.path, "kind": self.kind, "symbol": self.symbol})
-        return header + "\n" + self.text
-
-
 @dataclass(frozen=True)
 class RetrievalResult:
     message: str
@@ -161,4 +145,3 @@ class RetrievalResult:
     continuation: tuple[dict, ...]
     route_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     exact_hit: bool = False
-    rerank_scores: tuple[float, ...] = ()

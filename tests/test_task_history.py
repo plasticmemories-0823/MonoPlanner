@@ -1,4 +1,4 @@
-"""任务历史扩展原始归档，不增加规划器或上下文投影。"""
+"""P0339 扩展原始归档，不增加规划器或上下文投影。"""
 
 import copy
 import json
@@ -64,13 +64,15 @@ class TaskHistoryTests(unittest.TestCase):
         self.assertIn('99', (self.repo / 'sample.py').read_text())
 
     def test_received_response_is_consumed_without_resending(self):
-        interrupt, Interrupted = interrupt_after_persist('model_response_received')
+        interrupt, Interrupted = interrupt_after_persist(
+            'model_response_received', tool_name='submit_plan',
+        )
         with interrupt, self.assertRaises(Interrupted):
             self.run_plans([self.candidate()])
         result = self.run_plans([])
         self.assertEqual(result['status'], 'verified_success', result)
         self.assertEqual(result['calls_this_invocation'], 1)
-        self.assertEqual(result['planner_calls'], 2)
+        self.assertEqual(result['planner_calls'], 3)
 
     def test_unfinished_operation_is_not_repeated(self):
         interrupt, Interrupted = interrupt_after_persist('step_started')

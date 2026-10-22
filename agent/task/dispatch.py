@@ -5,6 +5,7 @@ from typing_extensions import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from agent.acceptance import revisions
+from agent.acceptance import boundaries
 from agent.model.errors import ModelInterrupted, ModelRequestNotSent
 from agent.task import control, dialogue, repair
 from agent.task.contracts import WorkRequest
@@ -27,46 +28,69 @@ class TaskDispatch:
     def __init__(self, owner):
         self.owner = owner
         builder = StateGraph(DispatchState)
-        actions = {
+        # 图只保留四个业务节点；控制、配对、拒收和收尾仍是既有内部处理。
+        self.actions = {
             "boundary": self.boundary,
             "finish_rejection": self.finish_rejection,
             "execute_plan": self.execute_plan,
+            "verify_candidate": self.verify_candidate,
             "resume_web": self.resume_web,
             "release_candidate": self.release_candidate,
             "request_plan": self.request_plan,
             "route_response": self.route_response,
             "reply_text": self.reply_text,
             "reply_web": self.reply_web,
+            "read_boundaries": self.read_boundaries,
             "review_acceptance": self.review_acceptance,
             "record_blocked": self.record_blocked,
             "accept_plan": self.accept_plan,
             "reject_reply": self.reject_reply,
             "finish_cycle": self.finish_cycle,
+            "finalize": self.finalize,
         }
-        # 只有原响应处理块中的 ValueError 才是可反馈给模型的拒收。
-        # 已经开始执行或恢复的操作发生错误时，继续沿用停止并保留现场的行为。
-        rejects = {
+        self.rejects = {
             "request_plan", "route_response", "reply_text", "reply_web",
-            "review_acceptance", "record_blocked", "accept_plan",
+            "review_acceptance", "record_blocked", "accept_plan", "read_boundaries",
         }
-        destinations = {name: name for name in (*actions, "finalize", END)}
-        for name, action in actions.items():
-            builder.add_node(name, self.wrap(action, name in rejects), retry_policy=())
-            builder.add_conditional_edges(name, self.route, destinations)
-        builder.add_node("finalize", self.finalize, retry_policy=())
-        builder.add_conditional_edges("finalize", self.route, destinations)
-        builder.add_conditional_edges(START, self.entry, destinations)
+        destinations = {name: name for name in ("search", "plan", "execute", "accept", END)}
+        self.active_phase = None
+        for phase in ("search", "plan", "execute", "accept"):
+            builder.add_node(phase, self.stage(phase), retry_policy=())
+            builder.add_conditional_edges(phase, self.route, destinations)
+        builder.add_conditional_edges(START, self.route, destinations)
         # 明确禁止继承外层图的检查点，也不复制任务的完整历史到第二套存储。
         self.graph = builder.compile(checkpointer=False, name="monoplanner_work")
 
-    def entry(self, state):
-        if self.owner.state["status"] in RUNNING:
-            return "boundary"
-        return "finalize"
+    def route(self, state):
+        action = state["next_action"]
+        if action == END:
+            return END
+        if action in {"resume_web", "reply_web", "read_boundaries"}:
+            return "search"
+        if action in {"review_acceptance", "release_candidate", "verify_candidate"}:
+            return "accept"
+        if action == "accept_plan" and state["plan"].kind == "candidate":
+            return "accept"
+        if action == "execute_plan":
+            from agent.task.operations import pending_phase
 
-    @staticmethod
-    def route(state):
-        return state["next_action"]
+            return pending_phase(self.owner.state["pending"])
+        return "plan"
+
+    def stage(self, phase):
+        def invoke(state):
+            current = dict(state)
+            self.active_phase = phase
+            try:
+                while self.route(current) == phase:
+                    action = current["next_action"]
+                    result = self.wrap(self.actions[action], action in self.rejects)(current)
+                    current.update(result)
+                return current
+            finally:
+                self.active_phase = None
+
+        return invoke
 
     def wrap(self, action, reject_invalid=False):
         def invoke(state):
@@ -93,6 +117,8 @@ class TaskDispatch:
     # ============================================================
     def boundary(self, state):
         owner = self.owner
+        if owner.state["status"] not in RUNNING:
+            return {"next_action": "finalize"}
         control.check_interrupted(pause_only=True)
         if owner.state.get("rejection_pending"):
             return {"next_action": "finish_rejection"}
@@ -105,6 +131,11 @@ class TaskDispatch:
             ("acceptance_release", "release_candidate"),
         ):
             if owner.state.get(field):
+                if field == "pending":
+                    from agent.task.operations import pending_phase
+
+                    if pending_phase(owner.state["pending"]) == "accept":
+                        action = "verify_candidate"
                 return {"next_action": action}
         return {"next_action": "request_plan"}
 
@@ -113,6 +144,19 @@ class TaskDispatch:
 
     def execute_plan(self, state):
         self.owner.execute_pending()
+
+    def verify_candidate(self, state):
+        owner = self.owner
+        pending = owner.state["pending"]
+        # 已提交的验收结果只补齐计划收尾，恢复时绝不再次运行验收。
+        if pending["rows"] and pending["rows"][-1]["status"] == "failed":
+            owner.finish_plan("execution_failed")
+        elif owner.state["rounds"] and owner.state["rounds"][-1]["plan"] == pending["id"]:
+            outcome = ("verified_success" if owner.state["verification"]["status"] == "passed"
+                       else "verification_failed")
+            owner.finish_plan(outcome)
+        else:
+            owner.final_acceptance()
 
     def resume_web(self, state):
         from agent.execution.web import execute_calls
@@ -141,6 +185,8 @@ class TaskDispatch:
             action = "reply_text"
         elif isinstance(plan, dialogue.WebReply):
             action = "reply_web"
+        elif isinstance(plan, boundaries.Lookup):
+            action = "read_boundaries"
         elif isinstance(plan, revisions.Review):
             action = "review_acceptance"
         elif plan.kind == "blocked":
@@ -159,6 +205,9 @@ class TaskDispatch:
 
     def review_acceptance(self, state):
         revisions.review(self.owner, state["plan"], state["response"])
+
+    def read_boundaries(self, state):
+        boundaries.execute(self.owner, state["plan"], state["response"])
 
     def record_blocked(self, state):
         self.owner.state.update(

@@ -124,9 +124,17 @@ class OfflineChat:
         if text == '帮我画鹈鹕骑自行车':
             return response('我会在所选目录下新建 pelican-bike，制作能直接打开的动画网页。是否按这个计划开始？')
         if text == '按这个计划开始' or '开始工作' in text or '准备失败工作' in text:
-            return response('已保存任务，将在独立工作流程中执行。', 'start_work',
-                            {'project_path': 'pelican-bike', 'create': True}
-                            if text == '按这个计划开始' else {'project_path': '.', 'create': False})
+            original = next((row for row in messages if getattr(row, 'type', None) == 'human'
+                             and row.content == '帮我画鹈鹕骑自行车'), last)
+            return response('请确认保存的交付方案。', 'prepare_work', {
+                'project_path': 'pelican-bike' if text == '按这个计划开始' else '.',
+                'create': text == '按这个计划开始', 'request_message_ids': [original.id],
+                'targets': [{'id': 'fixture', 'artifact_type': 'repository_entry',
+                             'target_runtime': 'python', 'entry': 'demo.py', 'behavior': str(original.content),
+                             'input_scope': 'All original requirements', 'imports': '', 'setup': '',
+                             'expression': '', 'variables': [], 'required_values': [], 'argv': [],
+                             'quotes': [{'source_id': original.id, 'text': str(original.content)}]}],
+            })
         if '查询进度' in text:
             return response('', 'get_work_status')
         if '联网' in text:

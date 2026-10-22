@@ -18,9 +18,6 @@ class Permissions:
             row = db.execute(
                 'SELECT requested,effective FROM permissions WHERE thread=?', (thread,)
             ).fetchone()
-        legacy = self.store.legacy_row('permissions', thread) if row is None else None
-        if legacy:
-            return {key: legacy[key] for key in ('requested', 'effective')}
         return dict(row) if row else {'requested': 'sandbox', 'effective': 'sandbox'}
 
     def request(self, thread, mode):

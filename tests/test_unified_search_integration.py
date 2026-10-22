@@ -3,6 +3,7 @@
 from dataclasses import asdict
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -43,8 +44,6 @@ def test_exact_chat_search_works_before_binding_without_models(tmp_path, monkeyp
     store = ApplicationStore(tmp_path / 'state')
     conversation = store.create(repo=str(project))['thread_id']
     bot = Chatbot(store, lambda *_: pytest.fail('Unexpected work handoff'))
-    monkeypatch.setattr(integration, '_models', lambda *_: pytest.fail('Exact loaded a model'))
-    monkeypatch.setattr(integration, '_bind_models', lambda *_: pytest.fail('Exact bound a model'))
     result = integration.retrieve_chat(bot, conversation, 'request',
                                       {'query': 'answer', 'path': '.', 'mode': 'exact'})
     assert result['query'] == 'answer'
@@ -94,9 +93,8 @@ def test_exact_searches_beyond_previous_single_source_limit(tmp_path, monkeypatc
     source = tmp_path / 'large.txt'
     source.write_bytes(b'x' * 2_000_100 + b'UNIQUE_TAIL')
     sources = integration.authorized_chat_sources(str(tmp_path), [], 'large.txt')
-    monkeypatch.setattr(integration, '_models', lambda *_: pytest.fail('Exact loaded models'))
     result = integration._retrieve(SimpleNamespace(), sources,
-        {'query': 'UNIQUE_TAIL', 'path': str(source)}, root=tmp_path / 'state',
+        {'query': 'UNIQUE_TAIL', 'path': str(source), 'match': 'substring'}, root=tmp_path / 'state',
         cache_root=tmp_path / 'cache', repo=tmp_path, task_id='large', request_id='request',
         config={'version': 'exact-v1', 'values': __import__('dataclasses').asdict(integration.RagConfig())},
         reader_scope='authorized')
@@ -125,7 +123,7 @@ def test_exact_unreadable_authorized_source_is_explicitly_incomplete(tmp_path, m
     assert result['unavailable_sources'][0]['path'] == str(source)
 
 
-def test_semantic_chat_file_scope_excludes_unrelated_operation_records(tmp_path):
+def test_file_scope_excludes_unrelated_operation_records(tmp_path):
     import sqlite3
     project = tmp_path / 'project'
     project.mkdir()
@@ -139,48 +137,10 @@ def test_semantic_chat_file_scope_excludes_unrelated_operation_records(tmp_path)
         db.execute('CREATE TABLE artifacts(path TEXT,sha256 TEXT,kind TEXT)')
         db.execute('INSERT INTO artifacts VALUES(?,?,?)',
                    ('plans/p1/s1/stdout.log', hashlib.sha256(raw).hexdigest(), 'shell'))
-    sources = integration.chat_sources(SimpleNamespace(root=tmp_path / 'state'),
-        {'repo': str(project), 'task_id': 'current'}, 'ok.txt')
-    assert [doc.path for doc in sources.documents()] == ['ok.txt']
+    sources = integration.authorized_chat_sources(str(project), [], 'ok.txt')
+    assert [Path(doc.path).name for doc in sources.documents()] == ['ok.txt']
     assert all(not key.startswith('record:') for key in sources.entries)
 
-
-def test_semantic_rewrite_cursor_preserves_original_and_does_not_rewrite_again(tmp_path, monkeypatch):
-    class Vector:
-        def search(self, query, index, limit):
-            chunks = sorted(index.chunks(query), key=lambda chunk: chunk.path)
-            if query.text == 'answer':
-                chunks = chunks[:1]
-            return [(chunk.id, 1.0) for chunk in chunks[:limit]]
-    class Reranker:
-        def score(self, query, chunks):
-            return [float(len(chunks) - index) for index, _ in enumerate(chunks)]
-    monkeypatch.setattr(integration, '_models', lambda _: SimpleNamespace(
-        vector=Vector(), reranker=Reranker()))
-    sources = integration.Sources()
-    for index in range(3):
-        text = 'source content ' + str(index)
-        sha = hashlib.sha256(text.encode()).hexdigest()
-        sources.add('source:' + str(index), sha, len(text), lambda text=text: text,
-                    kind='code', path=str(index) + '.py')
-    arguments = {'query': 'answer', 'path': '.', 'mode': 'semantic', 'intent': 'diagnostic',
-                 'required_entities': ['missing'], 'limit': 1}
-    rewrites = []
-    def retrieve(args):
-        return integration._retrieve(SimpleNamespace(), sources, args,
-            root=tmp_path, cache_root=tmp_path / 'tasks/task', repo=tmp_path / 'repo',
-            task_id='task', request_id='same-request',
-            config=integration.retrieval_configuration(),
-            rewrite=lambda query, reasons: rewrites.append((query, reasons)) or 'expanded')
-    first = retrieve(arguments)
-    assert first['query'] == 'answer' and first['effective_query'] == 'expanded'
-    assert first['next_cursor'].startswith('retrieval-v1:')
-    second = retrieve({**arguments, 'cursor': first['next_cursor']})
-    assert second['query'] == 'answer' and second['effective_query'] == 'expanded'
-    assert second['hits'][0]['path'] != first['hits'][0]['path']
-    assert len(rewrites) == 1
-    with pytest.raises(ValueError, match='original query'):
-        retrieve({**arguments, 'query': 'other', 'cursor': first['next_cursor']})
 
 
 def test_from_step_long_utf8_line_reads_near_verified_match(tmp_path):
@@ -203,14 +163,14 @@ def test_from_step_long_utf8_line_reads_near_verified_match(tmp_path):
     assert raw[slice(*page['byte_range'])].decode('utf-8') == page['text']
 
 
-def test_exact_enumeration_does_not_stop_at_semantic_source_budget(tmp_path, monkeypatch):
+def test_file_catalog_limit_reports_incomplete_enumeration(tmp_path, monkeypatch):
     monkeypatch.setattr(integration, 'SOURCE_LIMIT', 1)
     monkeypatch.setattr(integration, 'SOURCE_BYTES', 1)
     monkeypatch.setattr(integration, 'SOURCE_SECONDS', -1)
     (tmp_path / 'a.txt').write_bytes(b'ordinary')
     (tmp_path / 'z.txt').write_bytes(b'needle')
     sources = integration.authorized_chat_sources(str(tmp_path), [], '.')
-    assert len(sources.entries) == 2 and sources.reasons == []
+    assert len(sources.entries) == 1 and sources.reasons == ['source_scan_budget']
 
 
 def test_exact_chat_uses_explicit_extra_file_authorization_without_work(tmp_path, monkeypatch):
@@ -225,7 +185,6 @@ def test_exact_chat_uses_explicit_extra_file_authorization_without_work(tmp_path
     conversation = store.create(repo=str(workspace))['thread_id']
     ReadSources(store.root).set(conversation, [{'path': str(extra), 'kind': 'file'}])
     bot = Chatbot(store, lambda *_: pytest.fail('Unexpected work handoff'))
-    monkeypatch.setattr(integration, '_models', lambda *_: pytest.fail('Exact loaded models'))
     found = integration.retrieve_chat(bot, conversation, 'request',
                                      {'query': 'needle', 'path': str(extra)})
     assert found['hits'][0]['path'] == str(extra) and found['complete']
@@ -238,7 +197,7 @@ def test_exact_memory_refusal_reports_unread_source_before_allocating(tmp_path, 
     from pathlib import Path
     from agent.rag.types import source_read_limit
     source = tmp_path / 'large.txt'
-    size = source_read_limit() + 1
+    size = integration.RagConfig().max_document_bytes + 1
     with source.open('wb') as stream:
         stream.truncate(size)
     original = Path.open
@@ -249,10 +208,10 @@ def test_exact_memory_refusal_reports_unread_source_before_allocating(tmp_path, 
     monkeypatch.setattr(Path, 'open', forbid_read)
     sources = integration.authorized_chat_sources(str(tmp_path), [], 'large.txt')
     assert sources.entries == {}
-    assert sources.reasons == ['source_read_memory_budget']
+    assert sources.reasons == ['source_scan_file_budget']
     problem = sources.unavailable[0]
     assert problem['path'] == str(source) and problem['size_bytes'] == size
-    assert problem['unread_from_byte'] == 0
+    assert problem['reason'] == 'source_scan_file_budget'
     result = integration._retrieve(SimpleNamespace(), sources,
         {'query': 'needle', 'path': str(source)}, root=tmp_path / 'state',
         cache_root=tmp_path / 'cache', repo=tmp_path, task_id='large', request_id='request',
@@ -268,14 +227,14 @@ def test_exact_work_source_memory_refusal_never_reads_archived_bytes(tmp_path):
     root = tmp_path / 'source-records'
     (root / 'blobs').mkdir(parents=True)
     with (root / 'blobs' / digest).open('wb') as stream:
-        stream.truncate(source_read_limit() + 1)
+        stream.truncate(integration.RagConfig().max_document_bytes + 1)
     view = SimpleNamespace(root=root, baseline=None, files={'large.txt': digest},
         read_bytes=lambda *_: pytest.fail('Over-budget archived source was allocated'))
     loop = SimpleNamespace(evidence=SimpleNamespace(view=lambda: view), root=tmp_path / 'task')
     sources = integration.work_sources(loop, '.', bounded=False, include_records=False)
-    assert sources.entries == {} and sources.reasons == ['source_read_memory_budget']
+    assert sources.entries == {} and sources.reasons == ['source_scan_file_budget']
     assert sources.unavailable[0]['path'] == 'large.txt'
-    assert sources.unavailable[0]['unread_from_byte'] == 0
+    assert sources.unavailable[0]['reason'] == 'source_scan_file_budget'
 
 
 @pytest.mark.parametrize('reader_scope,path,reason,removed', [
@@ -289,33 +248,20 @@ def test_exact_work_source_memory_refusal_never_reads_archived_bytes(tmp_path):
     ('work', '.', '', True),
     ('public', '.', '', True),
 ])
-def test_only_complete_project_scope_prunes_other_vector_cache(
+def test_only_complete_project_scope_prunes_other_source_headers(
     tmp_path, monkeypatch, reader_scope, path, reason, removed,
 ):
-    class Vector:
-        def __init__(self):
-            self.misses = []
+    from agent.rag.index import Index
+    inserted = []
+    original = Index.upsert
 
-        def search(self, query, index, limit):
-            chunks = index.chunks(query)
-            cached = index.vector_cache('scope-regression-vector', chunks)
-            missing = [chunk for chunk in chunks if chunk.id not in cached]
-            self.misses.append([chunk.path for chunk in missing])
-            if missing:
-                index.cache_vectors(
-                    'scope-regression-vector', missing, [[1.0, 0.0] for _ in missing],
-                )
-            return [(chunk.id, 1.0) for chunk in chunks]
+    def observed(index, document, **kwargs):
+        changed = original(index, document, **kwargs)
+        if changed:
+            inserted.append(document.path)
+        return changed
 
-    class Ranker:
-        def score(self, query, chunks):
-            return [float(len(chunks) - number) for number, _ in enumerate(chunks)]
-
-    vector = Vector()
-    monkeypatch.setattr(integration, '_models', lambda _: SimpleNamespace(
-        vector=vector, reranker=Ranker(),
-    ))
-    monkeypatch.setattr(integration, '_model_configuration', lambda: {'hash': 'scope-regression'})
+    monkeypatch.setattr(Index, 'upsert', observed)
 
     def retrieve(names, path, reason=''):
         sources = integration.Sources()
@@ -327,7 +273,7 @@ def test_only_complete_project_scope_prunes_other_vector_cache(
         if reason:
             sources.reasons.append(reason)
         return integration._retrieve(
-            SimpleNamespace(), sources, {'query': 'needle', 'path': path, 'mode': 'semantic'},
+            SimpleNamespace(), sources, {'query': 'needle', 'path': path, 'mode': 'exact'},
             root=tmp_path, cache_root=tmp_path / 'cache', repo=tmp_path / 'project',
             task_id='scope-regression', request_id='same-request',
             config={'version': 'scope-regression', 'values': asdict(integration.RagConfig())},
@@ -335,12 +281,13 @@ def test_only_complete_project_scope_prunes_other_vector_cache(
         )
 
     retrieve(['sub/a.py', 'b.py'], '.')
-    assert set(vector.misses[-1]) == {'sub/a.py', 'b.py'}
+    assert set(inserted) == {'sub/a.py', 'b.py'}
+    inserted.clear()
     narrowed = retrieve(['sub/a.py'], path, reason)
     assert [hit['path'] for hit in narrowed['hits']] == ['sub/a.py']
-    assert vector.misses[-1] == []
+    assert inserted == []
     retrieve(['sub/a.py', 'b.py'], '.')
-    assert vector.misses[-1] == (['b.py'] if removed else [])
+    assert inserted == (['b.py'] if removed else [])
 
 
 def test_authorized_search_prunes_private_state_and_rejects_hardlinks(tmp_path, monkeypatch):

@@ -1,5 +1,6 @@
 """验证真实请求视图、成对工具消息和可持久恢复的上下文压缩。"""
 
+from test_task_runner import EXECUTION_CHECK
 import copy
 import json
 from pathlib import Path
@@ -25,7 +26,7 @@ from agent.task.budget import StepBudget
 from agent.task.runner import TaskRunner
 from agent.execution.local import LocalEnvironment
 from test_task_runner import reply, confirmation, CODE
-from support import python_command
+from support import python_command, boundary_aware_reply
 
 
 def summary(
@@ -389,11 +390,9 @@ class SDK:
         if self.failures:
             self.failures -= 1
             raise ModelCallError('Explicit context rejection', context_overflow=True)
-        result = confirmation(messages)
-        if result:
-            return result
-        plan = next(self.plans)
-        result = reply(plan)
+        result = boundary_aware_reply(
+            self, messages, lambda: confirmation(messages) or reply(next(self.plans)),
+        )
         result.additional_kwargs['reasoning_content'] = 'old evidence reasoning ' * (
             10000 if len(self.calls) == 1 else 1
         )
@@ -402,6 +401,9 @@ class SDK:
 
 class DurableCompactionTests(unittest.TestCase):
     def setUp(self):
+        from support import confirmed_fixture
+
+        confirmed_fixture(self)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
@@ -435,6 +437,15 @@ class DurableCompactionTests(unittest.TestCase):
         return TaskRunner(self.model, self.env, state_dir=self.root / 'state', **options)
 
     def test_full_execution_budget_and_frozen_acceptance_after_saved_summary(self):
+        # 压力场景按当前固定提示与工具的实际大小设置，避免把不可压缩前缀
+        # 锁死在旧版 10k 阈值下；大段历史思考仍必须真实触发压缩。
+        protected_view = copy.deepcopy(self.sdk.calls[-1][0])
+        for message in protected_view:
+            if isinstance(message, AIMessage):
+                message.additional_kwargs.pop('reasoning_content', None)
+        threshold = 2 * compaction.estimate_input_tokens(protected_view, WORK_TOOLS)
+        policy = {**self.policy,
+                  'threshold_ratio': threshold / compaction.CONFIG['context_window_tokens']}
         self.sdk.plans = iter(
             [
                 {
@@ -449,21 +460,23 @@ class DurableCompactionTests(unittest.TestCase):
                             ),
                         }
                     ],
-                    'test_code': CODE,
+                    'test_code': CODE, 'execution_checks': [dict(EXECUTION_CHECK)],
                 }
             ]
         )
-        with patch.dict(compaction.CONFIG, self.policy):
+        with patch.dict(compaction.CONFIG, policy):
             result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.assertEqual(result['status'], 'verified_success', result)
-        self.assertEqual(result['planner_calls'], 5)
-        self.assertEqual(len(result['compactions']), 1)
-        self.assertEqual(
-            sum(options.get('tool_choice') == 'none' for _, options in self.sdk.calls), 1
-        )
+        summaries = sum(options.get('tool_choice') == 'none' for _, options in self.sdk.calls)
+        self.assertIn(summaries, (1, 2))  # 完整确认约束增加了保护前缀，不能假定压缩时点不变。
+        self.assertEqual(len(result['compactions']), summaries)
+        self.assertGreaterEqual(result['compactions'][0]['before_tokens'], threshold)
+        self.assertTrue(all(row['after_tokens'] < threshold for row in result['compactions']))
+        self.assertEqual(result['planner_calls'], 5 + summaries)
+        self.assertIn('confirmed_requirements', str(self.sdk.calls[-1][0]))
         again = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
         self.assertTrue(again['result_reused'])
-        self.assertEqual(len(self.sdk.calls), 5)
+        self.assertEqual(len(self.sdk.calls), 5 + summaries)
 
     def test_summary_uses_policy_timeout_and_stores_only_message_references(self):
         from agent.model.client import ModelPolicy

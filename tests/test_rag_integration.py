@@ -59,46 +59,9 @@ def project(tmp_path, monkeypatch):
     repo.mkdir()
     (repo / 'main.py').write_text('def answer():\n    return 42\n', encoding='utf-8')
     (repo / '.env').write_text('API_KEY=DO_NOT_INDEX', encoding='utf-8')
-    monkeypatch.setattr(integration, '_models', lambda _: SimpleNamespace(vector=None, reranker=None))
     return repo
 
 
-@pytest.mark.parametrize('intent', ['locate', 'diagnostic', 'audit'])
-def test_tokenizer_failure_keeps_semantic_unavailable_without_paid_rewrite(
-    project, tmp_path, monkeypatch, intent,
-):
-    from agent.rag.models import ModelUnavailable
-
-    attempted = []
-    def failed_index(*_):
-        attempted.append('count')
-        raise ModelUnavailable('Local tokenizer cannot fit the memory reserve')
-
-    class ForbiddenRoute:
-        def search(self, *_):
-            pytest.fail('Unavailable tokenizer must not dispatch a vector request')
-        def score(self, *_):
-            pytest.fail('Unavailable tokenizer must not dispatch reranking')
-
-    model = SimpleNamespace(manifest={'models': {'embedding': {'configured': True}}},
-                            index_documents=failed_index, vector=ForbiddenRoute(),
-                            reranker=ForbiddenRoute())
-    monkeypatch.setattr(integration, '_models', lambda _: model)
-    text = (project / 'main.py').read_text(encoding='utf-8')
-    version = hashlib.sha256(text.encode()).hexdigest()
-    sources = integration.Sources()
-    sources.add('source:main.py', version, len(text), lambda: text, kind='code', path='main.py')
-    result = integration._retrieve(
-        SimpleNamespace(), sources,
-        arguments(mode='semantic', intent=intent, required_entities=['answer'], required_kinds=['code', 'log']),
-        root=tmp_path, cache_root=tmp_path / 'tasks/task', repo=project, task_id='task',
-        request_id='one-request', config=integration.retrieval_configuration(),
-        rewrite=lambda *_: pytest.fail('Unavailable retrieval must not consume a rewrite'),
-    )
-    assert attempted == ['count']
-    assert result['results'] == [] and result['hits'] == []
-    assert result['retrieval_mode'] == 'semantic' and result['retrieval_incomplete']
-    assert result['rewrite'] == {'status': 'not_triggered', 'triggered': []}
 
 
 def test_work_tool_reaches_next_request_after_original_and_preserves_pairing(project, tmp_path):
@@ -159,54 +122,8 @@ def test_retired_work_tool_is_rejected_before_any_search(project, tmp_path, monk
         loop.decode_plan(message_to_dict(retrieval_reply()))
 
 
-def test_rewrite_uses_separate_request_state_and_keeps_work_response(project, tmp_path):
-    model = ScriptedModel([text_reply('{"query":"answer implementation"}')])
-    loop = TaskRunner(model, LocalEnvironment(project, artifact_root=tmp_path / 'runtime'))
-    loop.root = tmp_path / 'task'
-    loop.root.mkdir()
-    loop.budget = StepBudget(max_steps=5)
-    current = message_to_dict(search_reply())
-    loop.state = {'history': [], 'response_pending': current, 'context_usage': {'used_tokens': 23}}
-    loop.persist = lambda *_: None
-    result = loop.request_model([HumanMessage(content='rewrite answer')], 'rag_rewrite')
-    assert integration._rewrite_text(result) == 'answer implementation'
-    assert loop.state['response_pending'] == current
-    assert loop.state['context_usage'] == {'used_tokens': 23}
-    assert loop.state['rag_request_pending'] is None
-    assert loop.state['model_usage'][0]['purpose'] == 'rag_rewrite'
-    assert loop.budget.used_steps == 1 and model.tools == ()
-    assert (loop.root / loop.state['rag_rewrite_response']['record']).is_file()
 
 
-def test_unknown_rewrite_stops_and_restart_does_not_repeat(project, tmp_path, monkeypatch):
-    from agent.rag.rewrite import RewriteLedger
-
-    attempts = []
-
-    def retrieve(loop, _arguments):
-        def unknown(_query, _reasons):
-            attempts.append('sent')
-            raise RuntimeError('connection ended without a confirmed result')
-
-        return RewriteLedger(tmp_path / 'rewrites.sqlite3').attempt(
-            loop.state['rag_request_id'], 'answer', ['required_evidence_missing'], unknown,
-        )
-
-    monkeypatch.setattr(integration, 'retrieve_work', retrieve)
-    environment = LocalEnvironment(project, artifact_root=tmp_path / 'runtime')
-    root = tmp_path / 'tasks' / 'unknown'
-    first_model = ScriptedModel([search_reply()])
-    first = TaskRunner(first_model, environment, state_dir=root, overlap_preparation=False,
-                       user_request_id='shared-request')
-    first.run([], 'Find answer', StepBudget(max_steps=5))
-    assert attempts == ['sent'] and len(first_model.calls) == 1
-    assert first.state['running_step']['id'] == 'find'
-    model = ScriptedModel([])
-    resumed = TaskRunner(model, environment, state_dir=root, overlap_preparation=False,
-                         user_request_id='shared-request')
-    result = resumed.run([], 'Find answer', StepBudget(max_steps=5))
-    assert result['status'] == 'execution_unknown'
-    assert attempts == ['sent'] and model.calls == []
 
 
 def test_resume_saved_result_preserves_prefix_and_original_tool_id(project, tmp_path, monkeypatch):
@@ -265,41 +182,14 @@ def test_records_require_current_task_commit_and_skip_model_and_acceptance(tmp_p
     assert sources.reasons and set(sources.reasons) == {'source_unavailable:ValueError'}
 
 
-def test_chat_uses_bound_project_not_parent_or_additional_sources(project, tmp_path):
-    nested = project / 'another'
-    nested.mkdir()
-    (nested / '.git').mkdir()
-    (nested / 'secret.py').write_text('OTHER_PROJECT')
-    parent = tmp_path / 'unrelated.txt'
-    parent.write_text('PARENT_MATERIAL')
-    work = {'repo': str(project), 'task_id': 'current'}
-    sources = integration.chat_sources(SimpleNamespace(root=tmp_path / 'state'), work, '.')
-    docs = list(sources.documents())
-    assert {doc.path for doc in docs} == {'main.py'}
-    (project / 'main.py').write_text('changed')
-    with pytest.raises(ValueError, match='changed'):
-        sources.read(docs[0].source_id, docs[0].version)
 
 
-def test_chat_without_bound_project_reports_gap_without_model_rewrite(project, tmp_path):
-    store = ApplicationStore(tmp_path / 'state')
-    conversation = store.create(repo=str(project))['thread_id']
-    model = ScriptedModel([retrieval_reply(mode='semantic'), text_reply()])
-    bot = Chatbot(store, lambda *_: pytest.fail('Unexpected handoff'), factory=lambda _: model)
-    command = {'id': str(uuid.uuid4()), 'kind': 'message', 'text': 'Retrieve evidence'}
-    store.submit(conversation, command)
-    bot.run(conversation, command)
-    tool = next(item for item in model.calls[1] if isinstance(item, ToolMessage))
-    assert json.loads(tool.content)['reasons'] == ['project_not_bound']
-    originals = list((store.root / 'application-records' / conversation).glob('*/tool-result.json'))
-    assert len(originals) == 1
-    assert json.loads(originals[0].read_text())['tool_call_id'] == 'read-evidence'
-    assert len(model.calls) == 2
 
 
 @pytest.mark.parametrize('changes', [
     {'path': '../other'}, {'path': '/other'}, {'path': 'C:/other'},
     {'path': '$record/requests'}, {'intent': 'anything'}, {'required_kinds': ['web']},
+    {'mode': 'semantic'}, {'mode': 'regex'}, {'mode': 'keywords'}, {'rank': 'bm25'}, {'terms': ['needle']},
 ])
 def test_retrieval_scope_arguments_reject_unsupported_values(changes):
     with pytest.raises(ValueError):
@@ -323,7 +213,7 @@ def test_fixed_configuration_ignores_legacy_database_and_returns_independent_sna
         bound = integration.bind_work(loop)
         assert {key: bound[key] for key in selected} == selected
         assert loop.state['rag_config'] == selected
-    selected['values']['chunk_target'] = 384
+    selected['values']['message_token_limit'] = 4096
     assert integration.retrieval_configuration()['values'] == asdict(RagConfig())
     assert legacy.read_bytes() == b'legacy parameter database must not be opened'
 
@@ -331,7 +221,7 @@ def test_fixed_configuration_ignores_legacy_database_and_returns_independent_sna
 def test_fixed_configuration_rejects_modified_checkpoint(tmp_path):
     selected = integration.retrieval_configuration()
     loop = SimpleNamespace(root=tmp_path / 'tasks/task-a', state={'rag_config': deepcopy(selected)})
-    loop.state['rag_config']['values']['chunk_target'] = 384
+    loop.state['rag_config']['values']['message_token_limit'] = 4096
     with pytest.raises(ValueError, match='configuration changed'):
         integration.bind_work(loop)
 
@@ -401,14 +291,14 @@ def test_public_record_projection_never_reuses_work_private_index(project, tmp_p
             SimpleNamespace(), sources, arguments(query='failed', path='.', intent='diagnostic'),
             root=tmp_path, cache_root=tmp_path / 'tasks/task', repo=project,
             task_id='task', request_id='request',
-            config=configuration, rewrite=None, reader_scope=reader_scope,
+            config=configuration, reader_scope=reader_scope,
         )
 
     assert 'work-only result detail' in json.dumps(query(private, 'work'))
     result = query(public, 'public')
     assert result['reader_scope'] == 'public'
     assert result['results'] and 'work-only result detail' not in json.dumps(result)
-    assert len(list((tmp_path / 'tasks/task/rag/indexes').glob('*.sqlite3'))) == 2
+    assert len(list((tmp_path / 'tasks/task/search/catalogs').glob('*.sqlite3'))) == 2
     assert not (tmp_path / 'rag/indexes').exists()
 
 
@@ -418,7 +308,7 @@ def test_index_resource_failure_is_not_presented_as_absent_evidence(project, tmp
     def full(*_args, **_kwargs):
         raise sqlite3.OperationalError('database or disk is full')
 
-    monkeypatch.setattr(Index, 'upsert_documents', full)
+    monkeypatch.setattr(Index, 'upsert', full)
     sources = integration.Sources()
     sources.add('source:main.py', 'v1', 10, lambda: 'answer', kind='code', path='main.py')
     result = integration._retrieve(
@@ -426,47 +316,11 @@ def test_index_resource_failure_is_not_presented_as_absent_evidence(project, tmp
         cache_root=tmp_path / 'tasks/task', repo=project,
         task_id='task', request_id='request',
         config=integration.retrieval_configuration(),
-        rewrite=lambda *_: pytest.fail('Resource failure must not trigger paid rewrite'),
     )
     assert result['retrieval_incomplete'] is True
     assert result['reasons'] == ['retrieval_index_unavailable']
 
 
-def test_required_gap_uses_one_charged_rewrite_with_isolated_context(project, tmp_path, monkeypatch):
-    class Vector:
-        def search(self, query, index, limit):
-            return [(chunk.id, 1.0) for chunk in index.chunks(query)][:limit]
-
-    class Reranker:
-        def score(self, query, chunks):
-            return [1.0] * len(chunks)
-
-    monkeypatch.setattr(integration, '_models', lambda _: SimpleNamespace(
-        vector=Vector(), reranker=Reranker(),
-    ))
-    model = ScriptedModel([
-        search_reply(mode='semantic', intent='diagnostic', required_entities=['missingSymbol']),
-        text_reply('{"query":"answer missingSymbol"}'), blocked(),
-    ])
-    loop = TaskRunner(model, LocalEnvironment(project, artifact_root=tmp_path / 'runtime'),
-                      state_dir=tmp_path / 'tasks' / 'rewrite', overlap_preparation=False,
-                      user_request_id='same-request')
-    result = loop.run([], 'Find the implementation', StepBudget(max_steps=5))
-    assert result['status'] == 'task_blocked' and len(model.calls) == 3
-    rewrite_messages = model.calls[1]
-    assert len(rewrite_messages) == 2
-    assert 'missingSymbol' in rewrite_messages[1].content
-    assert 'saved original thought' not in str(rewrite_messages)
-    tool = next(item for item in model.calls[2] if isinstance(item, ToolMessage))
-    assert tool.tool_call_id == 'read-evidence'
-    assert json.loads(tool.content)['steps'][0]['data']['rewrite']['status'] == 'complete'
-    assert [entry['purpose'] for entry in loop.state['model_usage']] == ['plan', 'rag_rewrite', 'plan']
-    from agent.rag.rewrite import RewriteLedger
-
-    ledger = RewriteLedger(tmp_path / 'rag/rewrites.sqlite3')
-    assert ledger.get('same-request')['status'] == 'complete'
-    assert ledger.attempt('same-request', 'another', ['required_evidence_missing'],
-                          lambda *_: pytest.fail('The rewrite budget is already used'))['status'] == 'already_used'
 
 
 def test_shared_resource_slot_returns_busy_before_enumeration_or_model(monkeypatch):
@@ -477,7 +331,7 @@ def test_shared_resource_slot_returns_busy_before_enumeration_or_model(monkeypat
         chat = integration.retrieve_chat(SimpleNamespace(), 'conversation', 'request', arguments())
     assert work == chat
     assert work['reasons'] == ['retrieval_busy'] and work['retrieval_incomplete']
-    assert work['rewrite']['status'] == 'suppressed'
+    assert 'rewrite' not in work
 
 
 def test_oversized_archived_source_is_rejected_before_reading_its_bytes(tmp_path):
@@ -485,32 +339,14 @@ def test_oversized_archived_source_is_rejected_before_reading_its_bytes(tmp_path
     root = tmp_path / 'source-records'
     (root / 'blobs').mkdir(parents=True)
     with (root / 'blobs' / digest).open('wb') as stream:
-        stream.truncate(2_000_001)
+        stream.truncate(integration.RagConfig().max_document_bytes + 1)
     view = SimpleNamespace(root=root, baseline=None, files={'huge.bin': digest},
                            read_bytes=lambda *_: pytest.fail('Oversized source was fully read'))
     loop = SimpleNamespace(evidence=SimpleNamespace(view=lambda: view), root=tmp_path / 'task')
     sources = integration.work_sources(loop, '.')
-    assert sources.entries == {} and sources.reasons == ['source_too_large']
+    assert sources.entries == {} and sources.reasons == ['source_scan_file_budget']
 
 
-def test_model_configuration_is_frozen_per_task_and_invalid_original_keeps_hash(tmp_path, monkeypatch):
-    monkeypatch.delenv('MONOPLANER_RAG_MODELS', raising=False)
-    assert integration._bind_models(tmp_path, 'old')['hash'] == 'unconfigured'
-    manifest = tmp_path / 'models.json'
-    raw = b'{"version":1}'
-    manifest.write_bytes(raw)
-    monkeypatch.setenv('MONOPLANER_RAG_MODELS', str(manifest))
-    with pytest.raises(ValueError, match='start a new task'):
-        integration._bind_models(tmp_path, 'old')
-    current = integration._bind_models(tmp_path, 'new')
-    assert current['hash'] == hashlib.sha256(raw).hexdigest()
-    assert current['status'] == 'configured'
-    manifest.write_bytes(b'{broken')
-    invalid = integration._bind_models(tmp_path, 'invalid')
-    assert invalid['status'] == 'unavailable'
-    assert invalid['hash'] == hashlib.sha256(b'{broken').hexdigest()
-    with pytest.raises(ValueError, match='start a new task'):
-        integration._bind_models(tmp_path, 'new')
 
 
 def test_full_source_cache_prunes_stale_versions_before_admitting_replacement(project, tmp_path, monkeypatch):
@@ -524,21 +360,21 @@ def test_full_source_cache_prunes_stale_versions_before_admitting_replacement(pr
         return integration._retrieve(
             owner, sources, arguments(query='answer', path='.', intent='diagnostic'),
             root=tmp_path, cache_root=tmp_path / 'tasks/task', repo=project,
-            task_id='task', request_id='request', config=configuration, rewrite=None,
+            task_id='task', request_id='request', config=configuration,
         )
     assert retrieve('old', 'answer old')['results']
-    original = Index.upsert_documents
+    original = Index.upsert
     observations = []
     def bounded(index, documents, **kwargs):
         # 确定性的单版本缓存上限：旧版本未释放时拒绝下一次写入。
         with index._connection() as db:
-            old = db.execute('SELECT version FROM documents WHERE scope=?',
+            old = db.execute('SELECT version FROM source_headers WHERE scope=?',
                              (index.scope.key,)).fetchall()
         observations.append(old)
         if old:
             raise sqlite3.OperationalError('database or disk is full')
         return original(index, documents, **kwargs)
-    monkeypatch.setattr(Index, 'upsert_documents', bounded)
+    monkeypatch.setattr(Index, 'upsert', bounded)
     result = retrieve('new', 'answer new')
     assert observations == [[]]
     assert result['results'] and result['results'][0]['version'] == 'new'

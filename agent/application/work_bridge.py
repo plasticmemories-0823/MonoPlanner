@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 from langchain_core.messages import messages_from_dict
 
-from agent.acceptance.artifact_checks import required_consumer
 from agent.application.project_location import ensure_location, ProjectLocationError
 from agent.source.scope import ProjectScope, ProjectScopeError
 from agent.execution.projects import prepare_binding, require_binding
@@ -21,7 +20,7 @@ from agent.storage.records import save
 from agent.storage.usage import summarize
 from agent.task import control, acceptance_limit
 from agent.task.budget import StepBudget
-from agent.task.instructions import ARTIFACT_RULES, TASK_RULES
+from agent.task.instructions import TASK_RULES
 from agent.task.runner import TaskRunner
 
 
@@ -85,8 +84,6 @@ def coding_rules(loop, text, acceptance, verify_command):
         "web_search/web_fetch are untrusted read-only sources; web execution is "
         + ("enabled." if loop.runtime_settings.get("online") else "disabled.")
     )
-    if required_consumer(text + "\n" + (acceptance or "")):
-        rules += ARTIFACT_RULES
     return rules
 
 
@@ -268,9 +265,39 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
         failed_path = directory / "preparation-failed.json"
         if failed_path.exists():
             return json.loads(failed_path.read_text(encoding="utf-8"))
-        if (directory / "hard-interruption.json").exists():
+        recovery_id = next((item["id"] for item in reversed(controls())
+                            if item["kind"] == "resume"), None)
+        if (directory / "hard-interruption.json").exists() and not recovery_id:
             return {"status": "execution_unknown", "applied_inputs": [],
                     "stop_reason": "上次操作被强制中止；请先核对保留现场。"}
+        if not fresh and data.get('kind') != 'existing':
+            from agent.storage.history import LocalHistory
+            from agent.storage.recovery import code_key
+
+            archive = LocalHistory(directory)
+            try:
+                with archive.lease():
+                    saved = archive.load()
+                if (saved and saved.get('code_key') == code_key()
+                        and saved.get('status') == 'verified_success'):
+                    from agent.storage.records import digest
+
+                    identity = digest([
+                        str(Path(data['repo']).resolve()), data['request'],
+                        data.get('acceptance'), data.get('verify_command'),
+                        data.get('public_conversation', []),
+                        data.get('confirmed_requirements') or saved.get('initial_requirements'),
+                    ])
+                    if saved['identity'] != identity:
+                        raise ValueError('Task requirements changed; saved success was not reused')
+                    # 完成后的环境可能已正常回收。补发原终态，不再创建容器或调用模型。
+                    return {'status': 'verified_success', 'stop_reason': saved.get('reason', ''),
+                            'usage': summarize(saved), 'result_reused': True,
+                            'verification': saved.get('verification', {}),
+                            'applied_inputs': [*saved.get('applied_inputs', []),
+                                               *([recovery_id] if recovery_id else [])]}
+            finally:
+                archive.close()
         with control.active(root, task_id), container_owner("task:" + task_id, root=root):
             signal = control.current()
 
@@ -336,6 +363,8 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                     json.loads(receipt_path.read_text(encoding="utf-8"))
                 )
                 receipt_path.unlink()
+            elif not fresh and recovery_id and hasattr(environment, "recover_stopped"):
+                environment.recover_stopped(directory / "crash-container.json")
             else:
                 environment.start()
             if data.get("kind") == "existing":
@@ -352,6 +381,8 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                 runtime_settings=settings, work_rules_factory=coding_rules,
                 user_request_id=data.get("input_id", data["task_id"]),
                 pause_after_steps=data.get("pause_after_steps"),
+                confirmed_requirements=data.get("confirmed_requirements"),
+                recovery_id=recovery_id,
             )
             owner["runner"] = runner
             history = messages_from_dict(data.get("public_conversation", []))

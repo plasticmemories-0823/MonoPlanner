@@ -10,6 +10,7 @@ from agent.source.snapshots import SourceSnapshot
 from agent.source.versions import SourceVersions
 from agent.execution.executor import OperationExecutor
 from agent.model.tools import SCHEMA_PATH
+from agent.acceptance.contracts import VerificationSpec
 
 
 # ========================================================================
@@ -31,12 +32,17 @@ def environment_key(environment):
 
 def code_key(root=None):
     names = (
+        'agent/runtime/__init__.py',
+        'agent/runtime/distribution.py',
+        'agent/runtime/bundles.py',
+        'agent/runtime/bridge.py',
+        'agent/runtime/worker.py',
+        'agent/storage/schema.py',
+        'agent/application/recovery.py',
+        'agent/storage/continuation.py',
         'agent/__init__.py',
         'agent/__main__.py',
         'agent/acceptance/__init__.py',
-        'agent/acceptance/artifact_checks.py',
-        'agent/acceptance/behavior.py',
-        'agent/acceptance/c_driver.py',
         'agent/acceptance/drivers.py',
         'agent/acceptance/oracles.py',
         'agent/cli/__init__.py',
@@ -51,19 +57,19 @@ def code_key(root=None):
         'agent/model/tool_results.py',
         'agent/rag/__init__.py',
         'agent/rag/types.py',
-        'agent/rag/chunks.py',
         'agent/rag/index.py',
         'agent/rag/retrieval.py',
+        'agent/rag/ripgrep.py',
+        'resources/ripgrep.json',
         'agent/rag/integration.py',
-        'agent/rag/models.py',
-        'agent/rag/model_worker.py',
-        'agent/rag/rewrite.py',
         'agent/server/__init__.py',
         'agent/task/control.py',
         'agent/storage/requests.py',
         'agent/storage/resources.py',
         'agent/storage/disk_space.py',
         'agent/application/work_bridge.py',
+        'agent/application/requirements.py',
+        'resources/work-requirements.schema.json',
         'agent/source/__init__.py',
         'agent/source/errors.py',
         'agent/source/artifacts.py',
@@ -120,16 +126,22 @@ def code_key(root=None):
         'agent/acceptance/results.py',
         'agent/execution/executor.py',
         'agent/task/contracts.py',
+        'agent/task/requirements.py',
         'agent/model/tools.py',
         'agent/task/repair.py',
         'resources/repair.schema.json',
         'agent/acceptance/revisions.py',
         'agent/acceptance/evidence.py',
-        'agent/acceptance/expectations.py',
+        'agent/acceptance/corrections.py',
         'resources/acceptance-review.schema.json',
         'agent/acceptance/contracts.py',
         'agent/acceptance/runner.py',
         'resources/drivers/unittest.py',
+        'agent/acceptance/execution.py',
+        'agent/acceptance/boundaries.py',
+        'resources/boundary-hints.json',
+        'resources/boundary-hints.schema.json',
+        'resources/drivers/execution.py',
         'agent/source/snapshots.py',
         'agent/source/scope.py',
         'agent/application/project_location.py',
@@ -158,7 +170,6 @@ def code_key(root=None):
         'agent/storage/records.py',
         'agent/acceptance/final.py',
         'resources/prompts/task.txt',
-        'resources/prompts/artifact_acceptance.txt',
     )
     schema = SCHEMA_PATH if root is None else Path(root) / SCHEMA_PATH.relative_to(PROJECT_ROOT)
     root = PROJECT_ROOT if root is None else Path(root)
@@ -171,15 +182,19 @@ def code_key(root=None):
 # 检查点校验与恢复
 # ========================================================================
 def restore(loop, stored, identity):
-    if stored.get('hard_interruption') or (loop.root / 'hard-interruption.json').exists():
+    if (stored.get('hard_interruption') or (loop.root / 'hard-interruption.json').exists()) and not getattr(loop, 'recovery_id', None):
         return conflict(loop, stored, 'Operation was forcefully interrupted; inspect retained evidence before continuing')
     from agent.task import acceptance_limit
 
-    legacy = acceptance_limit.is_legacy_exhausted(stored)
     if stored.get('identity') != identity or (
-        stored.get('code_key') != code_key() and not legacy
+        stored.get('code_key') != code_key()
     ):
         raise ValueError('Task or engine changed; stored plan was not executed')
+    spec = stored.get('verification_spec')
+    if spec and set(spec) - {field.name for field in fields(VerificationSpec)}:
+        raise ValueError('Frozen acceptance protocol changed; use the matching frozen engine')
+    if spec and spec.get('test_code') and not spec.get('execution_checks'):
+        raise ValueError('Frozen execution_checks missing; use the matching frozen engine')
     if stored.get('environment_key') != environment_key(loop.environment):
         return conflict(loop, stored, 'Execution environment changed')
 
@@ -200,7 +215,7 @@ def restore(loop, stored, identity):
     loop.evidence = SourceVersions(
         loop.environment, loop.root / 'source-records', baseline=loop.baseline
     )
-    if loop.evidence.current != stored['source']:
+    if loop.evidence.current != stored['source'] and not stored.get('running_step'):
         return conflict(loop, stored, 'Workspace source changed')
     if stored.get('verification_spec'):
         contract = json.loads((loop.root / 'frozen-acceptance.json').read_text(encoding='utf-8'))
@@ -219,6 +234,12 @@ def restore(loop, stored, identity):
 
     revisions.validate(loop)
     loop.history_store.stats['resumed'] += 1
+    from agent.storage.continuation import reconcile
+
+    try:
+        reconcile(loop)
+    except ValueError as exc:
+        return conflict(loop, stored, str(exc))
 
     # ========================================================================
     # 任何执行结果不明的操作都停在原记录，不自动重放
@@ -303,24 +324,6 @@ def restore(loop, stored, identity):
     # ========================================================================
     from agent.task.output_limit import resume_validated
 
-    if legacy:
-        # 已审查旧版的次数终态仅在显式人工续跑时升级；不迁移其它旧检查点。
-        continuation = acceptance_limit.resume_input(loop)
-        if not continuation:
-            return conflict(loop, stored, '验收额度已用完，请明确继续原任务以恢复断点。')
-        rounds = len(stored['rounds'])
-        ledger = {'round_limit': rounds, 'round_increment': rounds}
-        token = continuation.get('acceptance_pause_id')
-        if token != acceptance_limit._value(stored, ledger)['pause_id']:
-            return conflict(loop, stored, '继续请求不属于当前暂停，请刷新后重新确认。')
-        stored['acceptance_budget'] = ledger
-        previous_key = stored['code_key']
-        stored['code_key'] = loop.code_key
-        acceptance_limit.release_unexecuted_legacy_plan(loop)
-        acceptance_limit.pause(loop, persist=False)
-        loop.persist('acceptance_checkpoint_upgraded', {
-            'previous_code_key': previous_key, 'completed_steps_not_replayed': True,
-        })
     resume_validated(loop)
     if stored['status'] == 'verified_success':
         loop.reused_result = True
@@ -420,6 +423,11 @@ def run(loop, history, text, budget, verify_command, acceptance):
         loop.environment.artifact_root.resolve()
     ):
         raise ValueError('History must be outside source and execution mounts')
+    initial_requirements = loop.root / "requirements-initial.json"
+    if loop.confirmed_requirements is None and initial_requirements.is_file():
+        from agent.task.requirements import checked
+
+        loop.confirmed_requirements = checked(json.loads(initial_requirements.read_text("utf-8")), text)
     loop.identity = digest(
         [
             str(loop.environment.repo_root.resolve()),
@@ -427,6 +435,7 @@ def run(loop, history, text, budget, verify_command, acceptance):
             acceptance,
             verify_command,
             messages_to_dict(history),
+            loop.confirmed_requirements,
         ]
     )
     loop.env_key, loop.code_key = environment_key(loop.environment), code_key()

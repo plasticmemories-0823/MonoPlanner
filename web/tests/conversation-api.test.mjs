@@ -71,6 +71,18 @@ const storageFault = {
   message: "internal diagnostic must not become public text",
 };
 
+test("saved delivery proposals reach the view without creating a command", async () => {
+  const proposal = snapshot(8);
+  proposal.messages = [{ id: "work-proposal:" + "a".repeat(64), type: "ai",
+    source: "work_proposal", content: "Confirmed delivery proposal", proposal_status: "" }];
+  const value = fixture(async () => Response.json(proposal));
+  await value.monitor.start();
+  assert.equal(value.errors.filter(Boolean).length, 0);
+  assert.equal(value.applied[0].messages[0].source, "work_proposal");
+  assert.equal(value.applied[0].work, null);
+  value.monitor.dispose();
+});
+
 test("a storage rejection retains its health fact without retrying a command", async () => {
   let calls = 0;
   await assert.rejects(

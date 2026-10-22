@@ -1,6 +1,5 @@
 """在原始源码上试跑生成的验收，保留每个审查版本。"""
 
-import ast
 from copy import deepcopy
 from dataclasses import asdict
 import hashlib
@@ -12,10 +11,10 @@ from langchain_core.messages import ToolMessage, message_to_dict
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent.acceptance.contracts import VerificationSpec, tests_ready_for_candidate
-from agent.acceptance import evidence, expectations
+from agent.acceptance import corrections, evidence
+from agent.acceptance.execution import ExecutionCheck, checked_execution
 from agent.acceptance.evidence import Correction, Evidence
 from agent.acceptance.runner import AcceptanceRun
-from agent.acceptance.artifact_checks import required_consumer, requested_calls
 from agent.execution.local import LocalEnvironment
 from agent.model.errors import ModelRequestNotSent
 from agent.source.snapshots import SourceSnapshot, _safe_file
@@ -32,6 +31,8 @@ class Review(BaseModel):
     reason: str = Field(min_length=1, max_length=1600)
     test_code: str = Field(default="", max_length=32768)
     test_driver: list[str] = Field(default_factory=list, max_length=32)
+    execution_checks: list[ExecutionCheck] = Field(default_factory=list, max_length=8)
+    regression_command: str = Field(default="", max_length=16000)
     evidence: list[Evidence] = Field(default_factory=list, max_length=24)
     corrections: list[Correction] = Field(default_factory=list, max_length=24)
 
@@ -81,6 +82,7 @@ def released_plan(candidate, proposal):
         test_code=proposal["spec"]["test_code"],
         regression_command=proposal["regression"],
         test_driver=list(proposal["spec"].get("test_driver", ())),
+        execution_checks=list(proposal["spec"].get("execution_checks", ())),
     )
     return plan
 
@@ -128,29 +130,36 @@ def append_result(loop, response, result):
     loop.state.update(response_pending=None, plan_error="", repair_count=0)
 
 
-def behavior(code):
-    """此处只检查 AST 边界，不证明夹具等价或预期正确。"""
-    tree = ast.parse(code)
-    return [
-        ast.dump(node, include_attributes=False)
-        for node in tree.body
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
-
-
-def spec_for(loop, code, driver=()):
+def spec_for(loop, code, driver=(), execution_checks=()):
     request = loop.state["request"] + ''.join(
         '\n' + row['text'] for row in loop.state.get('user_updates', [])
     )
-    text = request + "\n" + (loop.state["acceptance"] or "")
-    consumer = required_consumer(text)
-    return VerificationSpec(
-        tuple([request] + ([loop.state["acceptance"]] if loop.state["acceptance"] else [])),
-        test_code=code,
-        required_consumer=consumer,
-        required_calls=requested_calls(text) if consumer else (),
-        test_driver=driver,
-    )
+    criteria = tuple([request] + ([loop.state["acceptance"]] if loop.state["acceptance"] else []))
+    from agent.task.requirements import check_execution
+    from agent.task.repair import ValidationErrors, fields
+
+    requirement_digest = ""
+    errors, checks = [], ()
+    value = {"test_code": code, "test_driver": driver, "execution_checks": execution_checks}
+    try:
+        checks = checked_execution(execution_checks, criteria, required=True)
+    except ValueError as error:
+        errors.append((["/execution_checks"], ValueError(str(error))))
+    else:
+        try:
+            requirement_digest = check_execution(loop, checks)
+        except ValueError as error:
+            errors.append((fields(error, value), error))
+    try:
+        spec = VerificationSpec(
+            criteria, test_code=code, test_driver=driver, execution_checks=checks,
+            requirement_digest=requirement_digest,
+        )
+    except ValueError as error:
+        errors.append((fields(error, value), error))
+    if errors:
+        raise ValidationErrors(errors)
+    return spec
 
 
 def run_report(loop, snapshot, spec, directory, phase, repository_baseline=None):
@@ -188,6 +197,15 @@ def run_report(loop, snapshot, spec, directory, phase, repository_baseline=None)
 # 验收记录的完整性校验
 # ============================================================
 def validate(loop):
+    from agent.task.requirements import validate_state
+
+    validate_state(loop)
+    if loop.state.get("acceptance_trial") or (
+        loop.state.get("verification_spec") or {}
+    ).get("test_code"):
+        from agent.acceptance.boundaries import require_general
+
+        require_general(loop)
     checked_proposals = set()
 
     def proposal(ref):
@@ -199,7 +217,7 @@ def validate(loop):
             return data
         if data.get("candidate"):
             checked(loop.root, data["candidate"])
-        correction = data.get("expectation_correction")
+        correction = data.get("acceptance_correction")
         if correction:
             try:
                 base_ref = correction["base_version"]
@@ -207,13 +225,17 @@ def validate(loop):
                     raise ValueError("Correction base is not a retained frozen version")
                 base = checked(loop.root, base_ref)
                 expected = evidence.prepare(
-                    loop, base_ref, base["spec"]["test_code"], data["spec"]["test_code"],
+                    loop, base_ref, base["spec"], data["spec"],
                     [evidence.Evidence(**{key: row[key] for key in ("id", "source", "quote")})
                      for row in correction["evidence"]],
                     [evidence.Correction(**row) for row in correction["corrections"]],
+                    base["regression"], data["regression"],
                 )
-                if (expected != correction or data["regression"] != base["regression"]
-                        or data["spec"] != {**base["spec"], "test_code": data["spec"]["test_code"]}):
+                verified = spec_for(loop, data["spec"]["test_code"],
+                                    data["spec"].get("test_driver", ()),
+                                    data["spec"].get("execution_checks", ()))
+                if (expected != correction
+                        or json.loads(json.dumps(asdict(verified))) != data["spec"]):
                     raise ValueError("Correction differs from its original evidence or fixed checks")
             except (ValueError, KeyError, TypeError) as exc:
                 raise ModelRequestNotSent(
@@ -267,17 +289,15 @@ def trial(
     response,
     *,
     driver=(),
+    execution_checks=(),
     candidate=None,
     parent=None,
     reason="",
     reuse=None,
     superseded=None,
-    expectation_correction=None,
+    acceptance_correction=None,
 ):
-    spec = spec_for(loop, code, driver)
-    if expectation_correction:
-        base = checked(loop.root, expectation_correction["base_version"])
-        spec = VerificationSpec(**{**base["spec"], "test_code": code})
+    spec = spec_for(loop, code, driver, execution_checks)
     proposal = {
         "spec": asdict(spec),
         "regression": regression,
@@ -288,14 +308,16 @@ def trial(
         "candidate": candidate,
         "baseline_conditions": baseline_conditions(loop, spec, regression),
     }
-    if expectation_correction:
-        proposal["expectation_correction"] = expectation_correction
+    if acceptance_correction:
+        proposal["acceptance_correction"] = acceptance_correction
     identifier = hashlib.sha256(json.dumps(proposal, sort_keys=True).encode()).hexdigest()
     folder = loop.root / "acceptance" / identifier
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / "proposal.json"
     if path.exists():
-        raise ValueError("Identical acceptance proposal already trialled; use its trial_id")
+        if (digest(json.loads(_safe_file(loop.root, path.relative_to(loop.root)).read_bytes())) != digest(proposal)
+                or any(ref.get('id') == identifier for ref in loop.state.get('acceptance_trials', []))):
+            raise ValueError("Identical acceptance proposal already trialled; use its trial_id")
     save(path, proposal)
     ref = {**reference(loop.root, path), "id": identifier}
     loop.state.setdefault("acceptance_trials", []).append(ref)
@@ -304,12 +326,51 @@ def trial(
         acceptance_running=True,
         response_pending=None,
     )
+    # 草稿已接收为待试跑验收；与试跑检查点一起消费，不能再次用于修正旧提交。
+    loop.state.pop("repair_draft", None)
+    save(folder / "continuation.json", {
+        "response": response, "candidate": candidate, "superseded": superseded,
+        "reuse": reuse, "acceptance_correction": acceptance_correction,
+    })
+    loop.state["acceptance_trial"]["continuation"] = reference(loop.root, folder / "continuation.json")
     loop.persist("acceptance_trial_started", {"trial_id": identifier})
     report = (
         checked(loop.root, reuse)
         if reuse
         else run_report(loop, loop.baseline, spec, folder / "baseline", "baseline")
     )
+    finish_trial(loop, folder, ref, report, response, candidate, superseded, reuse,
+                 acceptance_correction)
+
+
+def resume_trial(loop, *, allow_execute):
+    current = loop.state["acceptance_trial"]
+    ref = current["ref"]
+    proposal = checked(loop.root, ref)
+    folder = loop.root / "acceptance" / ref["id"]
+    original = checked(loop.root, current['continuation'])
+    result = folder / "baseline-result.json"
+    if original['reuse']:
+        report = checked(loop.root, original['reuse'])
+    elif result.exists():
+        report = json.loads(_safe_file(loop.root, result.relative_to(loop.root)).read_bytes())
+        completed = json.loads(_safe_file(loop.root, folder.relative_to(loop.root) / "completion.json").read_bytes())
+        if completed != {"result_digest": digest(report), "proposal": ref}:
+            raise ValueError("Saved acceptance trial result checksum mismatch")
+    elif allow_execute:
+        import uuid
+
+        report = run_report(loop, loop.baseline, VerificationSpec(**proposal['spec']),
+                            folder / ('baseline-recovery-' + uuid.uuid4().hex), 'baseline')
+    else:
+        return
+    finish_trial(loop, folder, ref, report, original['response'], original['candidate'],
+                 original['superseded'], original['reuse'], original['acceptance_correction'])
+
+
+def finish_trial(loop, folder, ref, report, response, candidate, superseded, reuse,
+                 acceptance_correction):
+    identifier = ref["id"]
     if not loop.baseline.verify_integrity()["valid"]:
         raise ModelRequestNotSent(
             "state_conflict", "Retained original source changed during acceptance trial"
@@ -318,6 +379,7 @@ def trial(
         result_ref = reuse
     else:
         result_path = folder / "baseline-result.json"
+        save(folder / "completion.json", {"result_digest": digest(report), "proposal": ref})
         save(result_path, report)
         result_ref = reference(loop.root, result_path)
     completion = folder / "trial.json"
@@ -339,7 +401,7 @@ def trial(
             "selected_candidate": candidate_summary(loop, candidate),
             "superseded_candidate": candidate_summary(loop, superseded),
             "baseline_reused": bool(reuse),
-            "expectation_correction": expectation_correction,
+            "acceptance_correction": acceptance_correction,
             "next": "Inspect the real evidence, then freeze_acceptance or revise_acceptance. "
             "A runnable assertion failure may reproduce the defect; it is not proof that the expectation is correct. "
             "No proposed modification has run. freeze_acceptance releases only the selected_candidate above. "
@@ -354,6 +416,9 @@ def trial(
 # 保存等待冻结的候选修改
 # ============================================================
 def stage_candidate(loop, plan, response):
+    from agent.acceptance.boundaries import require_general
+
+    require_general(loop)
     if loop.state.get("verification_spec") or loop.state.get("verify_command"):
         raise ValueError("Pending replacement cannot change frozen acceptance")
     validate(loop)
@@ -371,7 +436,8 @@ def stage_candidate(loop, plan, response):
             )
         report = checked(loop.root, current["baseline_result"])
         conditions = baseline_conditions(
-            loop, spec_for(loop, plan.test_code, plan.test_driver), plan.regression_command
+            loop, spec_for(loop, plan.test_code, plan.test_driver, plan.execution_checks),
+            plan.regression_command,
         )
         remaining = loop.budget.remaining_time()
         if (
@@ -386,6 +452,7 @@ def stage_candidate(loop, plan, response):
         plan.regression_command,
         response,
         driver=plan.test_driver,
+        execution_checks=plan.execution_checks,
         candidate=candidate_record(loop, plan, response),
         reuse=reuse,
         parent=current["ref"]["id"] if current else None,
@@ -410,53 +477,63 @@ def review(loop, decision, response):
         )
     if decision.decision == "revise":
         if loop.state.get("verify_command"):
-            raise ValueError("User fixed acceptance cannot be revised")
+            raise ValueError("User fixed acceptance is an original requirement and cannot be revised. "
+                             + evidence.REVISION_GUIDANCE)
         if not decision.test_code.strip():
             raise ValueError("Revision requires complete test_code; no code is guessed")
+        fields = {item.field for item in decision.corrections}
+        driver = (decision.test_driver if decision.test_driver or "test_driver" in fields
+                  else proposal["spec"].get("test_driver", ()))
+        execution_checks = (
+            [item.model_dump() for item in decision.execution_checks]
+            if decision.execution_checks or "execution_checks" in fields
+            else proposal["spec"].get("execution_checks", ())
+        )
+        regression = (decision.regression_command
+                      if decision.regression_command or "regression_command" in fields
+                      else proposal["regression"])
+        frozen = loop.state.get("verification_spec")
         correction = None
-        if decision.evidence or decision.corrections:
-            if not loop.state.get("verification_spec"):
-                raise ValueError("Evidence corrections apply after freezing; revise the draft normally")
+        if frozen:
+            if not decision.evidence or not decision.corrections:
+                raise ValueError(evidence.REVISION_GUIDANCE)
             base_ref = loop.state["active_acceptance"]
             base = checked(loop.root, base_ref)
-            driver = decision.test_driver or proposal["spec"].get("test_driver", ())
-            if list(driver) != list(base["spec"].get("test_driver", ())):
-                raise ValueError("Evidence correction cannot change the frozen test_driver")
-            correction = evidence.prepare(
-                loop, base_ref, base["spec"]["test_code"], decision.test_code,
-                decision.evidence, decision.corrections,
-            )
-        if loop.state.get("verification_spec") and not correction:
-            if tests_ready_for_candidate(loop.state.get("verification", {})):
-                raise ValueError(
-                    "Runnable behavior failed. Repair source, or use revise_acceptance with "
-                    "original evidence and itemized corrections to justify changed expected literals."
+            try:
+                spec = spec_for(loop, decision.test_code, driver, execution_checks)
+                correction = evidence.prepare(
+                    loop, base_ref, base["spec"], asdict(spec),
+                    decision.evidence, decision.corrections, base["regression"], regression,
                 )
-            old_code = loop.state["verification_spec"]["test_code"]
-            if behavior(old_code) != behavior(decision.test_code):
-                raise ValueError(
-                    "A preparation-only revision cannot change test classes, helpers, fixtures, "
-                    "inputs or assertions; these must remain unchanged. Use evidence and corrections "
-                    "for justified frozen expectation changes."
-                )
+            except ValueError as error:
+                if evidence.REVISION_GUIDANCE in str(error):
+                    raise
+                raise ValueError(str(error) + ". " + evidence.REVISION_GUIDANCE) from error
+        elif decision.evidence or decision.corrections:
+            raise ValueError("Evidence corrections apply after freezing; revise the draft normally")
         trial(
             loop,
             decision.test_code,
-            proposal["regression"],
+            regression,
             response,
-            driver=decision.test_driver or proposal["spec"].get("test_driver", ()),
+            driver=driver,
+            execution_checks=execution_checks,
             candidate=current_trial.get("candidate") if current_trial else None,
             parent=current_ref["id"],
             reason=decision.reason,
-            expectation_correction=correction,
+            acceptance_correction=correction,
         )
         return
     if not current_trial or not current_trial.get("baseline_result"):
         raise ValueError("No completed acceptance trial can be frozen")
-    if decision.test_code or decision.test_driver or decision.evidence or decision.corrections:
+    if (decision.test_code or decision.test_driver or decision.execution_checks
+            or decision.evidence or decision.corrections or decision.regression_command):
         raise ValueError(
             "freeze_acceptance confirms existing code; use revise_acceptance to submit code"
         )
+    from agent.task.requirements import guard
+
+    guard(loop, proposal["spec"])
     report = checked(loop.root, current_trial["baseline_result"])
     if not tests_ready_for_candidate(report):
         raise ValueError(
@@ -499,7 +576,7 @@ def review(loop, decision, response):
             {
                 "outcome": "acceptance_frozen",
                 "trial_id": ref["id"],
-                "expectation_correction": proposal.get("expectation_correction"),
+                "acceptance_correction": proposal.get("acceptance_correction"),
                 "next": "Submit source repair using this acceptance; previous versions remain recorded.",
             },
         )
@@ -529,26 +606,28 @@ def compare(loop, snapshot, active_report, folder):
                 baseline,
             )
         )
-        # 旧结果保留对照。只对行为相同的历史版本投射已经冻结的逐项预期纠正，
-        # 不移除旧版本自己的准备条件，防止普通准备修订借此掩盖其它冲突。
+        # 旧结果保留对照；只投射能精确绑定旧材料的已冻结修订，
+        # 未声明的设置、断言和其它历史差异仍保留，不能被新版本整体遮盖。
         effective_spec = deepcopy(version["spec"])
+        effective_regression = version["regression"]
         superseded_by = []
         for later_ref, later in zip(versions[index + 1:], records[index + 1:]):
-            correction = later.get("expectation_correction")
+            correction = later.get("acceptance_correction")
             if not correction:
                 continue
             base = checked(loop.root, correction["base_version"])
-            if (behavior(effective_spec["test_code"]) != behavior(base["spec"]["test_code"])
-                    or effective_spec.get("test_driver") != base["spec"].get("test_driver")):
+            if corrections.protected(effective_spec) != corrections.protected(base["spec"]):
                 continue
             try:
-                code = expectations.rewrite(
-                    effective_spec["test_code"],
+                material = corrections.project(
+                    corrections.materials(effective_spec, effective_regression),
+                    corrections.materials(base["spec"], base["regression"]),
                     [evidence.Correction(**row) for row in correction["corrections"]],
                 )
             except ValueError:
                 continue  # 旧片段身份不能确认时，仍保留原来的冲突检查。
-            effective_spec["test_code"] = code
+            effective_regression = material.pop("regression_command")
+            effective_spec.update(material)
             superseded_by.append(later_ref["id"])
         effective_report, effective_baseline = report, baseline
         if superseded_by:
@@ -557,7 +636,7 @@ def compare(loop, snapshot, active_report, folder):
                 effective_baseline = checked(loop.root, active["baseline_result"])
             else:
                 spec = VerificationSpec(**effective_spec)
-                projected = folder / ref["id"] / "corrected-expectations"
+                projected = folder / ref["id"] / "corrected-acceptance"
                 effective_baseline = run_report(
                     loop, loop.baseline, spec, projected / "baseline", "baseline"
                 )
@@ -573,8 +652,9 @@ def compare(loop, snapshot, active_report, folder):
         ):
             conflicts.append(ref["id"])
         rows.append({"trial_id": ref["id"], "baseline": baseline, "candidate": report,
-                     "superseded_expectations_by": superseded_by,
+                     "superseded_acceptance_by": superseded_by,
                      "effective_spec": effective_spec, "effective_baseline": effective_baseline,
+                     "effective_regression": effective_regression,
                      "effective_candidate": effective_report})
     result = {
         "versions": rows,

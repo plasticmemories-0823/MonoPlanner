@@ -1,5 +1,6 @@
 """验证恢复后的资料交接和单一执行方持续工作；不调用模型服务。"""
 
+import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ from agent.execution.executor import OperationExecutor
 from agent.task.contracts import Operation
 from agent.task.instructions import TASK_RULES
 
-from agent.model.tools import CHAT_TOOLS, CODING_TOOLS, WORK_TOOLS
+from agent.model.tools import WORK_TOOLS
 from agent.model.payload import wire_input
 from agent.task.control import Signal
 from agent.settings import PROJECT_ROOT
@@ -20,12 +21,6 @@ from agent.settings import PROJECT_ROOT
 
 class CodingHandoffTests(unittest.TestCase):
 
-    def test_coding_tools_share_work_contract_and_chat_has_no_planner(self):
-        self.assertEqual(wire_input([], CODING_TOOLS)['tools'][:4],
-                         wire_input([], WORK_TOOLS)['tools'])
-        self.assertEqual([tool.name for tool in CODING_TOOLS],
-                         [tool.name for tool in WORK_TOOLS] + ['web_search', 'web_fetch'])
-        self.assertNotIn('submit_plan', [tool.name for tool in CHAT_TOOLS])
 
     def test_model_visible_lookup_policy_keeps_execution_and_explicit_scopes(self):
         request = wire_input([SystemMessage(content=TASK_RULES)], WORK_TOOLS)
@@ -37,8 +32,8 @@ class CodingHandoffTests(unittest.TestCase):
         self.assertIn('runtime or binary diagnostics, candidate edits', rules)
         self.assertIn('processing output from the command being executed', rules)
         self.assertIn('never expand the authorized scope yourself', rules)
-        self.assertIn('$container/system_include/usr/include/', rules)
-        self.assertIn('$container/toolchain_src/build/gcc', rules)
+        self.assertIn('host-registered read-only namespaces', rules)
+        self.assertIn('Use the namespace and authorized path returned by the host.', rules)
         frontdesk = (PROJECT_ROOT / 'resources/prompts/frontdesk.txt').read_text('utf-8')
         self.assertIn('Do not run project scripts to search existing source', frontdesk)
 

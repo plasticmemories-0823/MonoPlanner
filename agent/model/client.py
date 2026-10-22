@@ -31,8 +31,6 @@ class ConfiguredModel:
 
     @property
     def max_output_tokens(self):
-        if self.purpose == 'rag_rewrite':
-            return min(self.policy.max_output_tokens, 1024)
         if self.purpose == "compaction":
             from agent.model.compaction import CONFIG
 
@@ -52,7 +50,7 @@ class ConfiguredModel:
         }
         if self.policy.reasoning_effort != 'none':
             options['reasoning_effort'] = self.policy.reasoning_effort
-        if self.purpose in {"compaction", "rag_rewrite"}:
+        if self.purpose == "compaction":
             options["tool_choice"] = "none"
         return options
 

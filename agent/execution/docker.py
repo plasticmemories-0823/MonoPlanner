@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import uuid
 from agent.execution.process import log_excerpt
+from agent.storage.records import digest, save
 
 PROXY_VARIABLES = tuple(
     name
@@ -203,12 +204,15 @@ import traceback
 
 request = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
 status_path = request["status_path"]
-result = {"exit_code": None, "timed_out": False, "pid": None}
+result = {"exit_code": None, "timed_out": False, "pid": None,
+          "request_digest": request.get("request_digest")}
 
 def save():
     temporary = status_path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as output:
         json.dump(result, output, ensure_ascii=False)
+        output.flush()
+        os.fsync(output.fileno())
     os.replace(temporary, status_path)
 
 try:
@@ -216,7 +220,10 @@ try:
     # before the child even starts; keep the benchmark interpreter and locale.
     argv = [arg.encode("utf-8") for arg in request["argv"]]
     child_env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    process = subprocess.Popen(argv, cwd="/testbed", env=child_env, start_new_session=True)
+    out = open(request["stdout_path"], "wb") if request.get("stdout_path") else None
+    err = open(request["stderr_path"], "wb") if request.get("stderr_path") else None
+    process = subprocess.Popen(argv, cwd="/testbed", env=child_env, start_new_session=True,
+                               stdout=out, stderr=err, stdin=subprocess.DEVNULL)
     result["pid"] = process.pid
     save()
     try:
@@ -233,6 +240,11 @@ except BaseException as exc:
     result.update(exit_code=127, error="{}: {}".format(type(exc).__name__, exc))
     traceback.print_exc()
 finally:
+    for stream in (locals().get("out"), locals().get("err")):
+        if stream is not None:
+            stream.flush()
+            os.fsync(stream.fileno())
+            stream.close()
     save()
 sys.exit(result["exit_code"] or 0)
 '''
@@ -862,7 +874,14 @@ class DockerEnvironment:
             "argv": argv,
             "timeout": timeout,
             "status_path": self.host_to_container(status_path),
+            "stdout_path": self.host_to_container(stdout_path),
+            "stderr_path": self.host_to_container(stderr_path),
         }
+        request["request_digest"] = digest(request)
+        save(stdout_path.with_suffix(".intent.json"), {
+            "command": command, "shell": shell, "container_id": self._container_id,
+            "process_result": str(status_path), "request_digest": request["request_digest"],
+        })
         payload = base64.b64encode(json.dumps(request, ensure_ascii=False).encode("utf-8"))
         result = {
             "exit_code": None,
@@ -919,9 +938,7 @@ class DockerEnvironment:
             result.setdefault("error", f"没有有效的容器执行结果：{exc}")
             if not result["timed_out"]:
                 result["exit_code"] = None
-        (self.artifact_root / f"{status_path.stem}.host.json").write_text(
-            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        save(self.artifact_root / f"{status_path.stem}.host.json", result)
         self._execution_unknown |= bool(result.get('error') or result.get('exit_code') is None)
         return result
 

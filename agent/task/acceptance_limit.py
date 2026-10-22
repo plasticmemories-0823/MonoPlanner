@@ -1,7 +1,6 @@
 """验收额度用尽只暂停；人工批准按批增加额度，不重置历史或其他预算。"""
 
 from copy import deepcopy
-import sqlite3
 
 from langchain_core.messages import HumanMessage, message_to_dict
 
@@ -9,10 +8,6 @@ from agent.storage.records import digest
 
 
 STATUS = 'acceptance_limit_reached'
-LEGACY_REASON = 'Final candidate attempt limit reached'
-# 只兼容已审查的 main a6c3ca215d72b6335e5301a04616e9b627acf81c。
-# 不把任意旧源码或结果不明的检查点变为可执行状态。
-LEGACY_CODE_KEY = 'a4b590cf1f08116c36c959d2ce102ed9a9cd621307f62f6c6642f806ffd42e27'
 UNKNOWN = (
     'hard_interruption', 'request_pending', 'running_step', 'verification_running',
     'acceptance_running', 'assistant_running', 'web_running', 'web_request_pending',
@@ -43,17 +38,6 @@ def unsafe(state):
     ).get('stage') == 'committing'
 
 
-def is_legacy_exhausted(state):
-    result = state.get('last_result') or {}
-    return bool(
-        state.get('code_key') == LEGACY_CODE_KEY
-        and state.get('status') == 'stalled'
-        and state.get('reason') == LEGACY_REASON
-        and result.get('outcome') == 'candidate_limit_reached'
-        and result.get('final_acceptance') == {'status': 'not_run', 'reason': LEGACY_REASON}
-        and state.get('rounds') and not state.get('pending') and not unsafe(state)
-        and not (state.get('budget') or {}).get('cancelled')
-    )
 
 
 def _value(state, budget):
@@ -70,49 +54,6 @@ def _value(state, budget):
     }
 
 
-def legacy_projection(directory):
-    """应用只读核对旧原件并展示继续入口；实际恢复仍须完整内核校验。"""
-    from pathlib import Path
-    from agent.source.snapshots import _safe_file
-    from agent.storage.history import LocalHistory
-
-    directory = Path(directory)
-    if not directory.is_dir() or (directory / 'hard-interruption.json').exists():
-        return None
-    archive = None
-    try:
-        database = _safe_file(directory, Path('history.sqlite3'))
-        archive = LocalHistory(directory)
-        archive.connection = sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)
-        state = archive.load()
-        if not state or not is_legacy_exhausted(state):
-            return None
-        rounds = len(state['rounds'])
-        return _value(state, {'round_limit': rounds, 'round_increment': rounds})
-    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
-        return None
-    finally:
-        if archive is not None:
-            archive.close()
-
-
-def release_unexecuted_legacy_plan(loop):
-    """旧版已拒绝且一步未执行的候选可重新提交，不误触相同计划防空转保护。"""
-    import json
-    from pathlib import Path
-    from agent.source.snapshots import _safe_file
-
-    result = loop.state['last_result']
-    if result.get('steps'):
-        return
-    path = Path('plans') / result['plan'] / 'plan.json'
-    original = json.loads(_safe_file(loop.root, path).read_text('utf-8'))
-    if original['id'] != result['plan'] or original['plan']['kind'] != 'candidate':
-        raise ValueError('Legacy exhausted candidate identity changed')
-    fingerprint = digest([original['plan'], original['base_source']])
-    loop.state['seen_plans'] = [
-        item for item in loop.state['seen_plans'] if item != fingerprint
-    ]
 
 
 def budget(loop):

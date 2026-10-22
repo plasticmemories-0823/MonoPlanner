@@ -13,22 +13,13 @@ class ReadSources:
                 'CREATE TABLE IF NOT EXISTS read_sources (thread TEXT PRIMARY KEY, data TEXT NOT NULL)'
             )
 
-    def get(self, thread, legacy_roots=()):
+    def get(self, thread, roots=()):
         thread = self.store.thread(thread)
         with self.store.connection() as db:
             row = db.execute('SELECT data FROM read_sources WHERE thread=?', (thread,)).fetchone()
             if row:
                 return json.loads(row['data'])
-            legacy = self.store.legacy_row('read_sources', thread)
-            if legacy:
-                return json.loads(legacy['data'])
-            old = self.store.legacy_row('sessions', thread)
-            session = json.loads(old['data']) if old else {}
-            values = [
-                {'path': p, 'kind': 'directory'} for p in session.get('read_roots', legacy_roots)
-            ]
-            values.extend({'path': row['path'], 'kind': 'file'}
-                          for row in self.store.legacy_rows('desktop_files', thread))
+            values = [{'path': path, 'kind': 'directory'} for path in roots]
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='desktop_files'").fetchone():
                 values.extend(
                     {'path': r['path'], 'kind': 'file'}

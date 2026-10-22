@@ -20,14 +20,15 @@ def tokens(value):
 def corpus(tmp_path):
     documents = {}
     with Index(tmp_path / "rag.db", Scope("project", "task"), RagConfig(), tokens) as index:
-        def add(text, *, source="source:sample.py", path="sample.py", exact=True):
+        def add(text, *, source="source:sample.py", path="sample.py"):
             document = Document(source, "v1", text, kind="code", path=path)
             documents[source] = document
-            index.upsert(document, exact=exact)
+            index.upsert(document)
             return document
 
         def query(text, **kwargs):
-            return Query(text, {key: value.version for key, value in documents.items()}, **kwargs)
+            return Query(text, {key: value.version for key, value in documents.items()},
+                         **{"match": "substring", **kwargs})
 
         def retrieve(text, **kwargs):
             result = Retriever(index, tokens, read_source=lambda source, version:
@@ -69,10 +70,8 @@ def test_exact_method_hit_excludes_unrequested_class_siblings(corpus):
 def test_exact_does_not_consult_ast_or_semantic_chunk_discovery(corpus):
     _, _, add, _, retrieve = corpus
     add("class Example:\n    def function(self):\n        return 'needle'\n")
-    with patch("agent.rag.chunks._spans", side_effect=AssertionError("No structural parse")) as spans:
-        with patch("ast.parse", side_effect=AssertionError("No AST parse")) as parse:
-            body = retrieve("needle")
-    spans.assert_not_called()
+    with patch("ast.parse", side_effect=AssertionError("No AST parse")) as parse:
+        body = retrieve("needle")
     parse.assert_not_called()
     assert len(body["hits"]) == 1
 
@@ -162,7 +161,7 @@ def test_shared_source_metadata_still_verifies_citations(corpus, source, path):
     document = add("needle first\nneedle second\n", source=source, path=path)
     document = replace(document, version=document.sha256)
     documents[source] = document
-    index.upsert(document, exact=True)
+    index.upsert(document)
     body = model_result("retrieve_evidence", retrieve("needle"))
     assert len(body["sources"]) == 1 and "version" not in body["sources"][0]
     assert json.dumps(body).count(document.sha256) == 1
@@ -206,37 +205,6 @@ def test_projected_original_still_offloads_and_can_be_read_after_restart(corpus,
     assert second["hits"] == first["hits"] and second["sources"] == first["sources"]
 
 
-def test_semantic_selected_child_does_not_expand_its_parent(corpus):
-    index, documents, add, query, _ = corpus
-    text = "class Catalog:\n    def unrelated_sibling(self):\n        return 0\n"
-    text += "    # padding between independently useful methods\n" * 100
-    text += "    def wanted(self):\n        return 'precise semantic evidence'\n"
-    document = add(text, exact=False)
-    request = query("the relevant method", mode="semantic")
-    children = index.chunks(request)
-    child = next(item for item in children if "precise semantic evidence" in item.text)
-    assert (child.start, child.end) != (child.parent_start, child.parent_end)
-
-    class Vector:
-        def search(self, *_):
-            return [(child.id, 0.9)]
-
-    class Reranker:
-        def score(self, _, chunks):
-            return [0.9] * len(chunks)
-
-    result = Retriever(
-        index, tokens, vector=Vector(), reranker=Reranker(),
-        read_source=lambda source, version: documents[source].text,
-    ).retrieve(request)
-    body = json.loads(result.message)
-    assert len(body["results"]) == len(body["hits"]) == 1
-    assert "unrelated_sibling" not in body["results"][0]["text"]
-    excerpt = checked_excerpt(body, body["hits"][0], document)
-    assert (excerpt["start"], excerpt["end"], excerpt["text"]) == (
-        child.start, child.end, child.text,
-    )
-    assert "unrelated_sibling" not in excerpt["text"]
 
 
 def test_changed_original_cannot_reuse_compact_search_cursor(corpus):
@@ -245,6 +213,6 @@ def test_changed_original_cannot_reuse_compact_search_cursor(corpus):
     first = retrieve("needle", limit=1)
     changed = replace(document, version="v2", text="needle changed needle\n")
     documents[changed.source_id] = changed
-    index.upsert(changed, exact=True)
+    index.upsert(changed)
     with pytest.raises(ValueError, match="[Cc]ursor"):
         retrieve("needle", cursor=first["next_cursor"], limit=1)

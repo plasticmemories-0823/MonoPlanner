@@ -71,12 +71,9 @@ class UnifiedSearchTests(unittest.TestCase):
     def test_match_crossing_chunk_boundaries_and_late_preview_are_original(self):
         text = 'x' * 6000 + 'near-needle' + 'z' * 6000
         self.add('one', text)
-        chunks = self.index.chunks(Query('x', {'one': 'v'}))
-        # 查询包含唯一标记且长于任一块，不能靠块内 substring 偶然通过。
+        # 长查询跨越旧分块边界，必须直接从原件定位并返回完整原文。
         query = text[5000:7000]
-        self.assertTrue(all(not (chunk.start <= 5000 and chunk.end >= 7000)
-                            for chunk in chunks))
-        result = self.retrieve(query)
+        result = self.retrieve(query, match="substring")
         self.assertEqual(len(result['hits']), 1)
         hit = result['hits'][0]
         self.assertIn(query, result_text(result, hit))
@@ -95,23 +92,13 @@ class UnifiedSearchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '[Cc]ursor'):
             self.retrieve('a', cursor=first['next_cursor'], limit=1)
 
-    def test_exact_never_calls_models_and_semantic_never_uses_lexical_fallback(self):
+    def test_exact_preserves_results_and_rejects_semantic_without_fallback(self):
         self.add('one', 'literal evidence')
-        class Forbidden:
-            def search(self, *_):
-                raise AssertionError('exact loaded a vector model')
-            def score(self, *_):
-                raise AssertionError('exact loaded a reranker')
         query = Query('literal', {'one': 'v'})
-        result = Retriever(self.index, tokens, vector=Forbidden(), reranker=Forbidden(),
-                           read_source=lambda *_: self.documents['one'].text).retrieve(query)
-        self.assertTrue(result.exact_hit)
-        semantic = Retriever(self.index, tokens, read_source=lambda *_:
-                             self.documents['one'].text).retrieve(replace(query, mode='semantic'))
-        body = json.loads(semantic.message)
-        self.assertEqual(body['hits'], [])
-        self.assertEqual(body['results'], [])
-        self.assertIn('vector_unavailable', body['reasons'])
+        retriever = Retriever(self.index, tokens, read_source=lambda *_: self.documents['one'].text)
+        self.assertTrue(retriever.retrieve(query).exact_hit)
+        with self.assertRaisesRegex(ValueError, 'Search mode'):
+            retriever.retrieve(replace(query, mode='semantic'))
 
     def test_bm25_ranks_only_literal_matching_documents_before_stable_offsets(self):
         self.add('a', 'needle ' + 'filler ' * 300)
@@ -125,7 +112,7 @@ class UnifiedSearchTests(unittest.TestCase):
         self.add('one', 'aaaaa')
         cursor, starts = '', []
         for _ in range(4):
-            result = self.retrieve('aa', cursor=cursor, limit=1)
+            result = self.retrieve('aa', match='substring', cursor=cursor, limit=1)
             starts.extend(hit['match_start'] for hit in result['hits'])
             cursor = result['next_cursor']
         self.assertEqual(starts, [0, 1, 2, 3])
@@ -157,38 +144,14 @@ class UnifiedSearchTests(unittest.TestCase):
         self.assertTrue(hit['truncated'])
         self.assertTrue(result['truncated'])
 
-    def test_original_and_effective_semantic_queries_bind_the_cursor(self):
-        self.add('one', 'first text')
-        self.add('two', 'second text')
-        class Vector:
-            def search(self, query, index, limit):
-                self.query = query.text
-                return [(chunk.id, 0.9) for chunk in index.chunks(query)]
-        class Ranker:
-            def score(self, query, chunks):
-                self.query = query
-                return [0.8] * len(chunks)
-        vector, ranker = Vector(), Ranker()
-        query = Query('effective query', {'one': 'v', 'two': 'v'}, mode='semantic',
-                      original_text='  original query  ', limit=1)
-        retriever = Retriever(self.index, tokens, vector=vector, reranker=ranker,
-                              read_source=lambda source, _: self.documents[source].text)
-        first = json.loads(retriever.retrieve(query).message)
-        self.assertEqual(first['query'], '  original query  ')
-        self.assertEqual(first['effective_query'], 'effective query')
-        self.assertEqual(vector.query, 'effective query')
-        self.assertEqual(ranker.query, 'effective query')
-        with self.assertRaisesRegex(ValueError, '[Cc]ursor'):
-            retriever.retrieve(replace(query, cursor=first['next_cursor'],
-                                       original_text='original query'))
 
     def test_metadata_only_exact_search_reads_beyond_semantic_document_limit(self):
         text = 'unrelated original line\n' * 210000 + 'late needle\n'
         document = Document('large', 'v', text, path='large.txt')
-        self.assertGreater(len(text.encode()), self.index.config.max_document_bytes)
+        self.assertGreater(len(text.encode()), 4 * 1024 * 1024)
         self.documents['large'] = document
-        self.index.upsert_documents([document], exact=True)
-        self.assertEqual(self.index.stats()['chunks'], 0)
+        self.index.upsert(document)
+        self.assertEqual(self.index.stats()['documents'], 1)
         result = self.retrieve('needle')
         self.assertEqual(len(result['hits']), 1)
         self.assertIn('needle', result_text(result, result['hits'][0]))
@@ -197,19 +160,19 @@ class UnifiedSearchTests(unittest.TestCase):
         self.assertTrue(result['complete'])
         for item in result['results']:
             self.assertEqual(item['text'], text[item['start']:item['end']])
-        self.assertEqual(self.index.stats()['chunks'], 0)
+        self.assertEqual(self.index.stats()['documents'], 1)
 
     def test_metadata_only_small_source_returns_hit_without_parent_expansion(self):
         text = 'def find():\n' + '    # preserved context\n' * 200 + '    return "needle"\n'
         document = Document('code', 'v', text, kind='code', path='find.py')
         self.documents['code'] = document
-        self.index.upsert_documents([document], exact=True)
+        self.index.upsert(document)
         result = self.retrieve('needle')
         self.assertEqual(len(result['hits']), 1)
         self.assertEqual(result_text(result, result['hits'][0]), '    return "needle"')
         self.assertNotIn('preserved context', json.dumps(result))
         self.assertEqual(self.documents['code'].text, text)
-        self.assertEqual(self.index.stats()['chunks'], 0)
+        self.assertEqual(self.index.stats()['documents'], 1)
 
     def test_many_occurrences_reuse_one_current_original_while_packing(self):
         self.add('one', 'needle ' * 1000)
@@ -228,7 +191,7 @@ class UnifiedSearchTests(unittest.TestCase):
         text = 'def ' + 'f' * 2000 + '():\n    return 1\n\nneedle\n'
         document = Document('generated', 'v', text, kind='code', path='generated.py')
         self.documents['generated'] = document
-        self.index.upsert_documents([document], exact=True)
+        self.index.upsert(document)
         result = self.retrieve('needle')
         self.assertEqual(len(result['hits']), 1)
         self.assertIn('needle', result_text(result, result['hits'][0]))
@@ -236,12 +199,11 @@ class UnifiedSearchTests(unittest.TestCase):
         self.assertTrue(result['scan_complete'])
 
     def test_source_memory_admission_derives_from_shared_parent_reserve(self):
-        from agent.rag.models import GIB, WORKER_BYTES
         from agent.rag.types import (
             RAG_PARENT_MEMORY_BYTES, SourceReadBudgetExceeded,
             guard_source_read, source_read_limit,
         )
-        self.assertEqual(WORKER_BYTES + RAG_PARENT_MEMORY_BYTES, GIB)
+        self.assertEqual(RAG_PARENT_MEMORY_BYTES, 256 * 1024 * 1024)
         limit = source_read_limit()
         self.assertGreater(limit, 4 * 1024 * 1024)
         self.assertLessEqual(guard_source_read(limit), RAG_PARENT_MEMORY_BYTES)
@@ -259,7 +221,7 @@ class UnifiedSearchTests(unittest.TestCase):
         text = 'needle ' + '\u4e2d' * 100
         document = Document('one', 'v', text, path='large.txt')
         self.documents['one'] = document
-        self.index.upsert_documents([document], exact=True)
+        self.index.upsert(document)
         budget = SOURCE_FIXED_MEMORY_BYTES + SOURCE_TRANSIENT_MULTIPLIER * 150
         with patch('agent.rag.types.RAG_PARENT_MEMORY_BYTES', budget):
             result = self.retrieve('needle')
