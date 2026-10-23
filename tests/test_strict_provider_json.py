@@ -160,8 +160,8 @@ def test_real_runner_rejects_bad_json_then_continues_without_any_operation():
             )
             environment = LocalEnvironment(repo, artifact_root=root / 'runtime')
             runner = TaskRunner(model, environment, root / 'state')
-            result = runner.run([], 'Read the task input', StepBudget(max_steps=3))
-        assert result['status'] == 'task_blocked' and len(requests) == 2
+            result = runner.run([], 'Read the task input', StepBudget(max_steps=2))
+        assert result['status'] == 'budget_exhausted' and len(requests) == 2
         assert not (repo / 'must-not-exist').exists()
         messages = requests[1]['messages']
         original = next(m for m in messages if m.get('role') == 'assistant' and m.get('tool_calls'))

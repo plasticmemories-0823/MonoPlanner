@@ -58,8 +58,6 @@ def main(argv=None):
     parser.add_argument('--status', action='store_true')
     parser.add_argument('--continue', dest='continue_task', action='store_true',
                         help='明确继续原任务；成功任务复查，耗尽维度追加一批原始额度')
-    parser.add_argument('--continue-acceptance', action='store_true',
-                        help='明确批准增加一批验收轮次，从原任务断点继续')
     args = parser.parse_args(argv)
     for name in ('max_steps', 'pause_after_steps'):
         value = getattr(args, name)
@@ -85,13 +83,11 @@ def main(argv=None):
     old = _history(folder)
     if args.continue_task and job is None:
         parser.error('Continue requires an existing task')
-    if (args.continue_task or args.continue_acceptance) and (args.find is not None or args.status):
+    if args.continue_task and (args.find is not None or args.status):
         parser.error('Continuation cannot be combined with read-only queries')
-    from agent.task import acceptance_limit
+    from agent.application import legacy_stop
 
-    limit = acceptance_limit.public(old or {})
-    if args.continue_acceptance and not (limit or {}).get('active'):
-        parser.error('当前任务不处于可批准增加验收额度的暂停状态。')
+    limit = legacy_stop.public(old or {})
     if args.find is not None or args.status:
         if old is None:
             parser.error('No existing indexed task at this path')
@@ -115,7 +111,7 @@ def main(argv=None):
             'settings': Preferences().defaults(), 'public_conversation': [],
             'execution_binding': workspace_binding(str(repo)),
             'verify_command': args.verify_command, 'acceptance': args.acceptance,
-            'budget': {'max_steps': args.max_steps or 1000},
+            'budget': {'max_steps': args.max_steps},
             'pause_after_steps': args.pause_after_steps,
         }
         if args.requirements:
@@ -148,7 +144,7 @@ def main(argv=None):
         parser.error('已有任务额度只能用 --continue 按批追加，不能替换原始限额。')
     # 步数暂停是本次调用的调试边界，不在下次显式续跑时重复触发。
     invocation['pause_after_steps'] = args.pause_after_steps
-    if args.continue_acceptance or (args.continue_task and (limit or {}).get("active")):
+    if args.continue_task and (limit or {}).get("active"):
         controls = [{'id': uuid.uuid5(uuid.UUID(job['task_id']), limit['pause_id']).hex, 'kind': 'resume',
                      'acceptance_pause_id': limit['pause_id']}]
     elif (limit or {}).get('active'):

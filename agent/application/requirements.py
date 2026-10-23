@@ -45,7 +45,14 @@ def latest(store, conversation):
 
 def work_for_proposal(store, conversation, proposal_id):
     """确认按钮即使换了命令 ID，也不能再次启动同一份已消费方案。"""
+    controls = store.commands(conversation=conversation,
+                              states=('pending', 'running', 'applied', 'unknown', 'failed', 'deferred'))
     for work in store.work_for_conversation(conversation):
+        if work['kind'] == 'existing' and any(
+            row['id'] == work['input_id'] and row['kind'] == 'confirm_work'
+            and row['value'].get('proposal_id') == proposal_id for row in controls
+        ):
+            return work
         value = work.get("confirmed_requirements") or {}
         if value.get("confirmation", {}).get("proposal_id") == proposal_id:
             return work
@@ -118,6 +125,8 @@ def prepare(store, conversation, command, *, project_path, create, request_messa
         "prepared_after": command["id"],
         "withdrawals": removed,
     }
+    from agent.acceptance.capabilities import require_targets
+    require_targets(proposal['targets'], repo=location['repo'], root=store.root)
     identifier = digest(proposal)
     path = store.root / "work-proposals" / conversation / (identifier + ".json")
     if path.exists():
@@ -138,6 +147,9 @@ def prepare(store, conversation, command, *, project_path, create, request_messa
                       "输入构造：" + (target["setup"] or "无额外构造")]
         if target["required_values"]:
             lines.append("必须执行的输入：" + json.dumps(target["required_values"], ensure_ascii=False))
+    if any(target['target_runtime'] == 'wine-cmd' for target in proposal['targets']):
+        lines += ["", "验收环境：Wine CMD 兼容环境。只验证实际执行的分支及隔离测试；"
+                  "不代表原生 Windows 服务、注册表、权限或真实系统盘清理已经验证。"]
     lines += ["", "点击下方确认按钮后按这些要求开始；也可以先在聊天中修改方案。"]
     store.publish(conversation, "work-proposal:" + identifier, "\n".join(lines), source="work_proposal")
     return {"status": "awaiting_confirmation", "proposal_id": identifier,
@@ -188,6 +200,8 @@ def accept(store, conversation, command, proposal_id, project_path, create):
         if current and current["confirmation"]["id"] == command["id"]:
             return current, proposal["request"]
         raise ValueError("Requirement proposal is stale after a newer confirmed change")
+    from agent.acceptance.capabilities import require_targets
+    require_targets(proposal['targets'], repo=Path(store.get(conversation)['repo']) / project_path, root=store.root)
     originals = source_messages(store, conversation, [row["id"] for row in proposal["sources"]])["sources"]
     if any(a["text"] != b["text"] for a, b in zip(originals, proposal["sources"])):
         raise ValueError("Original requirement messages changed after proposal")

@@ -25,18 +25,32 @@ export async function requestJson<T>(
   url: string,
   init: RequestInit = {},
   fetcher: typeof fetch = fetch,
+  timeoutMs = 15_000,
 ): Promise<T> {
   const signal = init.signal
-    ? AbortSignal.any([init.signal, AbortSignal.timeout(15_000)])
-    : AbortSignal.timeout(15_000);
-  const response = await fetcher(url, { ...init, signal, cache: "no-store" });
-  const value = await response.json();
-  if (!response.ok) {
-    const fault = readStorageFailure(value.storage_error);
-    if (fault) throw new StorageRequestError(fault);
-    throw new Error(value.error || value.detail || "本地服务暂时不可用，请保留输入并重新连接。");
+    ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
+    : AbortSignal.timeout(timeoutMs);
+  try {
+    const response = await fetcher(url, { ...init, signal, cache: "no-store" });
+    const value = await response.json();
+    if (!response.ok) {
+      const fault = readStorageFailure(value.storage_error);
+      if (fault) throw new StorageRequestError(fault);
+      throw new Error(value.error || value.detail || "本地服务暂时不可用，请保留输入并重新连接。");
+    }
+    return value as T;
+  } catch (cause) {
+    if (!init.signal?.aborted && cause instanceof Error && cause.name === "TimeoutError") {
+      const readOnly = ["GET", "HEAD"].includes((init.method || "GET").toUpperCase());
+      throw new Error(
+        readOnly
+          ? "读取本地记录超时，已有内容仍保留。请重新连接读取，不会重新执行任务。"
+          : "请求结果尚未确认，输入和记录仍保留。请重新连接核对，不会自动重发。",
+        { cause },
+      );
+    }
+    throw cause;
   }
-  return value as T;
 }
 
 type EventConnection = {

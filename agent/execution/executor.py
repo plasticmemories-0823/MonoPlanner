@@ -124,7 +124,19 @@ class OperationExecutor:
             if relative.as_posix() not in self.inventory():
                 raise ValueError("Path is absent or excluded from the source inventory")
             base = self.environment.repo_root
-        path = _safe_file(base, relative)
+        try:
+            path = _safe_file(base, relative)
+        except FileNotFoundError:
+            archive = getattr(self, 'archive', None)
+            if name.startswith('$record/') and archive is not None:
+                registered = archive.find('', limit=1, prefix=relative.as_posix())
+                if not any(row['path'] == relative.as_posix() for row in registered):
+                    raise ValueError(
+                        'Record not found and not registered: ' + relative.as_posix()
+                        + '. Use the exact record references returned by tools or search '
+                        'the authorized record scope; do not invent filenames.'
+                    ) from None
+            raise
         from agent.model.tool_payloads import readable
 
         payload = readable(name, getattr(self, 'archive', None))

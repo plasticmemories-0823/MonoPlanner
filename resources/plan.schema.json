@@ -2,6 +2,7 @@
   "additionalProperties": false,
   "properties": {
     "kind": {
+      "description": "inspect investigates; candidate submits work for actual acceptance. blocked reports an unverified obstacle and receives rework feedback; it cannot pause or complete the task.",
       "enum": [
         "inspect",
         "candidate",
@@ -49,10 +50,10 @@
           },
           "mode": {
             "description": "One case-sensitive literal substring query. Preserve whitespace and repeated text; BM25 ranks matching files automatically.",
-            "type": "string",
             "enum": [
               "exact"
-            ]
+            ],
+            "type": "string"
           },
           "intent": {
             "enum": [
@@ -119,6 +120,7 @@
       "type": "array"
     },
     "test_code": {
+      "description": "Complete Python unittest source with actual newline characters. Do not wrap the entire test module in exec/eval of an encoded string: test attribution must retain real source locations. The test file is outside the project; locate the real repository from cwd, not from the test file __file__.",
       "type": "string"
     },
     "test_driver": {
@@ -128,7 +130,7 @@
       "type": "array"
     },
     "execution_checks": {
-      "description": "Required for first generated acceptance: artifact type, real entry and consuming runtime. [] only for inspection, fixed user commands, or reuse of frozen checks. Every declaration must compile or syntax-check and then execute its real artifact. Invocation-only call and unchecked executable consumers are not supported. No task-name detection or self-reported pass.",
+      "description": "Required for first generated acceptance: artifact type, real entry and consuming runtime. [] only for inspection, fixed user commands, or reuse of frozen checks. Compile/syntax-check and execute the actual artifact. Wine CMD instead parses and executes the unchanged BAT/CMD once; only exercised paths are validated in compatibility mode. Invocation-only call and unchecked executable consumers are not supported. No task-name detection or self-reported pass.",
       "items": {
         "additionalProperties": false,
         "properties": {
@@ -175,7 +177,8 @@
               "",
               "python",
               "node",
-              "shell"
+              "shell",
+              "wine-cmd"
             ],
             "type": "string"
           },

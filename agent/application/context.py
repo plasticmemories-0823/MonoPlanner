@@ -12,16 +12,31 @@ from agent.model.errors import ModelRequestNotSent
 from agent.model.payload import estimate_input_tokens
 
 
+CHAT_INTERFACE_REVISION = 6
+
+
 def prepare_chat(store, conversation, rules, history, model, tools, configuration_revision=0):
     """传入完整原件，返回经过校验的请求消息；摘要永远只改变独立请求视图。"""
     state = store.context(conversation)
     originals = [item[1] for item in history]
+    if state.get('request_pending'):
+        raise ModelRequestNotSent('model_request_unknown',
+                                  'Saved summary request has no confirmed result; it was not retried.')
+    old_interface = state.get('interface_revision', 1 if state.get('rules') else CHAT_INTERFACE_REVISION)
+    if type(old_interface) is not int or not 1 <= old_interface <= CHAT_INTERFACE_REVISION:
+        raise ModelRequestNotSent('context_prefix_changed', 'Unsupported future chat interface revision')
+    # 先核验原文与旧摘要，再因明确的应用接口版本升级新建请求视图；不改历史。
+    state['history'] = originals
+    compaction.guard_archive(state)
+    if state.get('context_view'):
+        compaction.history(state, store.root / 'application-records' / conversation / 'context')
     old_revision = state.get('configuration_revision', 0)
-    if configuration_revision != old_revision:
+    if configuration_revision != old_revision or old_interface != CHAT_INTERFACE_REVISION:
         if configuration_revision < old_revision:
             raise ModelRequestNotSent('context_prefix_changed', 'Chat settings revision moved backwards')
         # 用户明确变更设置时开启新请求视图；旧摘要文件和全部原件依然保留。
         state.setdefault('prior_views', []).append({
+            'interface_revision': old_interface, 'rules': state.get('rules'),
             'configuration_revision': old_revision, 'context_view': state.get('context_view'),
             'last_admission': state.get('last_admission'),
         })
@@ -31,14 +46,12 @@ def prepare_chat(store, conversation, rules, history, model, tools, configuratio
     if state.get('rules') and state['rules'] != rules:
         raise ModelRequestNotSent('context_prefix_changed',
                                   'Chat settings changed; start a new conversation for new settings.')
-    if state.get('request_pending'):
-        raise ModelRequestNotSent('model_request_unknown',
-                                  'Saved summary request has no confirmed result; it was not retried.')
     if compaction.balanced_boundaries(originals)[-1] != len(originals):
         raise ModelRequestNotSent('invalid_message_history',
                                   'A saved tool call still has no confirmed result.')
     state.update(history=originals, rules=rules, status='chat', source=None)
     state['configuration_revision'] = configuration_revision
+    state['interface_revision'] = CHAT_INTERFACE_REVISION
     if 'request' not in state:
         state.update(request=next((raw['data']['content'] for raw in originals
                                    if raw['type'] == 'human'), ''),

@@ -110,7 +110,7 @@ class NativeContinuationTests(unittest.TestCase):
                              recovery_id='explicit-web-continue')
         with patch('agent.execution.web.WebProvider.search', side_effect=AssertionError('replayed')):
             result = resumed.run([], 'value returns 4', StepBudget(max_steps=10))
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(resumed.budget.unknown_service_cost_micros, 5000)
         self.assertEqual(resumed.budget.inflight_service_cost_micros, 0)
         self.assertEqual(resumed.budget.used_steps, 2)
@@ -131,7 +131,7 @@ class NativeContinuationTests(unittest.TestCase):
         resumed = self.loop([{'kind': 'blocked', 'note': 'Further investigation'}],
                             state_dir=directory, recovery_id='human-continue')
         result = resumed.run([], 'value returns 4', StepBudget(max_steps=10))
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'task_cancelled')
         self.assertEqual(resumed.state['continuation_history'][0]['cancel_reason'],
                          'User stopped this task')
         self.assertEqual(resumed.budget.used_steps, 1)
@@ -168,7 +168,7 @@ class NativeContinuationTests(unittest.TestCase):
         directory = self.root / 'state'
         first = self.loop([{'kind': 'blocked', 'note': 'Proof not found yet'}], state_dir=directory)
         result = first.run([], 'value returns 4', StepBudget(max_steps=10))
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'task_cancelled')
         original = deepcopy(first.state['history'])
         second = self.loop([{'kind': 'blocked', 'note': 'A new investigation stopped'}],
                            state_dir=directory, control_source=lambda: [{'id': 'continue-1', 'kind': 'resume'}])
@@ -275,7 +275,7 @@ def test_preparation_failure_can_be_repaired_without_deleting_original(tmp_path)
         result = bridge.run_work(job, lambda *_: None,
                                  lambda: [{'id': 'retry-prepare', 'kind': 'resume'}],
                                  root=root, model=model, environment_factory=OfflineEnvironment)
-    assert result['status'] == 'task_blocked'
+    assert result['status'] == 'task_cancelled'
     assert len(model.calls) == 1 and prepare.call_args.kwargs['retry'] is True
     assert any(p.read_bytes() == original for p in failure.parent.glob('preparation-failures/*.json'))
 

@@ -42,9 +42,9 @@ async def project_environment(request: Request):
                 not isinstance(value, dict)
                 or set(value) != {'repo', 'action'}
                 or not isinstance(value['repo'], str)
-                or value['action'] not in {'prepare', 'automatic', 'cancel'}
+                or value['action'] not in {'prepare', 'automatic', 'cancel', 'install_wine'}
             ):
-                raise ValueError('请选择准备环境、自动模式或取消')
+                raise ValueError('请选择准备环境、安装 Wine、自动模式或取消')
             if value['action'] != 'cancel':
                 get_service().ensure_dispatch_available()
             if value['action'] == 'automatic':
@@ -56,9 +56,9 @@ async def project_environment(request: Request):
                     if value['action'] != 'cancel':
                         get_service().ensure_dispatch_available()
                     service = jobs()
-                    return (service.retry if value['action'] == 'prepare' else service.cancel)(
-                        value['repo']
-                    )
+                    action = {'prepare': 'retry', 'install_wine': 'install_wine',
+                              'cancel': 'cancel'}[value['action']]
+                    return getattr(service, action)(value['repo'])
 
                 result = await asyncio.to_thread(change)
         return JSONResponse(result, headers={'Cache-Control': 'no-store'})

@@ -231,12 +231,12 @@ class LocalRepairTests(unittest.TestCase):
         result = self.run_replies([f.reply(plan), wrong, correct])
         self.assertEqual(result["status"], "verified_success", result)
 
-    def test_duplicate_inspection_still_stops_without_reexecution(self):
+    def test_duplicate_inspection_is_rejected_without_reexecution(self):
         plan = {"kind": "inspect", "note": "Read the same source", "steps": [
             {"id": "read", "op": "read", "path": "sample.py"},
         ]}
         result = self.run_replies([f.reply(plan), f.reply(plan)])
-        self.assertEqual(result["status"], "stalled", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertEqual(self.load_state()["plan_count"], 1)
         self.assertEqual(len(list((self.root / "state/plans/p0001").glob("*/result.json"))), 1)
 
@@ -370,7 +370,7 @@ class LocalRepairTests(unittest.TestCase):
                 f.reply({"kind": "blocked", "note": "actual failure"}),
             ]
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertEqual(result["rounds"][0]["verification"]["status"], "failed")
         self.assertIn("AssertionError", str(self.model.calls[4]))
         self.assertEqual(
@@ -423,7 +423,7 @@ class LocalRepairTests(unittest.TestCase):
         result = self.engine.run(
             [], "Fix the requested function", StepBudget(max_steps=4)
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         notice = json.loads(self.model.calls[2][-1].content.split("] ", 1)[1].split("\n", 1)[0])
         self.assertEqual(notice["allowed_paths"], ["/note", "/test_code", "/test_driver"])
         for text in ("1600", "test_driver", "独立预期"):
@@ -464,7 +464,7 @@ class LocalRepairTests(unittest.TestCase):
         result = self.engine.run(
             [], "Fix the requested function", StepBudget(max_steps=4)
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         notice = self.model.calls[2][-1].content
         self.assertIn("1600", notice)
         self.assertIn("test_driver", notice)

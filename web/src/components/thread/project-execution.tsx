@@ -28,7 +28,7 @@ export function CurrentProject({
       aria-label="当前项目"
     >
       <summary className="text-muted-foreground cursor-pointer break-all">
-        当前项目：<span title={repo}>{repo}</span>
+        当前项目：<span title={repo}>{repo}</span> · 环境配置
       </summary>
       {open &&
         (readOnly ? (
@@ -232,6 +232,27 @@ function ProjectEnvironmentCard({ apiUrl, repo }: { apiUrl: string; repo: string
           </ul>
         </details>
       )}
+      <div className="mt-3 space-y-2 border-t pt-3" aria-label="Wine CMD 环境">
+        <p className="font-medium">Windows 批处理（.bat / .cmd）</p>
+        <p className="text-muted-foreground text-xs leading-5">
+          在 Docker 中安装 Wine CMD 兼容环境，由程序下载和检查，不调用模型，也不安装到本机系统。
+          只验证实际执行的批处理分支，不代表原生 Windows 的服务、注册表、权限或系统盘清理已经验证。
+        </p>
+        <p className="text-muted-foreground text-xs" role="status">
+          {status?.wine_cmd
+            ? ready ? "Wine CMD 已就绪" : preparing ? "正在准备 Wine CMD 环境…" : "Wine CMD 尚未准备完成"
+            : automatic ? "当前项目尚未配置 Wine CMD。" : "手动环境请使用已有 Wine 镜像，或先改为自动准备。"}
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={busy || preparing || !status || !automatic || (status.wine_cmd && ready)}
+          onClick={() => void monitor.current?.change("install_wine")}
+        >
+          {status?.wine_cmd && ready ? "Wine 已安装" : status?.wine_cmd && failed ? "重试安装 Wine" : "安装 Wine"}
+        </Button>
+      </div>
       <details
         className="mt-3 border-t pt-3"
         open={advanced}

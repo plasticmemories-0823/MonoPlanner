@@ -11,7 +11,6 @@ from agent.acceptance.final import verify_final
 from agent.acceptance import revisions
 from agent.storage.records import digest, save
 from agent.model.errors import ModelInterrupted, ModelRequestNotSent
-from agent.task import acceptance_limit
 
 
 def pending_phase(pending):
@@ -50,8 +49,6 @@ def _execute_pending(self):
             if self.state["verification"]["status"] == "passed"
             else "verification_failed"
         )
-    if plan.kind == "candidate" and acceptance_limit.exhausted(self):
-        return acceptance_limit.pause(self)
     prior = {r["id"]: r for r in pending["rows"]}
     while pending["cursor"] < len(plan.steps):
         dispatch = getattr(self, "_task_dispatch", None)
@@ -169,8 +166,6 @@ def final_acceptance(self):
     if dialogue.apply_controls(self):
         return
     guard(self, self.state.get("verification_spec"))
-    if acceptance_limit.exhausted(self):
-        return acceptance_limit.pause(self)
     pending = self.state["pending"]
     folder = self.root / "feedback" / pending["id"]
     attempt = self.state.get("verification_attempt", 0)
@@ -240,11 +235,6 @@ def finish_plan(self, outcome):
         "plan": pending["id"],
         "steps": [{k: v for k, v in r.items() if k != "cache_key"} for r in pending["rows"]],
     }
-    if outcome == "candidate_limit_reached":
-        result["final_acceptance"] = {
-            "status": "not_run",
-            "reason": "Final candidate attempt limit reached",
-        }
     if outcome.startswith("verification") or outcome == "verified_success":
         report = self.state["verification"]
         result["verification"] = {
@@ -288,8 +278,6 @@ def finish_plan(self, outcome):
     )
     status = "verified_success" if outcome == "verified_success" else "needs_plan"
     reason = "Fixed final acceptance passed" if outcome == "verified_success" else outcome
-    if outcome == "candidate_limit_reached":
-        status, reason = "stalled", result["final_acceptance"]["reason"]
     self.state.update(
         last_plan=pending["id"],
         last_result=result,
@@ -297,6 +285,4 @@ def finish_plan(self, outcome):
         status=status,
         reason=reason,
     )
-    if outcome == "verification_failed" and acceptance_limit.exhausted(self):
-        acceptance_limit.pause(self, persist=False)
     self.persist("plan_finished", {"plan": self.state["last_plan"], "outcome": outcome})

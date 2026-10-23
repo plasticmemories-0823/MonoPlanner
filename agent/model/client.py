@@ -50,7 +50,7 @@ class ConfiguredModel:
         }
         if self.policy.reasoning_effort != 'none':
             options['reasoning_effort'] = self.policy.reasoning_effort
-        if self.purpose == "compaction":
+        if self.purpose in {"compaction", "progress_final"}:
             options["tool_choice"] = "none"
         return options
 

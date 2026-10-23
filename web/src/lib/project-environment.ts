@@ -7,6 +7,7 @@ export type ProjectEnvironment = {
   message: string;
   updated_at?: string;
   error?: string;
+  wine_cmd?: boolean;
   environment?: ProjectBinding;
   details?: string[];
   projects?: { path: string; language: string; manager: string }[];
@@ -55,7 +56,7 @@ export class ProjectEnvironmentMonitor {
     return this.request(undefined, undefined, verify);
   }
 
-  change(action: "prepare" | "automatic" | "cancel") {
+  change(action: "prepare" | "automatic" | "cancel" | "install_wine") {
     return this.mutate("/workspace/environment", { repo: this.repo, action });
   }
 

@@ -128,7 +128,7 @@ class EvidenceAcceptanceFlow(unittest.TestCase):
             return f.reply({'kind': 'blocked', 'note': 'fixed command was preserved'})
 
         result = self.run_replies(self.initial() + [blocked])
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'task_cancelled')
 
     def test_correction_does_not_hide_unchanged_failure(self):
         extra = '\n    def test_unchanged(self):\n        self.assertEqual(value(), 5)\n'
@@ -137,7 +137,7 @@ class EvidenceAcceptanceFlow(unittest.TestCase):
             f.reply(self.candidate(test_code='')),
             f.reply({'kind': 'blocked', 'note': 'Unchanged check still fails'}),
         ])
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'task_cancelled')
         self.assertEqual(result['verification']['status'], 'failed')
         self.assertIn('test_unchanged', str(result['verification']))
 
@@ -148,7 +148,7 @@ class EvidenceAcceptanceFlow(unittest.TestCase):
             f.reply(self.candidate(test_code='')),
             f.reply({'kind': 'blocked', 'note': 'Unchanged setup still fails'}),
         ])
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         data = self.comparison(result)
         self.assertIn(setup, data['versions'][0]['effective_spec']['test_code'])
         self.assertNotEqual(data['versions'][0]['effective_candidate']['status'], 'passed')

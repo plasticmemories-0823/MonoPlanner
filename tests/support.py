@@ -72,7 +72,18 @@ def boundary_aware_reply(model, messages, produce):
     if pending is not None:
         model._boundary_candidate = None
         return pending
-    result = produce()
+    try:
+        result = produce()
+    except StopIteration:
+        # 固定离线序列结束后显式取消，不再借用模型 blocked 冒充程序停止。
+        # 未产生模型响应，不把这次夹具边界记成一次已发送请求。
+        from agent.model.errors import ModelRequestNotSent
+
+        if getattr(model, 'calls', []) and model.calls[-1] is messages:
+            model.calls.pop()
+        raise ModelRequestNotSent(
+            'task_cancelled', 'Offline fixture completed; further calls explicitly cancelled',
+        ) from None
     calls = getattr(result, "tool_calls", [])
     invalid = getattr(result, "invalid_tool_calls", [])
     candidate = (

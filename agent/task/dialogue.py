@@ -51,12 +51,13 @@ def publish(loop, response):
 def accept_text(loop, response):
     loop.state['history'].append(response)
     publish(loop, response)
-    active = bool(loop.state['plan_count'] or loop.state.get('acceptance_draft'))
-    loop.state.update(
-        response_pending=None,
-        status='awaiting_user' if active else 'chat_complete',
-        reason='Text reply does not establish actual acceptance',
-    )
+    loop.state['history'].append(message_to_dict(HumanMessage(
+        content='Text alone does not complete the coding task. Continue investigating or '
+                'submit the next valid work tool call. Only actual acceptance can establish '
+                'success; retain the original requirements and all safety boundaries.',
+    )))
+    loop.state.update(response_pending=None, status='needs_plan',
+                      reason='Text reply retained; executable work is still required')
     loop.persist('text_reply_saved')
 
 
@@ -87,21 +88,6 @@ def apply_controls(loop):
     for control in loop.control_source():
         applied = loop.state.setdefault('applied_inputs', [])
         if control['id'] in applied:
-            continue
-        from agent.task import acceptance_limit
-
-        if acceptance_limit.active(loop.state):
-            if control['kind'] == 'resume':
-                acceptance_limit.resume_validated(loop)
-            elif control['kind'] == 'pause':
-                applied.append(control['id'])
-                loop.state['pause_requested'] = True
-                loop.persist('paused', {'id': control['id']})
-            # 补充或普通消息不能暗中批准新的验收额度。
-            continue
-        if control['kind'] == 'resume' and control.get('acceptance_pause_id'):
-            applied.append(control['id'])
-            loop.persist('acceptance_continue_stale', {'id': control['id']})
             continue
         if control['kind'] == 'message':
             if loop.state.get('pending'):
@@ -142,7 +128,13 @@ def apply_controls(loop):
             )
             changed = True
         elif control['kind'] == 'pause':
-            loop.state.update(status='paused', reason='User requested pause', pause_requested=True)
+            from agent.task.control import system_identity, reason
+            cause = {'kind': 'pause', 'identity': control['id'],
+                     'source': 'system' if system_identity(control['id']) else 'user'}
+            loop.state['interruption'] = {'kind': 'pause', 'causes': [cause]}
+            loop.state.update(status='paused', pause_requested=True,
+                              reason=reason('pause', [cause]) if cause['source'] == 'system'
+                              else 'User requested pause')
             changed = True
         elif control['kind'] == 'resume':
             loop.state.update(

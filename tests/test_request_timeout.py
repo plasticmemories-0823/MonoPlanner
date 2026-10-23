@@ -51,10 +51,10 @@ def test_actual_work_request_obeys_configured_timeout(tmp_path, task_seconds):
         model, LocalEnvironment(repo, artifact_root=tmp_path / 'runtime'),
         state_dir=tmp_path / 'state',
     ).run([], 'Inspect only.', StepBudget(timeout_seconds=task_seconds))
-    assert result['status'] == 'task_blocked'
+    assert result['status'] == 'task_cancelled'
     assert len(model.calls) == 1
     if task_seconds is None:
-        assert calls and all(purpose == 'plan' and timeout == 180 for purpose, timeout in calls)
+        assert calls and all(purpose in {'plan', 'plan_repair'} and timeout == 180 for purpose, timeout in calls)
     else:
-        assert calls and all(purpose == 'plan' and 0 < timeout <= task_seconds
+        assert calls and all(purpose in {'plan', 'plan_repair'} and 0 < timeout <= task_seconds
                              for purpose, timeout in calls)

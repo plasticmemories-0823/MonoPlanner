@@ -127,7 +127,8 @@ def read_file(**kwargs) -> dict:
 
 @tool(args_schema=ASSISTANT_SCHEMA['run_existing'])
 def run_existing(**kwargs) -> dict:
-    """Run an existing CURRENT PROJECT script, module:local.module or package.json#script using argv.
+    """Propose running an existing CURRENT PROJECT script, module:local.module or package.json#script using argv.
+    Chat requires the displayed human confirmation before execution; status questions are read-only.
     The program prepares declared project dependencies before first execution.
     No inline code, generated scripts, apps or arbitrary installer commands. Supply timeout seconds;
     usage_file='' unless the task writes an explicit usage JSON. Failure requires user-requested repair.

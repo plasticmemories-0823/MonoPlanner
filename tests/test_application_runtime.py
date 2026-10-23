@@ -678,8 +678,14 @@ def test_progress_pages_do_not_skip_facts_beyond_fifty(setup):
     store.progress_pending(task, sequences[-1])
     scheduler = Scheduler(store)
     batches = []
-    scheduler.chatbot.progress = lambda _conversation, facts: (
-        batches.append(facts) or {'output': '已读取真实工作事实'})
+    original_facts = scheduler.chatbot.work_facts
+
+    def collect(*args, **kwargs):
+        facts = original_facts(*args, **kwargs)
+        batches.append(facts)
+        return facts
+
+    scheduler.chatbot.work_facts = collect
     first = store.reserve_progress(now=100)
     scheduler._report(first)
     second = store.reserve_progress(now=131)

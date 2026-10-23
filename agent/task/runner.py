@@ -38,7 +38,6 @@ class TaskRunner:
         environment,
         artifacts_root=None,
         *,
-        max_rounds=3,
         task_token_limit=None,
         task_timeout=7200,
         state_dir=None,
@@ -56,18 +55,12 @@ class TaskRunner:
         confirmed_requirements=None,
         recovery_id=None,
     ):
-        if type(max_rounds) is not int or max_rounds <= 0:
-            raise ValueError("max_rounds must be a positive integer")
         self.interactive, self.yield_boundary = interactive, yield_boundary
         self.event_sink, self.control_source = event_sink, control_source
         self.model, self.environment = model, environment
         self.artifacts_root = Path(artifacts_root or Path.home() / ".local/state/task")
         self.explicit_state = Path(state_dir).resolve() if state_dir else None
-        self.max_rounds, self.task_token_limit, self.task_timeout = (
-            max_rounds,
-            task_token_limit,
-            task_timeout,
-        )
+        self.task_token_limit, self.task_timeout = task_token_limit, task_timeout
         self.pause_after_steps = pause_after_steps
         self.steps_this_invocation = 0
         self.state = {}
@@ -265,6 +258,7 @@ class TaskRunner:
                 'request_sent': exc.sent,
                 'usage': 'unknown' if exc.sent else 'not_sent',
                 'partial_output_executable': False,
+                'causes': control.current().diagnostics() if control.current() else [],
             }
             if live:
                 live.finish(ending)
@@ -550,11 +544,10 @@ class TaskRunner:
         fingerprint = digest([plan.model_dump(), self.evidence.current,
                               (self.state.get("requirements") or {}).get("digest")])
         if fingerprint in self.state["seen_plans"]:
-            self.state.update(
-                status="stalled",
-                reason="Identical plan for identical source repeated; no new decision",
+            raise ValueError(
+                "Identical plan for identical source was already processed. No operations "
+                "were replayed. Inspect its saved result and submit a corrected plan."
             )
-            return
         self.state["seen_plans"].append(fingerprint)
         number = self.state["plan_count"] + 1
         name = "p%04d" % number
@@ -695,9 +688,6 @@ class TaskRunner:
             "repair_count": 0,
             "plan_error": "",
             "rounds": [],
-            "acceptance_budget": {
-                "round_increment": self.max_rounds, "round_limit": self.max_rounds,
-            },
             "seen_plans": [],
             "pending": None,
             "running_step": None,
@@ -726,12 +716,15 @@ class TaskRunner:
         return False
 
     def on_model_interrupted(self, kind, *, sent=True):
+        causes = control.current().diagnostics() if control.current() else []
+        self.state['interruption'] = {'kind': kind, 'causes': causes}
+        reason = control.reason(kind, causes)
         # 纯边界暂停没有半截模型回复，不能改动已保存检查点的历史前缀。
         if sent:
             self.state['history'].append(
                 message_to_dict(
                     HumanMessage(
-                        content='The user interrupted the previous model request. Its partial reply was not submitted or executed. '
+                        content='The previous model request was interrupted by a control signal. Its partial reply was not submitted or executed. '
                         'Use completed records and the latest user requirements; do not replay completed operations.'
                     )
                 )
@@ -740,11 +733,11 @@ class TaskRunner:
         self.state.pop('turn_status', None)
         self.state.update(
             status='needs_plan' if kind == 'message' else 'paused',
-            reason='User interrupted model reply',
+            reason=reason,
             pause_requested=kind == 'pause',
         )
         dialogue.apply_controls(self)
-        self.persist('model_wait_interrupted', {'kind': kind})
+        self.persist('model_wait_interrupted', self.state['interruption'])
 
     # ========================================================================
     # 结果汇总与验证证据
@@ -761,14 +754,12 @@ class TaskRunner:
         report = f"{self.state['status']}: {self.state.get('reason', '')}"
         from agent.storage.usage import summarize
         from agent.task.output_limit import public as public_limit
-        from agent.task.acceptance_limit import public as public_acceptance_limit
 
         outcome = {
             "status": self.state["status"],
             "stop_reason": self.state.get("reason", ""),
             'pause_requested': self.state.get('pause_requested', False),
             'output_limit': public_limit(self.state),
-            'acceptance_limit': public_acceptance_limit(self.state),
             'continuation': self.state.get('continuation'),
             'usage': summarize(self.state),
             'existing_runs': self.state.get('existing_runs', []),

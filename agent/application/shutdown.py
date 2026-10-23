@@ -79,7 +79,7 @@ class Shutdown:
     def __init__(self, scheduler):
         self.scheduler = scheduler
         self.lock = Lock()
-        self.identity = str(uuid.uuid4())
+        self.identity = 'shutdown-' + uuid.uuid4().hex
         self.started = False
         self.finished = Event()
         self.pending = set()

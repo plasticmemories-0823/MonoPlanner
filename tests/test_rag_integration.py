@@ -70,7 +70,7 @@ def test_work_tool_reaches_next_request_after_original_and_preserves_pairing(pro
                       state_dir=tmp_path / 'tasks' / 'current', overlap_preparation=False,
                       user_request_id='one-user-request')
     result = loop.run([], 'Find the answer function', StepBudget(max_steps=5))
-    assert result['status'] == 'task_blocked' and len(model.calls) == 2
+    assert result['status'] == 'task_cancelled' and len(model.calls) == 2
     tool = next(item for item in model.calls[1] if isinstance(item, ToolMessage))
     assert tool.name == 'submit_plan' and tool.tool_call_id == 'read-evidence'
     payload = json.loads(tool.content)
@@ -140,7 +140,7 @@ def test_resume_saved_result_preserves_prefix_and_original_tool_id(project, tmp_
     model = ScriptedModel([blocked()])
     resumed = TaskRunner(model, environment, state_dir=root, overlap_preparation=False)
     result = resumed.run([], 'Find answer', StepBudget(max_steps=5))
-    assert result['status'] == 'task_blocked' and len(model.calls) == 1
+    assert result['status'] == 'task_cancelled' and len(model.calls) == 1
     assert resumed.state['history'][:len(prefix)] == prefix
     tool = next(item for item in model.calls[0] if isinstance(item, ToolMessage))
     assert tool.tool_call_id == 'read-evidence' and 'answer' in tool.content
@@ -255,13 +255,13 @@ def test_work_citation_audit_preserves_response_and_does_not_reject_plan(project
     model = CitingModel([])
     loop = TaskRunner(model, LocalEnvironment(project, artifact_root=tmp_path / 'runtime'),
                       state_dir=tmp_path / 'tasks' / 'citing', overlap_preparation=False)
-    result = loop.run([], 'Find answer', StepBudget(max_steps=5))
-    assert result['status'] == 'task_blocked' and len(model.calls) == 2
+    result = loop.run([], 'Find answer', StepBudget(max_steps=2))
+    assert result['status'] == 'budget_exhausted' and len(model.calls) == 2
     checks = json.loads((loop.root / loop.state['citation_checks']['record']).read_text('utf-8'))
     assert [item['status'] for item in checks['checks']] == ['source_verified', 'unverified']
     assert checks['critical_claim_detection'] == 'not_automated'
     assert json.loads((loop.root / 'requests/call-0002/response.json').read_text('utf-8')) == model.original
-    assert loop.state['repair_count'] == 0
+    assert loop.state['repair_count'] == 1  # blocked 报告得到返工反馈，引用审计没有拒绝工具调用。
 
 
 def test_citation_marker_cannot_recover_unseen_or_modified_evidence():

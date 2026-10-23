@@ -487,7 +487,7 @@ class DurableCompactionTests(unittest.TestCase):
         with patch.dict(compaction.CONFIG, self.policy), \
                 patch.object(StepBudget, 'remaining_time', return_value=160):
             result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'task_cancelled')
         summaries = [options for _, options in self.sdk.calls if options.get('tool_choice') == 'none']
         self.assertEqual(len(summaries), 1)
         self.assertEqual(summaries[0]['timeout'], 160)
@@ -503,7 +503,7 @@ class DurableCompactionTests(unittest.TestCase):
                 restored = store.load()
         finally:
             store.close()
-        self.assertEqual(restored['status'], 'task_blocked')
+        self.assertEqual(restored['status'], 'task_cancelled')
         self.assertEqual(len(restored['compactions']), 1)
 
     def test_unknown_summary_request_is_not_resent(self):
@@ -587,7 +587,7 @@ class DurableCompactionTests(unittest.TestCase):
         self.sdk.plans = iter([{'kind': 'blocked', 'note': 'fixture complete'}])
         with patch.dict(compaction.CONFIG, self.policy):
             result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'task_cancelled')
         self.assertEqual(len(result['compactions']), 1)
         self.assertEqual(sum(o.get('tool_choice') == 'none' for _, o in self.sdk.calls), 1)
 
@@ -597,9 +597,9 @@ class DurableCompactionTests(unittest.TestCase):
         # 缩小假轨迹的保留窗口，但仍保留最近原文，不能靠保留量归零触发摘要。
         with patch.dict(compaction.CONFIG, {'retain_ratio': 0.00005}):
             result = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(result['compactions'][0]['trigger'], 'context-overflow')
-        self.assertEqual(len(self.sdk.calls), 5)  # 两次已完成调用、拒绝记录、摘要和继续执行。
+        self.assertEqual(len(self.sdk.calls), 6)  # 原五次调用后，受阻报告返工；夹具在发送前显式取消下一次。
         self.assertEqual(self.sdk.calls[-1][1].get('tool_choice'), None)
         self.assertEqual(len(result['compactions']), 1)
         self.assertEqual(result['planner_calls'], 5)

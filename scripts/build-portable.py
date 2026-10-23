@@ -173,10 +173,15 @@ def build(destination, make_zip=True):
         if source.is_file():
             shutil.copy2(source, destination / name)
     for name in (
-        'third-party.md', 'security.md', 'managed-execution.md',
+        'third-party.md', 'security.md', 'user-guide.md', 'development.md',
+        'managed-execution.md', 'acceptance-evidence.md', 'container-rag-sources.md',
         'boundary-hints.md', 'confirmed-delivery.md', 'work-graph.md', 'rag.md',
         'upgrade-compatibility.md', 'crash-continuation.md', 'unified-continuation.md',
-        'lifetime-safety.md', 'assets/workspace.png',
+        'lifetime-safety.md', 'pause-diagnostics.md', 'wine-cmd.md',
+        'automatic-rework.md', 'assets/workspace.png',
+        'benchmarks/2026-10-20/README.md',
+        'benchmarks/2026-10-20/swe-five-comparison.md',
+        'benchmarks/2026-10-20/terminal-bench4-twelve-comparison.md',
     ):
         source = ROOT / 'docs' / name
         target = destination / 'docs' / name

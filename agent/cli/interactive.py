@@ -30,15 +30,15 @@ def parse_args(argv=None):
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=1000,
-        help="每条需求最多调用模型的次数",
+        default=None,
+        help="可选的人类显式调用次数上限；省略时不设次数上限",
     )
     parser.add_argument(
         "--verify-command", help="验收命令，在目标仓库运行；交互模式仅用于下一条需求"
     )
     parser.add_argument("--acceptance", help="补充验收要求；交互模式仅用于下一条需求")
     args = parser.parse_args(argv)
-    if args.max_steps <= 0:
+    if args.max_steps is not None and args.max_steps <= 0:
         parser.error("--max-steps 必须大于 0")
     for option in ("verify_command", "acceptance"):
         value = getattr(args, option)
@@ -126,7 +126,7 @@ def run_one_turn(agent, history, text, max_steps, verify_command=None, acceptanc
         if result.get(key):
             print(f"[{label}] {result[key]}")
     print(
-        f"[预算] 模型调用 {budget.used_steps}/{budget.max_steps}；"
+        f"[预算] 模型调用 {budget.used_steps}/{budget.max_steps if budget.max_steps is not None else '未设次数上限'}；"
         f"已报告 Token {budget.reported_tokens}；未报告用量 {budget.unknown_usage_steps} 次"
     )
     return result
@@ -134,7 +134,7 @@ def run_one_turn(agent, history, text, max_steps, verify_command=None, acceptanc
 
 def run_session(
     environment,
-    max_steps: int = 1000,
+    max_steps: int | None = None,
     verify_command=None,
     acceptance=None,
 ) -> int:

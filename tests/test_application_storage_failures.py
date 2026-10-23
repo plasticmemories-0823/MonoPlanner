@@ -76,16 +76,19 @@ def test_failed_result_projection_is_latched_and_stops_next_kernel_boundary(appl
 
 
 @pytest.mark.parametrize('failure_status', ['preparation_failed', 'runtime_error'])
-def test_known_failure_is_one_immediate_public_error_without_summary(application, failure_status):
+def test_known_failure_is_explained_once_without_repeating_work(application, failure_status):
     store, conversation, message, work, scheduler = application
     store.command_state(conversation, message['id'], 'applied')
     scheduler.work_factory = lambda *_: {
         'status': failure_status, 'reason': '源码副本准备失败：磁盘空间不足。',
     }
+    scheduler.chatbot.progress = lambda _conversation, facts: {'output': facts['task']['reason']}
     scheduler._work(work)
+    scheduler._report(store.reserve_progress(now=time.time() + 60))
     scheduler._work(work)
+    scheduler._report(store.reserve_progress(now=time.time() + 120))
     snapshot = store.snapshot(conversation)
-    failures = [row for row in snapshot['messages'] if row['source'] == 'system']
+    failures = [row for row in snapshot['messages'] if row['source'] == 'progress']
     assert len(failures) == 1 and '磁盘空间不足' in failures[0]['content']
     assert snapshot['work']['status'] == failure_status
     assert store.reserve_progress(now=time.time() + 60) is None

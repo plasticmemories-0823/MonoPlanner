@@ -67,7 +67,7 @@ class TaskDispatchTests(unittest.TestCase):
         plans.append({"kind": "blocked", "note": "Offline sequence complete"})
         runner = self.runner(plans)
         result = runner.run([], "Inspect only", StepBudget(max_steps=20))
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertEqual(result["planner_calls"], 13)
         self.assertEqual(runner.state["plan_count"], 12)
         self.assertEqual((self.repo / "sample.py").read_text(), "def value():\n    return 0\n")

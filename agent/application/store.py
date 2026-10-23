@@ -11,7 +11,7 @@ import uuid
 
 from agent.storage.preferences import Preferences
 from agent.storage.usage import summarize
-from agent.task.acceptance_limit import STATUS as ACCEPTANCE_LIMIT
+from agent.application.legacy_stop import STATUS as ACCEPTANCE_LIMIT
 
 
 from agent.task.resumption import ACTIVE, describe, explicit_continue, stopped
@@ -20,7 +20,7 @@ TERMINAL = {'verified_success', 'task_blocked', 'task_cancelled', 'chat_complete
 UNKNOWN = {'model_request_unknown', 'execution_unknown', 'state_conflict', 'interrupted'}
 SUPPLEMENTABLE = (ACTIVE - {'pausing'}) | {'paused', 'awaiting_user'}
 WORK_STATE_FIELDS = {
-    'status', 'reason', 'updated_at', 'revision', 'usage', 'control_unconfirmed', 'acceptance_limit', 'continuation',
+    'status', 'reason', 'updated_at', 'revision', 'usage', 'control_unconfirmed', 'acceptance_limit', 'continuation', 'stop_report_id',
 }
 _UNSET = object()
 
@@ -418,7 +418,7 @@ class ApplicationStore:
     def work_for_conversation(self, conversation):
         with self.connection() as db:
             return [self._work(db, row[0]) for row in db.execute(
-                'SELECT id FROM app_work WHERE conversation=?', (conversation,))]
+                'SELECT id FROM app_work WHERE conversation=? ORDER BY rowid', (conversation,))]
 
     def create_work(self, conversation, command_id, *, kind='coding', arguments=None,
                     work_options=None, project_path='.', create=False):
@@ -495,6 +495,8 @@ class ApplicationStore:
             if row is None:
                 raise KeyError('Work task does not exist')
             work = {**json.loads(row['data']), 'task_id': task, 'conversation_id': row['conversation']}
+            previous_status = work['status']
+            previous_limit = (work.get('acceptance_limit') or {}).get('pause_id')
             if expected_revision is not None and work['revision'] != expected_revision:
                 return None
             if facts.get('continuation'):
@@ -520,12 +522,16 @@ class ApplicationStore:
             if work.get('control_unconfirmed'):
                 work['status'] = 'execution_unknown'
                 work['reason'] = '任务终止未确认，已保留现场；不能直接恢复或重放操作。'
+            if stopped(work['status']) and (not stopped(previous_status) or not work.get('stop_report_id')
+                                            or previous_limit != (work.get('acceptance_limit') or {}).get('pause_id')):
+                work['stop_report_id'] = uuid.uuid4().hex
             work['updated_at'] = timestamp()
             work['revision'] += 1
             self._put_work_state(db, work)
             value = self._get(db, work['conversation_id'])
-            value['status'] = work['status']
-            self._put(db, value)
+            if value['work_id'] == task:
+                value['status'] = work['status']
+                self._put(db, value)
             for command_id in applied_inputs:
                 db.execute("UPDATE app_commands SET state='applied' WHERE task_id=? AND id=?",
                            (task, command_id))
@@ -534,24 +540,7 @@ class ApplicationStore:
                                'revision': work['revision'],
                                'acceptance_limit': work.get('acceptance_limit'),
                                'continuation': work.get('continuation'), **facts})
-            if work['status'] == ACCEPTANCE_LIMIT and limit.get('active'):
-                self._acceptance_notice(db, work, limit)
         return seq
-
-    def _acceptance_notice(self, db, work, limit):
-        """达到轮次上限的提示随状态一起提交，不依赖进度模型可用性。"""
-        verification = {'failed': '未通过', 'passed': '通过', 'error': '异常'}.get(
-            limit.get('last_verification_status'), '尚未确认',
-        )
-        text = (
-            f"已完成 {limit['completed_rounds']} 轮验收，达到当前 {limit['round_limit']} 轮上限，"
-            f"任务已暂停。最近一次验收：{verification}。"
-            f"点击“继续任务”可追加 {limit['round_increment']} 轮，从当前断点继续。"
-            '现有改动、执行记录和验收标准均已保留，等待你决定是否继续。'
-        )
-        self._message(db, work['conversation_id'],
-                      'acceptance-limit:' + work['task_id'] + ':' + limit['pause_id'],
-                      'ai', text, 'system')
 
     def control_unconfirmed(self, task, command_id):
         with self.connection() as db:

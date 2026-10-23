@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -52,6 +53,71 @@ def compile_artifact(argv, source, folder, row, remaining):
     return True
 
 
+WINE_SCOPE = 'wine-cmd-executed-paths-only'
+
+
+def wine_command(entry, arguments):
+    """只对可原样传入 CMD 的参数加引号，不把展开式伪装成字面参数。"""
+    entry = str(entry).replace('\\', '/')
+    if not entry.startswith('/') or Path(entry).suffix.lower() not in {'.bat', '.cmd'}:
+        raise ValueError('Wine CMD requires an absolute container BAT/CMD entry')
+    values = ['Z:' + entry.replace('/', '\\'), *arguments]
+    if any(any(ord(c) < 32 or c in '%!"&|<>^' for c in value) for value in values):
+        raise ValueError('Wine CMD literal paths/argv cannot contain control characters or % ! " & | < > ^')
+    return ' '.join('"' + value + '"' for value in values)
+
+
+def run_wine_command(check, repo, entry, folder, row, remaining):
+    """CMD 无独立编译模式；只执行一次原件，记录已执行分支的兼容验证范围。"""
+    program = shutil.which('wine')
+    if not program:
+        row['error_kind'] = 'environment'
+        raise RuntimeError('Wine CMD is unavailable in the fixed Linux environment')
+    runtime_argv = [program, '--version']
+    version_out, version_err = folder / 'runtime.stdout', folder / 'runtime.stderr'
+    with version_out.open('wb') as out, version_err.open('wb') as err:
+        probe = subprocess.run(runtime_argv, stdout=out, stderr=err,
+                               timeout=max(.1, remaining()))
+    version = tail(version_out).strip()
+    if probe.returncode or not version.startswith('wine-'):
+        row['error_kind'] = 'environment'
+        raise RuntimeError('Wine runtime identity probe failed')
+    # Wine 会再次转义 Unix argv 中的引号；专用环境值保留 Unicode 调用原文。
+    invocation = wine_command(entry.resolve(), check['argv'])
+    argv = [program, 'cmd.exe', '/d', '/v:off', '/u', '/s', '/c',
+            '%MONOPLANER_CMD_INVOCATION%']
+    stdout, stderr = folder / 'command.stdout', folder / 'command.stderr'
+    row.update(validation_scope=WINE_SCOPE, runtime_argv=runtime_argv,
+               runtime_exit_code=probe.returncode, runtime_version=version,
+               runtime_stdout_sha256=sha(version_out), runtime_stderr_sha256=sha(version_err),
+               argv=argv, cmd_invocation=invocation, cmd_builtin_output_encoding='utf-16-le',
+               error_kind='environment')
+    if sha(entry) != row['producer_source_sha256']:
+        row['error_kind'] = 'integrity'
+        raise ValueError('Command entry changed before execution')
+    with stdout.open('wb') as out, stderr.open('wb') as err:
+        result = subprocess.run(argv, cwd=str(repo), stdout=out, stderr=err,
+                                env={**os.environ, 'MONOPLANER_CMD_INVOCATION': invocation},
+                                timeout=max(.1, remaining()))
+    row.update(producer_called=True, exit_code=result.returncode,
+               executed_source_sha256=row['producer_source_sha256'],
+               producer_result_sha256=sha(stdout), stderr_sha256=sha(stderr),
+               stdout=wine_output(stdout), stderr=wine_output(stderr), error_kind=None,
+               status='passed' if result.returncode == 0 else 'failed')
+    if sha(entry) != row['producer_source_sha256']:
+        row['error_kind'] = 'integrity'
+        raise ValueError('Command entry changed during execution')
+    return row
+
+
+def wine_output(path):
+    # 原始字节与哈希始终保留；/u 只规定 CMD 内建输出，外部程序可能采用其它编码。
+    with Path(path).open('rb') as stream:
+        stream.seek(max(0, Path(path).stat().st_size - 4000))
+        raw = stream.read()
+    return raw.decode('utf-16-le' if b'\x00' in raw else 'utf-8', 'replace')
+
+
 def run_command(check, repo, folder, row, remaining):
     """由固定驱动拼接入口参数，入口不能被挪到解释器代码参数之后。"""
     entry = repo / check['entry_file']
@@ -62,6 +128,8 @@ def run_command(check, repo, folder, row, remaining):
         return row
     row.update(producer_source=str(entry.resolve()), producer_source_sha256=sha(entry))
     interpreter = check['interpreter']
+    if interpreter == 'wine-cmd':
+        return run_wine_command(check, repo, entry, folder, row, remaining)
     if interpreter == 'python':
         prefix = [sys.executable, '-B', '-X', 'utf8']
         compile_argv = prefix + [

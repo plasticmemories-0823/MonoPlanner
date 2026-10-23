@@ -170,7 +170,7 @@ class AcceptanceRevisionScope(unittest.TestCase):
             return task.reply({'kind': 'blocked', 'note': 'Original target remains protected'})
 
         result = self.run_replies(self.initial() + [wrong_target, stop])
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
 
     def test_evidence_does_not_allow_zero_case_acceptance_to_freeze(self):
         empty = task.CODE + '\ndef load_tests(loader, tests, pattern):\n    return unittest.TestSuite()\n'
@@ -178,10 +178,11 @@ class AcceptanceRevisionScope(unittest.TestCase):
             lambda m: self.correct(m, code=empty, before=flow.WRONG, after=empty),
             flow.review, task.reply({'kind': 'blocked', 'note': 'Zero tests are not acceptance'}),
         ])
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(len(self.state()['acceptance_versions']), 1)
         self.assertEqual(self.state()['verification_spec']['test_code'], flow.WRONG)
-        self.assertIn('not runnable', self.model.calls[-1][-1].content)
+        self.assertIn('Acceptance cannot be frozen', self.model.calls[-1][-1].content)
+        self.assertIn('tests_run=0', self.model.calls[-1][-1].content)
 
 
 if __name__ == '__main__':

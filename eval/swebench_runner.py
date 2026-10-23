@@ -367,7 +367,6 @@ def create_task_controller(recorder, environment, directory, args):
         recorder,
         environment,
         directory / "plan-runtime",
-        max_rounds=args.max_rounds,
         task_token_limit=args.task_token_limit,
         task_timeout=args.task_timeout,
     )
@@ -542,7 +541,6 @@ def _argument_parser():
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--instance-id", action="append")
     parser.add_argument("--max-steps", type=int, default=60)
-    parser.add_argument("--max-rounds", type=int, default=3)
     parser.add_argument(
         "--token-limit",
         type=int,
@@ -569,7 +567,7 @@ def parse_args(argv=None):
             parser.error(f"{key} must be nonnegative (0 means unlimited)")
         if getattr(args, key) == 0:
             setattr(args, key, None)
-    for key in ("max_steps", "max_rounds", "max_output_tokens", "command_timeout", "task_timeout"):
+    for key in ("max_steps", "max_output_tokens", "command_timeout", "task_timeout"):
         if getattr(args, key) <= 0:
             parser.error(f"{key} must be positive")
     return args

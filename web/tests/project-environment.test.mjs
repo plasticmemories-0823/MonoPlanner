@@ -247,3 +247,27 @@ test("timed out preparation releases busy state and never resends the operation"
   assert.match(errors.at(-1), /结果尚未确认/);
   assert.equal(calls[0].signal.aborted, true);
 });
+
+
+test("Wine installation is one explicit action and polling never starts another install", async () => {
+  const requests = [];
+  let finish;
+  const pending = new Promise((resolve) => { finish = resolve; });
+  const monitor = new ProjectEnvironmentMonitor("/api", "E:/project", {
+    status() {}, error() {}, busy() {},
+  }, async (url, init) => {
+    requests.push({ url, init });
+    if (init.method === "POST") await pending;
+    return Response.json({ mode: "auto", status: "ready", wine_cmd: true });
+  });
+  const first = monitor.change("install_wine");
+  await monitor.change("install_wine");
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(requests[0].init.body), { repo: "E:/project", action: "install_wine" });
+  finish();
+  await first;
+  await monitor.refresh();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].init.method, undefined);
+  monitor.dispose();
+});

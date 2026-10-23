@@ -31,6 +31,9 @@ export function useActivity() {
         return requestJson<DiagnosticPage>(
           `${apiUrl}/conversations/${threadId}/diagnostics?${query}`,
           { signal },
+          fetch,
+          // 停止任务的原内核需要完整校验后读取；不扩大写命令的等待或重试范围。
+          120_000,
         );
       },
       (items, error) => setWorkView({ threadId, items, error }),

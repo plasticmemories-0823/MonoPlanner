@@ -200,7 +200,7 @@ def test_active_task_cannot_be_rebound_by_a_supplement(tmp_path):
 
 
 
-def test_existing_task_uses_confirmed_project_not_parent_workspace(tmp_path):
+def test_existing_task_uses_confirmed_project_not_parent_workspace(tmp_path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     (workspace / 'project').mkdir()
@@ -224,6 +224,15 @@ def test_existing_task_uses_confirmed_project_not_parent_workspace(tmp_path):
     scheduler = Scheduler(store, model_factory=lambda _: FakeModel())
     try:
         scheduler.chatbot.run(conversation, incoming)
+        assert store.get(conversation)['work_id'] == original['task_id']
+        proposal = next(row for row in store.snapshot(conversation)['messages']
+                        if row['source'] == 'work_proposal')
+        store.command_state(conversation, first['id'], 'applied')
+        store.command_state(conversation, incoming['id'], 'applied')
+        store.submit(conversation, {'id': str(uuid.uuid4()), 'kind': 'confirm_work',
+                                   'proposal_id': proposal['id'].split(':')[1]})
+        monkeypatch.setattr(scheduler, '_schedule_work', lambda *_: None)
+        scheduler.tick()
         job = store.work(store.get(conversation)['work_id'])
         assert job['kind'] == 'existing' and job['repo'] == str(workspace / 'project')
         assert job['project_path'] == 'project' and job['task_id'] != original['task_id']

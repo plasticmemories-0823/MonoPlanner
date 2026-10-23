@@ -265,7 +265,7 @@ class PendingCandidateTests(unittest.TestCase):
                 f.reply({"kind": "blocked", "note": "Repair source, retain frozen behavior"}),
             ]
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertEqual(len(self.state()["acceptance_trials"]), 1)
         self.assertEqual(self.state()["verification_spec"]["test_code"], f.CODE)
         self.assertIn("Fixed test_code", self.model.calls[-1][-1].content)

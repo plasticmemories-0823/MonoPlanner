@@ -196,7 +196,7 @@ class KernelPauseBoundaryTests(unittest.TestCase):
             resumed = TaskRunner(model, self.env, state_dir=self.root / 'state').run(
                 [], 'offline boundary', StepBudget(max_steps=3)
             )
-        self.assertEqual(resumed['status'], 'task_blocked', resumed)
+        self.assertEqual(resumed['status'], 'task_cancelled', resumed)
         self.assertEqual(resumed['calls_this_invocation'], 1)
         self.assertEqual(len(model.calls), 2)
 
@@ -228,9 +228,9 @@ class KernelSavedRejectionPauseTests(unittest.TestCase):
         resumed = self.run_replies([
             fixtures.reply({'kind': 'blocked', 'note': 'explicitly resumed'})
         ])
-        self.assertEqual(resumed['status'], 'task_blocked', resumed)
+        self.assertEqual(resumed['status'], 'task_cancelled', resumed)
         self.assertEqual(resumed['calls_this_invocation'], 1)
-        self.assertEqual(self.engine.state['repair_count'], 1)
+        self.assertEqual(self.engine.state['repair_count'], 2)  # 原拒收与后来的受阻报告各配对一次。
         self.assertIsNone(self.engine.state.get('rejection_pending'))
 
     def test_message_applies_after_saved_rejection_pairing_without_prefix_conflict(self):
@@ -262,11 +262,11 @@ class KernelSavedRejectionPauseTests(unittest.TestCase):
                 fixtures.reply({'kind': 'blocked', 'note': 'new input inspected'})
             ], control_source=controls)
 
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(result['calls_this_invocation'], 1)
         after = self.load_state()
         self.assertEqual(after['history'][:len(before['history'])], before['history'])
-        self.assertEqual(after['repair_count'], 1)
+        self.assertEqual(after['repair_count'], 2)  # 新输入之后的受阻报告继续走返工反馈。
         self.assertIsNone(after.get('rejection_pending'))
         self.assertEqual(after['applied_inputs'].count(incoming['id']), 1)
         self.assertIn(incoming['text'], repr(self.model.calls[0]))
@@ -303,7 +303,7 @@ class KernelSavedCompactionPauseTests(unittest.TestCase):
         self.sdk.plans = iter([{'kind': 'blocked', 'note': 'explicitly resumed'}])
         with patch.dict(compaction_fixtures.compaction.CONFIG, self.policy):
             resumed = self.engine().run([], 'value must return four', StepBudget(max_steps=10))
-        self.assertEqual(resumed['status'], 'task_blocked', resumed)
+        self.assertEqual(resumed['status'], 'task_cancelled', resumed)
         self.assertEqual(len(resumed['compactions']), 1)
         self.assertEqual(
             sum(options.get('tool_choice') == 'none' for _, options in self.sdk.calls), 1

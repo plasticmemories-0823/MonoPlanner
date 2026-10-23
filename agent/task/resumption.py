@@ -87,8 +87,6 @@ def save_stop(loop):
                     state.get('last_plan'), len(state.get('rounds', []))])
     value = describe(state['status'], token, reason=state.get('reason', ''),
                      additions=additions(state, loop.budget))
-    if (state.get('acceptance_limit') or {}).get('active'):
-        value['additions']['acceptance_rounds'] = state['acceptance_limit']['round_increment']
     value['status'] = state['status']
     state['continuation'] = value
 
@@ -122,12 +120,6 @@ def resume_validated(loop, command=None):
     if command.get('native_stop_id') and command['native_stop_id'] != old.get('stop_id'):
         raise ValueError('The task stop identity changed; refresh before continuing')
     previous = old.get('status', state['status'])
-    from agent.task import acceptance_limit
-
-    if acceptance_limit.active(state):
-        # 验收额度独立绑定 pause_id，普通继续不能批准后来的一次暂停。
-        if command.get('acceptance_pause_id') != state['acceptance_limit']['pause_id']:
-            return False
     record = {
         'command_id': command['id'], 'stop_id': old.get('stop_id'), 'status': previous,
         'reason': old.get('reason', state.get('reason', '')),
@@ -138,11 +130,7 @@ def resume_validated(loop, command=None):
     }
     grant_budget(state, loop.budget, command['id'])
     loop.budget.cancelled, loop.budget.cancel_reason = False, ''
-    if acceptance_limit.active(state):
-        state['status'] = acceptance_limit.STATUS
-        if not acceptance_limit.resume_validated(loop):
-            return False
-    elif previous in SUCCESS or previous in {'task_blocked', 'stalled', 'chat_complete'}:
+    if previous in SUCCESS:
         # 已结束计划不会重放。重复计划指纹继续保留，模型必须调查并重新规划。
         state.pop('dispatch', None)
         state.pop('turn_status', None)

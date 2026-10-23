@@ -94,6 +94,10 @@ def code_key(root=None):
         'agent/execution/download_relay.py',
         'agent/execution/public_dns.py',
         'agent/execution/managed_setup.py',
+        'agent/execution/wine.py',
+        'resources/environments/install-wine.py',
+        'resources/environments/compact-wine-prefix.py',
+        'resources/environments/wine',
         'agent/execution/runtime_inventory.py',
         'agent/cli/interactive.py',
         'agent/cli/tasks.py',
@@ -103,7 +107,7 @@ def code_key(root=None):
         'agent/task/dialogue.py',
         'agent/task/resumption.py',
         'agent/task/output_limit.py',
-        'agent/task/acceptance_limit.py',
+        'agent/application/legacy_stop.py',
         'agent/task/operations.py',
         'agent/storage/preferences.py',
         'agent/settings.py',
@@ -187,7 +191,6 @@ def code_key(root=None):
 def restore(loop, stored, identity):
     if (stored.get('hard_interruption') or (loop.root / 'hard-interruption.json').exists()) and not getattr(loop, 'recovery_id', None):
         return conflict(loop, stored, 'Operation was forcefully interrupted; inspect retained evidence before continuing')
-    from agent.task import acceptance_limit
 
     if stored.get('identity') != identity or (
         stored.get('code_key') != code_key()
@@ -347,10 +350,6 @@ def restore(loop, stored, identity):
     if loop.budget.cancelled:
         stored.update(status='task_cancelled', reason=loop.budget.cancel_reason)
         return loop.result()
-    if acceptance_limit.active(stored):
-        acceptance_limit.resume_validated(loop)
-        if acceptance_limit.active(stored):
-            return loop.result()
     if stored['status'] in {'paused', 'awaiting_user'}:
         if not getattr(loop, 'resume_without_input', True):
             return loop.result()

@@ -163,7 +163,7 @@ def check_execution(loop, checks):
         return contract['digest']
     targets = {item["id"]: item for item in contract["targets"]}
     for target in targets.values():
-        supported = {'c'} if target['artifact_type'] == 'generated_code' else {'python', 'node', 'shell'}
+        supported = {'c'} if target['artifact_type'] == 'generated_code' else {'python', 'node', 'shell', 'wine-cmd'}
         if target['target_runtime'] not in supported:
             raise ValueError('The confirmed target runtime has no execution adapter; report the capability gap without downgrade')
     covered, errors = set(), []

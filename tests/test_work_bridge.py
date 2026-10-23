@@ -23,6 +23,9 @@ class RecordedModel:
         return self
 
     def invoke(self, messages):
+        if self.calls:
+            from agent.model.errors import ModelRequestNotSent
+            raise ModelRequestNotSent('task_cancelled', 'Offline work fixture explicitly stopped')
         self.calls.append(messages)
         return AIMessage(content="工作原始回复，不直接发布到主聊天", tool_calls=[{
             "id": "finished", "name": "submit_plan", "args": {
@@ -54,14 +57,14 @@ def test_work_handoff_preserves_user_originals_and_never_emits_worker_reply(tmp_
     events = []
     job = {
         "task_id": "a" * 32, "conversation_id": "conversation", "repo": str(repo),
-        "request": "保持原始用户要求", "public_conversation": messages_to_dict([
+        "budget": {"max_steps": 1}, "request": "保持原始用户要求", "public_conversation": messages_to_dict([
             HumanMessage(content="此前明确约束", id="original")]),
         "execution_binding": {"image": "sha256:" + "b" * 64, "runtime": {}},
     }
     with patch.object(bridge, "require_binding", side_effect=lambda repo, value: value):
         result = bridge.run_work(job, lambda *event: events.append(event), lambda: [],
                                  model=model, environment_factory=OfflineEnvironment, root=root)
-    assert result["status"] == "task_blocked"
+    assert result["status"] == "budget_exhausted"
     assert len(model.calls) == 1
     initial = json.loads(model.calls[0][1].content)
     assert initial["request"] == job["request"]
@@ -224,7 +227,7 @@ def test_bridge_keeps_trial_freeze_edit_and_real_rework_order(tmp_path):
         assert stored["plan"]["steps"][0]["command"] == plan["steps"][0]["command"]
 
 
-def test_acceptance_pause_retains_container_receipt_without_terminal_cleanup(tmp_path):
+def test_explicit_budget_stop_retains_container_receipt_without_terminal_cleanup(tmp_path):
     from test_task_runner import CODE, Model, EXECUTION_CHECK
     from support import python_command
 
@@ -244,31 +247,27 @@ def test_acceptance_pause_retains_container_receipt_without_terminal_cleanup(tmp
         def output_limit_stop_receipt(self):
             return receipt
 
-    runner_type = bridge.WorkRunner
-
-    def one_round_runner(*args, **kwargs):
-        return runner_type(*args, **kwargs, max_rounds=1)
-
     task, events = '3' * 32, []
     job = {'task_id': task, 'repo': str(repo), 'request': 'value must return 4',
+           'budget': {'max_steps': 3},
            'confirmed_requirements': fixture_delivery('value must return 4'),
            'execution_binding': {'image': 'sha256:' + 'b' * 64, 'runtime': {}}}
-    with patch.object(bridge, 'require_binding', side_effect=lambda repo, value: value), patch.object(
-        bridge, 'WorkRunner', side_effect=one_round_runner,
-    ), patch('agent.storage.resources.release_task_resources') as cleanup:
+    with patch.object(bridge, 'require_binding', side_effect=lambda repo, value: value), patch(
+        'agent.storage.resources.release_task_resources',
+    ) as cleanup:
         result = bridge.run_work(
             job, lambda kind, fact: events.append(fact), lambda: [], model=model,
             environment_factory=PausableEnvironment, root=tmp_path / 'state',
         )
-    assert result['status'] == 'acceptance_limit_reached'
-    assert result['acceptance_limit']['completed_rounds'] == 1
+    assert result['status'] == 'budget_exhausted'
+    assert result.get('acceptance_limit') is None
     assert json.loads((tmp_path / 'state/tasks' / task / 'pause-container.json').read_text()) == receipt
-    assert events[-1]['acceptance_limit'] == result['acceptance_limit']
+    assert events[-1]['status'] == result['status']
     cleanup.assert_not_called()
 
 
-def test_active_acceptance_pause_cannot_continue_after_return():
+def test_real_stop_cannot_continue_after_return():
     runner = object.__new__(bridge.WorkRunner)
-    runner.state = {'status': 'needs_plan', 'acceptance_limit': {'active': True}}
+    runner.state = {'status': 'paused'}
     runner.yield_boundary = False
     assert not runner.continue_after_return()

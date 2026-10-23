@@ -166,7 +166,7 @@ class AcceptanceReviewTests(unittest.TestCase):
                 f.reply({"kind": "blocked", "note": "Need a valid test setup"}),
             ]
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
         self.assertFalse((self.root / "state/frozen-acceptance.json").exists())
 
@@ -183,7 +183,7 @@ class AcceptanceReviewTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
     def test_zero_case_trial_is_not_frozen(self):
@@ -197,7 +197,7 @@ class AcceptanceReviewTests(unittest.TestCase):
                 f.reply({"kind": "blocked", "note": "No real cases ran"}),
             ]
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertFalse(self.state().get("verification_spec"))
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
 
@@ -236,7 +236,7 @@ class AcceptanceReviewTests(unittest.TestCase):
                 f.reply({"kind": "blocked", "note": "Repair actual source behavior"}),
             ]
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertIn("Provide valid original evidence", self.model.calls[-1][-1].content)
         self.assertEqual(len(self.state()["acceptance_versions"]), 1)
 
@@ -247,7 +247,7 @@ class AcceptanceReviewTests(unittest.TestCase):
             lambda m: review(m, 'revise_acceptance', f.CODE),
             f.reply({'kind': 'blocked', 'note': 'Need original evidence for this revision'}),
         ])
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(len(self.state()['acceptance_versions']), 1)
         self.assertEqual(self.state()['verification_spec']['test_code'], code)
         self.assertIn('Provide valid original evidence', self.model.calls[-1][-1].content)
@@ -269,7 +269,7 @@ class AcceptanceReviewTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertIn("Provide valid original evidence", self.model.calls[-1][-1].content)
 
     def test_unknown_trial_execution_is_not_replayed(self):
@@ -323,7 +323,7 @@ class AcceptanceReviewTests(unittest.TestCase):
                 f.reply({"kind": "blocked", "note": "Trial modified its scratch source"}),
             ]
         )
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
         self.assertIn("return 0", (self.engine.baseline.root / "sample.py").read_text())
 

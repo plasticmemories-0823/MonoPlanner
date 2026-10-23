@@ -86,6 +86,6 @@ def test_completed_nonzero_command_keeps_the_existing_feedback_flow(tmp_path, mo
         'seconds': 0,
     })
     result = loop.run([], '普通命令失败仍需返回模型诊断', StepBudget(max_steps=4))
-    assert result['status'] == 'task_blocked'
-    assert model.calls == 2
+    assert result['status'] == 'budget_exhausted'
+    assert model.calls == 4
     assert loop.state['last_result']['outcome'] == 'execution_failed'

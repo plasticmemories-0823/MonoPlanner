@@ -386,11 +386,6 @@ def prepare_rejection(owner, error):
             raise ModelRequestNotSent(
                 'invalid_message_history', 'No trustworthy tool identity; reply retained.'
             )
-        if owner.state.get('empty_response_repairs', 0) >= 1:
-            raise ModelRequestNotSent(
-                'empty_model_response',
-                'Another complete empty reply was received; no further automatic correction.',
-            )
         notice = (
             '[Host protocol feedback; no actions executed] '
             'The complete reply contained no executable tool call. '
@@ -442,14 +437,13 @@ def finish_rejection(owner):
     if owner.interactive:
         dialogue.publish(owner, pending['response'])
     if pending.get('kind') == 'empty_response':
-        if (pending['calls'] or owner.state.get('empty_response_repairs', 0)
-                or not complete_empty_reply(owner, messages_from_dict([pending['response']])[0])):
+        if (pending['calls'] or not complete_empty_reply(owner, messages_from_dict([pending['response']])[0])):
             raise ModelRequestNotSent(
                 'state_conflict', 'Empty reply correction changed; no request sent.'
             )
         # 没有工具调用时只追加宿主协议反馈，不伪造调用身份或工具执行结果。
         results = [message_to_dict(HumanMessage(content=pending['notice']))]
-        owner.state['empty_response_repairs'] = 1
+        owner.state['empty_response_repairs'] = owner.state.get('empty_response_repairs', 0) + 1
     else:
         if not pending['calls']:
             raise ModelRequestNotSent('state_conflict', 'Rejected tool reply has no call identity.')

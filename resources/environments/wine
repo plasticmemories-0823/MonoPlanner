@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""为受限临时盘复制轻量 Wine 前缀；系统 DLL 仍指向镜像内只读原件。"""
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+
+if sys.argv[1:] != ['--version']:
+    prefix = Path(os.environ.get('WINEPREFIX', '/tmp/monoplanner-wine'))
+    if (not prefix.is_absolute() or prefix == Path('/tmp') or '..' in prefix.parts
+            or not prefix.resolve().is_relative_to('/tmp') or prefix.is_symlink()):
+        raise SystemExit('Wine compatibility prefixes must remain under container /tmp')
+    if not (prefix / 'system.reg').is_file():
+        if prefix.exists() and (not prefix.is_dir() or any(prefix.iterdir())):
+            raise SystemExit('The existing Wine prefix is incomplete; preserve it and use a fresh empty directory')
+        prefix.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=prefix.name + '.prepare-', dir=prefix.parent))
+        try:
+            shutil.copytree('/opt/monoplanner/wine-template', stage, dirs_exist_ok=True,
+                            symlinks=True)
+            try:
+                stage.rename(prefix)
+            except OSError:
+                if not (prefix / 'system.reg').is_file():
+                    raise
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+    os.environ['WINEPREFIX'] = str(prefix)
+os.execv('/usr/bin/wine', ['/usr/bin/wine', *sys.argv[1:]])

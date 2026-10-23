@@ -154,7 +154,7 @@ class TaskRunnerTests(unittest.TestCase):
         )
         self.assertFalse((self.repo / 'must-not-exist').exists())
         self.assertEqual(result['rounds'], [])
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'budget_exhausted')
 
     def test_failed_final_acceptance_replans_using_same_contract(self):
         result = self.loop([self.candidate(2), self.candidate()]).run(

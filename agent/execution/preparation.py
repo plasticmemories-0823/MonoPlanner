@@ -2,7 +2,6 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
-import hashlib
 import json
 from pathlib import Path
 from threading import Event, RLock, current_thread
@@ -38,15 +37,12 @@ class PreparationJobs:
             self.catalog.recover_environment_jobs()
             self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='environment-setup')
 
-    def _legacy(self, repo):
-        # 旧 JSON 仅用于解释历史状态，不导入新队列、不恢复旧安装。
-        path = self.root / 'environment-jobs' / (hashlib.sha256(repo.encode()).hexdigest() + '.json')
-        if path.is_file() and not path.is_symlink() and path.stat().st_size <= 1024 * 1024:
-            return {'mode': 'auto', 'status': 'interrupted', 'stage': 'interrupted',
-                    'message': '旧版环境准备记录仅供保留，请重新准备环境。'}
-        return None
-
     def status(self, repo, *, verify=False):
+        value = self._status(repo, verify=verify)
+        enabled = bool(ProjectEnvironments(self.root).get(repo).get('wine_cmd'))
+        return {**value, **({'wine_cmd': True} if enabled else {})}
+
+    def _status(self, repo, *, verify=False):
         repo = workspace_path(repo)
         binding = ProjectEnvironments(self.root).get(repo)
         if binding.get('image'):
@@ -71,7 +67,7 @@ class PreparationJobs:
                      'environment': {key: ready[key]
                          for key in ('backend', 'image', 'runtime', 'managed') if key in ready}}
             return self._verify(value) if verify else value
-        return self._legacy(repo) or {**ready, 'mode': 'auto', 'status': 'idle', 'stage': 'checking'}
+        return {**ready, 'mode': 'auto', 'status': 'idle', 'stage': 'checking'}
 
     def _verify(self, value):
         from agent.execution.managed import ManagedEnvironments
@@ -87,7 +83,7 @@ class PreparationJobs:
             value['error'] = result['message']
         return value
 
-    def start(self, repo, *, background=True, retry=False, project_scope=None):
+    def start(self, repo, *, background=True, retry=False, project_scope=None, wine_install=False):
         repo = workspace_path(repo)
         scope = resolve_scope(repo, project_scope)
         if ProjectEnvironments(self.root).get(repo).get('image'):
@@ -110,14 +106,14 @@ class PreparationJobs:
                 results = cancel_owned_containers(existing['owner'], self.root)
                 if any(not result['stopped'] for result in results):
                     raise EnvironmentRequired('上次准备容器停止未确认，不能创建新环境。')
-            elif not retry and self._legacy(repo):
-                raise EnvironmentRequired('旧版准备记录仅供保留，请明确点击重新准备环境。')
             if any(not worker['future'].done() for worker in self.workers.values()):
                 raise EnvironmentRequired('已有一个项目正在准备环境，请稍后重试。')
             identity = uuid.uuid4().hex
             value = self.catalog.save_environment_job({
                 'id': identity, 'repo': repo, 'owner': 'prepare:' + identity,
                 'mode': 'auto', 'status': 'preparing', 'stage': 'checking',
+                'wine_cmd': bool(ProjectEnvironments(self.root).get(repo).get('wine_cmd')),
+                'wine_install_authorized': wine_install,
                 'message': '正在检查项目环境', 'background': background,
                 'project_scope': scope.to_record(),
             })
@@ -126,6 +122,23 @@ class PreparationJobs:
             self.workers[identity] = {'future': future, 'cancel': cancel}
             future.add_done_callback(lambda _: self._finished(identity))
             return value
+
+    def install_wine(self, repo):
+        """只有环境设置的显式安装动作调用；不经模型或工作派发入口。"""
+        repo = workspace_path(repo)
+        with self.lock:
+            if self.closed or self.pool is None:
+                raise EnvironmentRequired('环境准备服务不可用，请重新打开应用。')
+            current = self.catalog.environment_job(repo)
+            if any(not worker['future'].done() for worker in self.workers.values()):
+                if (current and current['id'] in self.workers
+                        and ProjectEnvironments(self.root).get(repo).get('wine_cmd')):
+                    return self.status(repo)
+                raise EnvironmentRequired('已有环境正在准备，请等完成或取消后再安装 Wine。')
+            if ProjectEnvironments(self.root).get(repo).get('image'):
+                raise EnvironmentRequired('当前使用手动镜像；请先改为自动准备，或选择已有 Wine 镜像。')
+            ProjectEnvironments(self.root).enable_wine(repo)
+            return self.start(repo, retry=True, wine_install=True)
 
     def retry(self, repo):
         """仅显式用户操作可重新准备失败或中断的环境。"""
@@ -149,7 +162,8 @@ class PreparationJobs:
 
                 scope = ProjectScope.from_record(value['project_scope'], root=value['repo'])
                 binding = ManagedEnvironments(self.root).prepare(
-                    value['repo'], progress=progress, cancelled=cancel.is_set, project_scope=scope)
+                    value['repo'], progress=progress, cancelled=cancel.is_set, project_scope=scope,
+                    **({'allow_wine_install': True} if value.get('wine_install_authorized') else {}))
                 if cancel.is_set():
                     raise PreparationCancelled('环境准备已取消')
                 result = {'status': 'ready', 'stage': 'ready', 'message': '项目环境已就绪',

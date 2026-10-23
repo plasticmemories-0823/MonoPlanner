@@ -55,7 +55,12 @@ class Replies:
 
     def invoke(self, messages):
         self.calls.append(messages)
-        return next(self.replies)
+        try:
+            return next(self.replies)
+        except StopIteration:
+            from agent.model.errors import ModelRequestNotSent
+            self.calls.pop()
+            raise ModelRequestNotSent('task_cancelled', 'Offline fixture explicitly stopped') from None
 
 
 class OutputLimitTests(unittest.TestCase):
@@ -155,7 +160,7 @@ class OutputLimitTests(unittest.TestCase):
         self.assertEqual(len(chat_model.calls), 1)
         work.assert_not_called()
         resumed = self.resume(model)
-        self.assertEqual(resumed['status'], 'task_blocked', resumed)
+        self.assertEqual(resumed['status'], 'task_cancelled', resumed)
         self.assertEqual(len(model.calls), 4)
         self.assertEqual(len(list(self.artifacts.glob('plans/*/*/result.json'))), 2)
         self.assertIn('RETAINED_PARTIAL_REASONING', repr(model.calls[2]))
@@ -188,7 +193,7 @@ class OutputLimitTests(unittest.TestCase):
         self.invoke(model)
         self.commands.append({'id': 'older-pause', 'kind': 'pause'})
         result = self.resume(model)
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(len(model.calls), 2)
         history = LocalHistory(self.artifacts)
         try:

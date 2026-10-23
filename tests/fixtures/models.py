@@ -51,11 +51,18 @@ class FixtureDocker(LocalEnvironment):
 
 
 class BlockedModel:
+    def __init__(self):
+        self.completed = False
+
     def bind_tools(self, tools):
         self.tools = tools
         return self
 
     def invoke(self, messages):
+        from agent.model.errors import ModelRequestNotSent
+        if self.completed:
+            raise ModelRequestNotSent('task_cancelled', 'Offline fixture explicitly stopped')
+        self.completed = True
         return AIMessage(
             content='',
             tool_calls=[
@@ -80,10 +87,15 @@ class ScriptedModel:
         return self
 
     def invoke(self, messages):
+        try:
+            result = next(self.replies)
+        except StopIteration:
+            from agent.model.errors import ModelRequestNotSent
+            raise ModelRequestNotSent('task_cancelled', 'Offline fixture explicitly stopped') from None
         self.calls.append(messages)
         if self.hook:
             self.hook(len(self.calls))
-        return next(self.replies)
+        return result
 
 
 def text_reply(text='公开回答'):

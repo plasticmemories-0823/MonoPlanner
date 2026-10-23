@@ -13,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 EXECUTION_DESCRIPTION = (
     "Required for first generated acceptance: artifact type, real entry and consuming runtime. "
     "[] only for inspection, fixed user commands, or reuse of frozen checks. "
-    "Every declaration must compile or syntax-check and then execute its real artifact. "
+    "Compile/syntax-check and execute the actual artifact. Wine CMD instead parses and "
+    "executes the unchanged BAT/CMD once; only exercised paths are validated in compatibility mode. "
     "Invocation-only call and unchecked executable consumers are not supported. "
     "No task-name detection or self-reported pass."
 )
@@ -51,7 +52,7 @@ class ExecutionCheck(BaseModel):
     expression: str = Field(default="", max_length=4000)
     consumer: Literal["command", "c_expression", "c_statement"]
     entry_file: str = Field(default="", max_length=1024)
-    interpreter: Literal["", "python", "node", "shell"] = ""
+    interpreter: Literal["", "python", "node", "shell", "wine-cmd"] = ""
     argv: list[str] = Field(default_factory=list, max_length=32)
     variables: list[str] = Field(default_factory=list, max_length=8)
     result_variable: str = ""
@@ -72,6 +73,9 @@ class ExecutionCheck(BaseModel):
                 raise ValueError("execution_checks command cannot mix function or numeric consumer fields")
             if any("\x00" in value or len(value) > 4000 for value in self.argv):
                 raise ValueError("execution_checks command arguments are invalid or too large")
+            if self.interpreter == "wine-cmd":
+                from resources.drivers.execution import wine_command
+                wine_command("/testbed/" + self.entry_file, self.argv)
             return self
         if self.artifact_type != "generated_code":
             raise ValueError("Code consumers require the generated_code artifact type")
@@ -161,12 +165,21 @@ def validate_execution_result(path, checks, *, repository=None, map_path=None):
             if (row.get("producer_called") is not True
                     or not re.fullmatch(r"[0-9a-f]{64}", row.get("producer_source_sha256", ""))):
                 raise ValueError("execution_checks has no real repository producer receipt")
-            if (row.get("compile_exit_code") != 0 or not row.get("compile_argv")
+            if runtime == "wine-cmd":
+                from resources.drivers.execution import WINE_SCOPE
+                if (row.get("validation_scope") != WINE_SCOPE
+                        or row.get("runtime_exit_code") != 0 or not row.get("runtime_argv")
+                        or not str(row.get("runtime_version", "")).startswith("wine-")
+                        or row.get("executed_source_sha256") != row["producer_source_sha256"]
+                        or any(key.startswith("compile") for key in row)):
+                    raise ValueError("execution_checks lacks honest Wine CMD compatibility evidence")
+            elif (row.get("compile_exit_code") != 0 or not row.get("compile_argv")
                     or not re.fullmatch(r"[0-9a-f]{64}", row.get("compiled_source_sha256", ""))):
                 raise ValueError("execution_checks lacks successful compilation of the actual artifact")
             if check["consumer"] == "command":
                 if (row.get("exit_code") != 0 or not row.get("argv")
-                        or row["compiled_source_sha256"] != row["producer_source_sha256"]):
+                        or (runtime != "wine-cmd" and
+                            row["compiled_source_sha256"] != row["producer_source_sha256"])):
                     raise ValueError("execution_checks lacks successful repository command evidence")
             else:
                 runs = row.get("runs", [])
@@ -203,7 +216,9 @@ def validate_originals(output, check, row, repository, map_path):
     content(repository, relative, row['producer_source_sha256'])
     folder = output.parent / (output.stem + '-' + check['id'])
     # 编译日志必须来自本次独占执行目录，不能借另一份报告凑字段。
-    for name in ('compile.stdout', 'compile.stderr'):
+    logs = ('runtime.stdout', 'runtime.stderr') if check['interpreter'] == 'wine-cmd' else (
+        'compile.stdout', 'compile.stderr')
+    for name in logs:
         try:
             _safe_file(output.parent, Path(folder.name) / name)
         except (OSError, RuntimeError) as error:
@@ -213,6 +228,23 @@ def validate_originals(output, check, row, repository, map_path):
             raise ValueError('Execution receipt names a different repository entry')
         content(folder, 'command.stdout', row.get('producer_result_sha256'))
         content(folder, 'command.stderr', row.get('stderr_sha256'))
+        if check['interpreter'] == 'wine-cmd':
+            from resources.drivers.execution import wine_command
+            version = content(folder, 'runtime.stdout', row.get('runtime_stdout_sha256'))
+            content(folder, 'runtime.stderr', row.get('runtime_stderr_sha256'))
+            runtime_argv = row['runtime_argv']
+            if (len(runtime_argv) != 2 or runtime_argv[1] != '--version'
+                    or not runtime_argv[0].startswith('/')
+                    or PurePosixPath(runtime_argv[0]).name != 'wine'
+                    or version.decode('utf-8', 'replace').strip() != row['runtime_version']):
+                raise ValueError('Wine runtime identity receipt changed')
+            expected = [runtime_argv[0], 'cmd.exe', '/d', '/v:off', '/u', '/s', '/c',
+                        '%MONOPLANER_CMD_INVOCATION%']
+            invocation = wine_command(map_path(repository / check['entry_file']), check['argv'])
+            if (row['argv'] != expected or row.get('cmd_invocation') != invocation
+                    or row.get('cmd_builtin_output_encoding') != 'utf-16-le'):
+                raise ValueError('Wine CMD receipt differs from the unchanged entry and literal arguments')
+            return
         expected_tail = [str(map_path(repository / check['entry_file'])), *check['argv']]
         if row['argv'][-len(expected_tail):] != expected_tail:
             raise ValueError('Execution receipt command differs from confirmed entry and arguments')

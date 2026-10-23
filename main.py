@@ -1,4 +1,4 @@
-"""p0401 交互入口。"""
+"""交互式命令行入口。"""
 
 from agent.cli.interactive import main
 

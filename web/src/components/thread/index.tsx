@@ -378,11 +378,11 @@ export function Thread() {
                       "border border-solid",
                     )}
                   >
-                    {stream.values.work?.repo && (
+                    {(stream.values.work?.repo || stream.values.repo) && (
                       <CurrentProject
-                        key={stream.values.work.task_id}
+                        key={stream.values.work?.task_id || stream.values.repo}
                         apiUrl={stream.apiUrl}
-                        repo={stream.values.work.repo}
+                        repo={stream.values.work?.repo || stream.values.repo}
                         readOnly={stream.values.read_only || Boolean(stream.storageError)}
                       />
                     )}

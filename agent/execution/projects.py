@@ -101,6 +101,17 @@ class ProjectEnvironments:
             )
         return values[repo]
 
+    def enable_wine(self, repo):
+        """用户明确点击安装后保存可选环境，不接收任何可执行内容。"""
+        repo = workspace_path(repo)
+        with _preferences_lock:
+            values = json.loads(self.path.read_text('utf-8')) if self.path.exists() else {}
+            if values.get(repo, {}).get('image'):
+                raise EnvironmentRequired('当前使用手动镜像；请先改为自动准备，或选择已有 Wine 镜像。')
+            values[repo] = {'backend': 'docker', 'wine_cmd': True}
+            atomic_write(self.path, json.dumps(values, ensure_ascii=False, indent=2).encode('utf-8'))
+        return values[repo]
+
     def automatic(self, repo):
         """只重置后续执行的配置；已有任务检查点保留自己的镜像。"""
         repo = workspace_path(repo)

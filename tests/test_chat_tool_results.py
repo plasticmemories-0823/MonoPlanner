@@ -213,7 +213,8 @@ def test_builtin_handoff_and_status_tools_also_save_raw_results(setup, monkeypat
     model = ScriptedModel([reply(call(name, **arguments)), text_reply()])
     result = {'items': [{'id': 'same'}, {'id': 'same'}], 'status': 'completed'}
     bot = Chatbot(store, lambda *_args, **_options: task, factory=lambda _: model)
-    monkeypatch.setattr(bot, 'work_facts', lambda *_args: {'task': result, 'events': [result, result]})
+    monkeypatch.setattr(bot, 'work_facts', lambda *_args, **_options: {
+        'task': result, 'events': [result, result], 'coding_task': None, 'button_actions': []})
     monkeypatch.setattr(records, 'read_work_record', lambda *_args, **_options: result)
     observed = []
     normalize = chat.model_result

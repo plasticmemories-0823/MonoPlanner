@@ -176,7 +176,7 @@ class RuntimeMaterialsTests(unittest.TestCase):
         environment = self.task_environment()
         runner = TaskRunner(BlockedModel(), environment, state_dir=self.root / 'kernel-state')
         result = runner.run([], 'Fix a normal code issue', StepBudget(max_steps=2))
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'task_cancelled')
         expected = set(runtime_inventory(self.repo)['files'])
         self.assertTrue(expected <= set(runner.baseline.files))
         manifest = json.loads(runner.baseline.manifest_path.read_text())

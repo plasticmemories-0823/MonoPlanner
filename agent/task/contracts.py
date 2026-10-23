@@ -94,10 +94,22 @@ class Operation(BaseModel):
 
 class WorkRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["inspect", "candidate", "blocked"]
+    kind: Literal["inspect", "candidate", "blocked"] = Field(
+        description="inspect investigates; candidate submits work for actual acceptance. "
+                    "blocked reports an unverified obstacle and receives rework feedback; "
+                    "it cannot pause or complete the task.",
+    )
     note: str = Field(min_length=1, max_length=1600)
     steps: list[Operation] = Field(default_factory=list, max_length=12)
-    test_code: str = Field(default="", max_length=32768)
+    test_code: str = Field(
+        default="", max_length=32768,
+        description=(
+            'Complete Python unittest source with actual newline characters. Do not wrap the '
+            'entire test module in exec/eval of an encoded string: test attribution must retain '
+            'real source locations. The test file is outside the project; locate the real '
+            'repository from cwd, not from the test file __file__.'
+        ),
+    )
     test_driver: list[str] = Field(default_factory=list, max_length=32)
     execution_checks: list[ExecutionCheck] = Field(
         default_factory=list, max_length=8, description=EXECUTION_DESCRIPTION,

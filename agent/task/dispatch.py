@@ -42,7 +42,6 @@ class TaskDispatch:
             "reply_web": self.reply_web,
             "read_boundaries": self.read_boundaries,
             "review_acceptance": self.review_acceptance,
-            "record_blocked": self.record_blocked,
             "accept_plan": self.accept_plan,
             "reject_reply": self.reject_reply,
             "finish_cycle": self.finish_cycle,
@@ -50,7 +49,7 @@ class TaskDispatch:
         }
         self.rejects = {
             "request_plan", "route_response", "reply_text", "reply_web",
-            "review_acceptance", "record_blocked", "accept_plan", "read_boundaries",
+            "review_acceptance", "accept_plan", "read_boundaries",
         }
         destinations = {name: name for name in ("search", "plan", "execute", "accept", END)}
         self.active_phase = None
@@ -179,6 +178,8 @@ class TaskDispatch:
         owner, plan = self.owner, state["plan"]
         if dialogue.apply_controls(owner):
             return {"next_action": "finish_cycle"}
+        # 响应可以跨过截止时刻；先保留原件，再决定是否还能开始新的工作。
+        owner.budget.check_request(0)
         if owner.interactive:
             dialogue.publish(owner, state["response"])
         if isinstance(plan, dialogue.TextReply):
@@ -190,7 +191,13 @@ class TaskDispatch:
         elif isinstance(plan, revisions.Review):
             action = "review_acceptance"
         elif plan.kind == "blocked":
-            action = "record_blocked"
+            raise ValueError(
+                "Model-reported obstacle is not a verified external boundary. "
+                "No actions were executed. Use the retained evidence to investigate, "
+                "correct the plan or try another permitted approach. Do not relax the "
+                "original requirements, permissions or frozen acceptance. Reported obstacle: "
+                + plan.note
+            )
         else:
             action = "accept_plan"
         return {"next_action": action}
@@ -208,12 +215,6 @@ class TaskDispatch:
 
     def read_boundaries(self, state):
         boundaries.execute(self.owner, state["plan"], state["response"])
-
-    def record_blocked(self, state):
-        self.owner.state.update(
-            response_pending=None, status="task_blocked", reason=state["plan"].note,
-            blocked_report={"source": "model", "externally_verified": False},
-        )
 
     def accept_plan(self, state):
         self.owner.accept_plan(state["plan"], state["response"])

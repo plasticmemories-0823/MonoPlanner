@@ -87,7 +87,11 @@ def _step(loop):
     pending = state['pending']
     if not isinstance(running, dict) or not pending:
         return False
-    request = pending['plan']['steps'][pending['cursor']]
+    cursor, steps = pending.get('cursor'), (pending.get('plan') or {}).get('steps')
+    if (type(cursor) is not int or not isinstance(steps, list)
+            or not 0 <= cursor < len(steps)):
+        raise ValueError('Interrupted operation cursor is inconsistent with the saved plan')
+    request = steps[cursor]
     if (running['plan'] != pending['id'] or running['id'] != request['id']
             or running['before'] != state['source']):
         raise ValueError('Interrupted operation identity changed')
@@ -255,11 +259,8 @@ def reconcile(loop):
     state = loop.state
     previous_unknowns = len(state.get('unknown_requests', []))
     _known_response(loop)
-    if authorized(loop) and (state.get('acceptance_limit') or {}).get('active') and (
-        len(state.get('unknown_requests', [])) > previous_unknowns
-    ):
-        # 一笔验收额度授权不能顺带批准恢复过程中刚发现的未知模型请求。
-        # 保存未知预留，结束旧命令；刷新后的继续命令再绑定这次新停止。
+    if authorized(loop) and len(state.get('unknown_requests', [])) > previous_unknowns:
+        # 继续命令不能顺带批准审计中新发现的未知请求；保留费用并再次确认。
         state.setdefault('rejected_recovery_ids', []).append(loop.recovery_id)
         state.setdefault('used_recovery_ids', []).append(loop.recovery_id)
         state.setdefault('applied_inputs', []).append(loop.recovery_id)
@@ -286,15 +287,12 @@ def reconcile(loop):
             'compaction_commit_unknown', 'state_conflict',
         }:
             state.update(status='executing' if state.get('pending') else 'needs_plan', reason='')
-        from agent.task.acceptance_limit import active
-
-        if not active(state):
-            applied = state.setdefault('applied_inputs', [])
-            if loop.recovery_id not in applied:
-                applied.append(loop.recovery_id)
-            if state['status'] in {'paused', 'awaiting_user'}:
-                state.update(status='executing' if state.get('pending') else 'needs_plan',
-                             pause_requested=False)
+        applied = state.setdefault('applied_inputs', [])
+        if loop.recovery_id not in applied:
+            applied.append(loop.recovery_id)
+        if state['status'] in {'paused', 'awaiting_user'}:
+            state.update(status='executing' if state.get('pending') else 'needs_plan',
+                         pause_requested=False)
         loop.persist('explicit_recovery_authorized', {'id': loop.recovery_id})
         marker = loop.root / 'hard-interruption.json'
         active = ('running_step', 'verification_running', 'acceptance_running', 'assistant_running')

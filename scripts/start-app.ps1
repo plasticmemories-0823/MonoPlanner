@@ -300,6 +300,12 @@ function Stop-ProjectService([int[]]$Owners) {
                     $taskCurrent.Kill()
                     $null = $taskCurrent.WaitForExit(500)
                 }
+            } catch {
+                # 子进程可能在核验后自行退出；只凭同一句柄确认结束，不按错误码猜测。
+                $taskKillError = $_
+                $taskExited = $false
+                try { $taskExited = $taskCurrent.WaitForExit(500) } catch {}
+                if (-not $taskExited) { throw $taskKillError }
             } finally {
                 $taskCurrent.Dispose()
             }

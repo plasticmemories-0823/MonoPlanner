@@ -36,7 +36,12 @@ class HandbookModel:
 
     def invoke(self, messages):
         self.calls.append(messages)
-        return fixtures.confirmation(messages) or next(self.replies)
+        try:
+            return fixtures.confirmation(messages) or next(self.replies)
+        except StopIteration:
+            from agent.model.errors import ModelRequestNotSent
+            self.calls.pop()
+            raise ModelRequestNotSent('task_cancelled', 'Offline boundary fixture stopped') from None
 
 
 class BoundaryHintsTests(unittest.TestCase):
@@ -75,7 +80,7 @@ class BoundaryHintsTests(unittest.TestCase):
             fixtures.reply(self.candidate()),
             fixtures.reply({"kind": "blocked", "note": "Lookup prerequisite not met"}),
         ])
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertIn("get_boundary_hints", str(self.model.calls[1]))
         self.assertFalse(self.engine.state.get("acceptance_trials"))
         self.assertIn("return 0", (self.repo / "sample.py").read_text())
@@ -85,7 +90,7 @@ class BoundaryHintsTests(unittest.TestCase):
             lookup_reply(["math"]), fixtures.reply(self.candidate()),
             fixtures.reply({"kind": "blocked", "note": "General card still missing"}),
         ])
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertFalse(self.engine.state.get("acceptance_trials"))
 
     def test_index_is_short_english_and_strict_schema_contains_no_card_bodies(self):
@@ -218,7 +223,7 @@ class BoundaryHintsTests(unittest.TestCase):
             lookup_reply(["private-answer"]), mixed,
             fixtures.reply({"kind": "blocked", "note": "Do not run malformed requests"}),
         ])
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertNotIn("boundary_reads", self.engine.state)
         self.assertFalse(self.engine.state.get("acceptance_trials"))
         history = messages_from_dict(self.engine.state["history"])
@@ -246,7 +251,7 @@ class BoundaryHintsTests(unittest.TestCase):
             lookup_reply(), fixtures.reply(self.candidate(2)),
             fixtures.reply({"kind": "blocked", "note": "Real test still fails"}),
         ])
-        self.assertEqual(result["status"], "task_blocked", result)
+        self.assertEqual(result["status"], "task_cancelled", result)
         self.assertEqual(result["rounds"][0]["verification"]["status"], "failed")
 
     def test_repeated_query_returns_full_selected_cards_for_context_recovery(self):

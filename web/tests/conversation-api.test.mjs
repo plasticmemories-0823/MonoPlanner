@@ -261,3 +261,27 @@ test("unknown command response never automatically retries or creates a replacem
   );
   assert.equal(calls, 1);
 });
+
+
+test("read-only diagnostics have a separate bound and timeouts never resend commands", async (t) => {
+  const limits = [];
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    limits.push(ms);
+    return new AbortController().signal;
+  });
+  let calls = 0;
+  const timedOut = async () => {
+    calls++;
+    throw new DOMException("signal timed out", "TimeoutError");
+  };
+  await assert.rejects(
+    requestJson("/diagnostics", {}, timedOut, 120_000),
+    /读取本地记录超时.*不会重新执行任务/,
+  );
+  await assert.rejects(
+    requestJson("/commands", { method: "POST" }, timedOut),
+    /请求结果尚未确认.*不会自动重发/,
+  );
+  assert.deepEqual(limits, [120_000, 15_000]);
+  assert.equal(calls, 2);
+});

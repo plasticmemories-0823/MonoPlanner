@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock, Thread
+import json
 import logging
 import sqlite3
 import uuid
@@ -180,6 +181,8 @@ class Scheduler:
                 interrupted_tasks = [row[0] for row in db.execute('SELECT id FROM app_work_state')]
             for task_id in interrupted_tasks:
                 task = self.store.work(task_id)
+                if task:
+                    self._publish_completion(task)
                 if task and task['status'] in {'interrupted', 'execution_unknown', 'pausing'}:
                     # 启动只收拢遗留执行，不续跑任务。已有资源协议核验归属后才停止。
                     self._control(task['conversation_id'], task['task_id'],
@@ -446,14 +449,21 @@ class Scheduler:
                     from agent.application.requirements import load_proposal
 
                     proposal = load_proposal(self.store, conversation, proposal_id)
-                    packet, original = accept(
-                        self.store, conversation, command, proposal_id,
-                        proposal['project_path'], proposal['create'],
-                    )
-                    self.dispatch_work(
-                        conversation, command, project_path=proposal['project_path'], create=proposal['create'],
-                        work_options={'confirmed_requirements': packet, 'original_request': original},
-                    )
+                    if proposal.get('kind') == 'existing':
+                        from agent.application.existing_proposal import accept as accept_existing
+
+                        arguments = accept_existing(self.store, conversation, command, proposal_id)
+                        self.dispatch_work(conversation, command, kind='existing', arguments=arguments,
+                                           project_path=proposal['project_path'], create=False)
+                    else:
+                        packet, original = accept(
+                            self.store, conversation, command, proposal_id,
+                            proposal['project_path'], proposal['create'],
+                        )
+                        self.dispatch_work(
+                            conversation, command, project_path=proposal['project_path'], create=proposal['create'],
+                            work_options={'confirmed_requirements': packet, 'original_request': original},
+                        )
                     self.store.command_state(conversation, command['id'], 'applied')
                     self.store.chat_state(conversation, 'chat_complete')
                 except (ValueError, KeyError) as error:
@@ -615,7 +625,8 @@ class Scheduler:
             allowed = {key: payload[key] for key in (
                 'status', 'reason', 'usage', 'applied_inputs', 'acceptance_limit', 'continuation',
             ) if key in payload}
-            if payload.get('event') and stopped(allowed.get('status')) and task in self.works:
+            if (stopped(allowed.get('status')) and task in self.works
+                    and not payload.get('stopped_confirmed')):
                 # 原生已经停止规划，不代表所属容器及进程已完成收尾。
                 # 工作桥接返回并核验停止后，下面的最终投影才展示真正停止状态。
                 allowed['status'] = 'pausing'
@@ -631,11 +642,11 @@ class Scheduler:
                     for key, item in safe.items()}
             seq = self.store.record_event(work['conversation_id'], 'work_fact',
                                           {'task_id': task, 'event': kind, **safe})
-        relevant = payload.get('event', kind)
-        if payload.get('status') in {'preparation_failed', 'runtime_error',
-                                     'acceptance_limit_reached'}:
+        current = self.store.work(task)
+        if self._publish_completion(current):
             self.store.finish_progress(task, seq)
             return
+        relevant = payload.get('event', kind)
         if relevant in KEY_EVENTS:
             self.store.progress_pending(task, seq)
             self.wake.set()
@@ -651,15 +662,12 @@ class Scheduler:
                                        lambda: self.controls(task))
             self.emit(task, 'work_state', {
                 'status': result['status'], 'reason': result.get('stop_reason', result.get('reason', '')),
+                'stopped_confirmed': True,
                 'usage': result.get('usage', {}), 'applied_inputs': result.get('applied_inputs', []),
                 **({'continuation': result['continuation']} if result.get('continuation') else {}),
                 **({'acceptance_limit': result['acceptance_limit']}
                    if 'acceptance_limit' in result else {}),
             })
-            if result['status'] in {'preparation_failed', 'runtime_error'}:
-                self.store.publish(job['conversation_id'], 'work:' + task + ':failure',
-                                   result.get('stop_reason', result.get('reason', '工作已停止，运行记录已保留。')),
-                                   'system')
         except ServiceClosing:
             self.store.work_state(task, 'paused', reason='应用退出，工作尚未派发；可明确继续。')
         except Exception as error:
@@ -672,6 +680,7 @@ class Scheduler:
                 unavailable = isinstance(error, WorkerUnavailable)
                 self.emit(task, 'work_state', {
                     'status': 'paused' if unavailable else 'execution_unknown',
+                    'stopped_confirmed': True,
                     'reason': ('工作尚未派发，内核或运行设置不可用：' + str(error))
                     if unavailable else '执行结果未确认，已保留任务记录，不自动重试',
                 })
@@ -692,22 +701,73 @@ class Scheduler:
             self._release_if_idle()
             self.wake.set()
 
+    def _publish_completion(self, work):
+        from agent.application.work_context import completion_notice
+
+        notice = completion_notice(work)
+        if notice is None:
+            return False
+        identity = 'stop-report:' + work['task_id'] + ':' + (work.get(
+            'stop_report_id') or str(work['revision']))
+        self.store.publish(work['conversation_id'], identity, notice, 'progress')
+        return True
+
     def _report(self, pending):
         task, conversation = pending['task_id'], pending['conversation']
         through = pending['reported_seq']
+        stop_identity = None
+        before = None
         try:
             self.ensure_dispatch_available()
+            before = self.store.work(task)
+            if before and self._publish_completion(before):
+                through = pending['pending_seq']
+                return
             if self.store.get(conversation)['work_id'] != task:
                 # 新工作已接管展示时，取消旧工作的待汇报，不再为过期事实请求模型。
                 through = pending['pending_seq']
                 return
             before = self.store.work(task)
-            if before and before['status'] == 'acceptance_limit_reached':
+            if before and before['status'] == 'pausing':
                 through = pending['pending_seq']
-                return
+                return  # 仍在停止核验中；确认后的终态会产生新的汇报事件。
+            is_stop = bool(before and stopped(before['status']))
+            if is_stop:
+                stop_identity = 'stop-report:' + task + ':' + (before.get('stop_report_id') or str(before['revision']))
+                with self.store.connection() as db:
+                    reported = db.execute('SELECT 1 FROM app_messages WHERE conversation=? AND id=?',
+                                          (conversation, stop_identity)).fetchone()
+                if reported:
+                    through = pending['pending_seq']
+                    return
             facts = self.chatbot.work_facts(conversation, pending['reported_seq'], 50,
-                                            latest=False, through=pending['pending_seq'])
+                                            latest=is_stop, through=pending['pending_seq'],
+                                            task_id=task)
+            if is_stop:
+                from agent.application.records import read_work_record
+                try:
+                    facts['diagnostics'] = read_work_record(self.store, conversation, 'diagnostics',
+                                                            0, 16000, task_id=task)
+                except (ValueError, FileNotFoundError, RuntimeError) as exc:
+                    facts['diagnostics'] = {'available': False, 'error': type(exc).__name__,
+                                            'notice': 'Diagnostic evidence is unavailable; do not invent a cause.'}
             through = facts['cursor']
+            if not is_stop:
+                current = self.store.work(task)
+                if (current and current['revision'] == before['revision']
+                        and self.store.get(conversation)['work_id'] == task):
+                    notice = facts['task']['activity']['message']
+                    with self.store.connection() as db:
+                        previous = db.execute(
+                            "SELECT data FROM app_messages WHERE conversation=? "
+                            "AND json_extract(data,'$.source')='progress' "
+                            "AND (id LIKE ? OR id LIKE ?) ORDER BY seq DESC LIMIT 1",
+                            (conversation, 'progress:' + task + ':%', 'stop-report:' + task + ':%'),
+                        ).fetchone()
+                    if previous is None or json.loads(previous[0])['content'] != notice:
+                        self.store.publish(conversation, 'progress:' + task + ':' + str(through),
+                                           notice, 'progress')
+                return
             from agent.task.control import active
 
             with active(self.store.root, 'progress:' + task):
@@ -716,15 +776,26 @@ class Scheduler:
             current = self.store.work(task)
             # 终态变化后不发布旧的“正在执行”；下次事件汇报会读取新事实。
             if (current and before and current['status'] == before['status']
+                    and current['revision'] == before['revision']
+                    and (not stop_identity or current.get('stop_report_id') == before.get('stop_report_id'))
                     and self.store.get(conversation)['work_id'] == task
                     and result.get('output', '').strip()):
-                self.store.publish(conversation, 'progress:' + task + ':' + str(through),
+                self.store.publish(conversation, stop_identity or 'progress:' + task + ':' + str(through),
                                    result['output'], 'progress')
         except Exception as error:
             logging.getLogger(__name__).exception('Progress display unavailable; work continues')
-            if isinstance(error, (OSError, sqlite3.Error)):
+            if isinstance(error, sqlite3.Error) or (isinstance(error, OSError)
+                                                    and not isinstance(error, TimeoutError)):
                 self.storage_failed('progress_record', error)
             try:
+                if stop_identity and before and self.store.get(conversation)['work_id'] == task:
+                    current = self.store.work(task)
+                    if current and current.get('stop_report_id') == before.get('stop_report_id'):
+                        self.store.publish(conversation, stop_identity,
+                                           '工作已停止。已保存的原因：' + (before.get('reason') or '原因尚未确认')
+                                           + '。本次解释未完整生成；原件已保留，可继续查询诊断，未重发请求。',
+                                           'progress')
+                        through = pending['pending_seq']
                 self.store.record_event(conversation, 'summary_failed',
                                         {'task_id': task, 'through': through})
             except (OSError, sqlite3.Error) as exc:

@@ -48,6 +48,11 @@ def run_work(job, emit, controls, *, root=None, **unused):
                 with signal.subscribe(stop.set):
                     stop.wait(15)
                 raise ModelInterrupted(signal.kind or 'pause', sent=False)
+            if ENGINE_RELEASE != 'A' and any(
+                c['name'] == 'submit_plan' for m in messages for c in getattr(m, 'tool_calls', [])
+            ):
+                from agent.model.errors import ModelRequestNotSent
+                raise ModelRequestNotSent('task_cancelled', 'Offline upgrade fixture stopped')
             tool, args = 'submit_plan', {'kind': 'blocked', 'note': ENGINE_RELEASE}
             if ENGINE_RELEASE == 'A':
                 calls = [c for m in messages for c in getattr(m, 'tool_calls', [])]
@@ -115,6 +120,15 @@ def engines(tmp_path_factory):
         path = source / 'agent/application/work_bridge.py'
         path.write_text(path.read_text('utf-8') + '\nENGINE_RELEASE = ' + repr(release) + OFFLINE_APPEND,
                         encoding='utf-8')
+        worker = source / 'agent/runtime/worker.py'
+        worker.write_text(worker.read_text('utf-8') + '''
+_native_query = query
+def query(root, task, method, arguments):
+    if method == 'offline_slow_query':
+        time.sleep(10)
+        return {'offline': True}
+    return _native_query(root, task, method, arguments)
+''', encoding='utf-8')
         sources = {p.relative_to(source).as_posix(): p for p in bundles.tree_files(source)}
         contents = bundles._manifest(sources, protocol=bundles.PROTOCOL, runtime_id=manifest['runtime_id'],
                                      code_key=code_key(source))
@@ -171,7 +185,7 @@ def test_new_host_resumes_old_engine_real_checkpoint_without_replaying_edit(engi
     assert bridge.read(root, job['task_id'], 'status')['status'] == 'verified_success'
     monkeypatch.setattr(bundles, '_register', lambda *_args, **_kwargs: versions['B'])
     newer = job_for(root, None, tmp_path)
-    assert run(newer, monkeypatch)['status'] == 'task_blocked'
+    assert run(newer, monkeypatch)['status'] == 'task_cancelled'
     assert bundles.binding(root, job['task_id'])['engine_id'] != bundles.binding(root, newer['task_id'])['engine_id']
 
 
@@ -336,4 +350,44 @@ def test_open_but_silent_host_pipe_stops_worker_without_waiting_for_restart(engi
         assert not session.process.stdin.closed
         assert not (Path(job['repo']) / 'edits.txt').exists()
     finally:
+        session.close()
+
+
+def test_slow_read_query_does_not_block_heartbeat_or_user_pause(engines, tmp_path):
+    from threading import Event, Thread
+
+    root, versions = engines
+    job = {**job_for(root, versions['A'], tmp_path), 'probe_wait': True}
+    marker = root / 'waiting.txt'
+    marker.unlink(missing_ok=True)
+    session = bridge.Session(root, job['task_id'])
+    session.send('run', root=str(root), task_id=job['task_id'], engine_id=versions['A'],
+                 job=job, credential='offline-secret')
+    stop = Event()
+
+    def heartbeat():
+        while not stop.wait(0.5):
+            if session.process.poll() is not None:
+                return
+            try:
+                session.send('heartbeat')
+            except bridge.WorkerError:
+                return
+
+    thread = Thread(target=heartbeat)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 60
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.exists()
+        session.send('query', id='slow', method='offline_slow_query', arguments={})
+        assert session.reply('slow', timeout=13) == {'offline': True}
+        assert session.process.poll() is None
+        assert not (root / 'control' / job['task_id'] / 'host-lease-expired.json').exists()
+        receipt = session.control({'id': 'explicit-after-query', 'kind': 'pause', 'text': ''}, wait=True)
+        assert receipt['command_id'] == 'explicit-after-query'
+    finally:
+        stop.set()
+        thread.join(timeout=2)
         session.close()

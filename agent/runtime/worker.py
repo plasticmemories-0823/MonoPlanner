@@ -3,6 +3,7 @@
 from contextlib import redirect_stdout
 import json
 import os
+import queue
 from pathlib import Path
 import sys
 from threading import Event, Lock, Thread
@@ -30,7 +31,7 @@ def query(root, task, method, arguments):
         raise ValueError('Unsupported worker query')
     import sqlite3
     from agent.storage.usage import summarize
-    from agent.task.acceptance_limit import public
+    from agent.application.legacy_stop import public
 
     history = LocalHistory(directory)
     try:
@@ -133,6 +134,36 @@ def main():
         with controls_lock:
             return list(controls.values())
 
+    queries = queue.Queue(maxsize=32)
+    stop_controls = queue.Queue(maxsize=32)
+
+    def serve_queries():
+        while not completed.is_set():
+            try:
+                packet = queries.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            try:
+                value = query(root, task, packet['method'], packet.get('arguments', {}))
+                send('reply', id=packet['id'], result=value)
+            except Exception as exc:
+                send('reply', id=packet['id'], error=type(exc).__name__)
+
+    def serve_stops():
+        while not completed.is_set():
+            try:
+                request = stop_controls.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            try:
+                if request not in control_results:
+                    control_results[request] = pause_work(task, request, root=root)
+                send('reply', id=request, result=control_results[request])
+            except Exception as exc:
+                send('reply', id=request, error=type(exc).__name__)
+            finally:
+                stop_controls.task_done()
+
     def receive():
         try:
             for line in input_stream:
@@ -152,10 +183,9 @@ def main():
                     continue
                 if packet['kind'] == 'query':
                     try:
-                        value = query(root, task, packet['method'], packet.get('arguments', {}))
-                        send('reply', id=request, result=value)
-                    except Exception as exc:
-                        send('reply', id=request, error=type(exc).__name__)
+                        queries.put_nowait(packet)
+                    except queue.Full:
+                        send('reply', id=request, error='ReadQueryBusy')
                     continue
                 if packet['kind'] != 'control':
                     raise ValueError('Unsupported worker control')
@@ -169,7 +199,13 @@ def main():
                     controls[request] = value
                 if request not in control_results:
                     if value['kind'] == 'pause':
-                        receipt = pause_work(task, request, root=root)
+                        from agent.task.control import interrupt
+                        interrupt(root, task, 'pause', request)
+                        try:
+                            stop_controls.put_nowait(request)
+                        except queue.Full:
+                            send('reply', id=request, error='StopReceiptPending')
+                        continue
                     elif value['kind'] == 'message':
                         if request not in interrupted_messages:
                             supplement_work(task, request, root=root)
@@ -209,6 +245,8 @@ def main():
             return
 
     with redirect_stdout(sys.stderr):
+        Thread(target=serve_queries, name='engine-queries', daemon=True).start()
+        Thread(target=serve_stops, name='engine-stops', daemon=True).start()
         Thread(target=receive, name='engine-control', daemon=True).start()
         Thread(target=watch_host, name='host-lease-watch', daemon=True).start()
         send('ready', engine_id=bound['engine_id'], task_id=task)
@@ -220,6 +258,8 @@ def main():
                     first['job'], lambda kind, payload: send('event', event=kind, payload=payload),
                     current_controls, root=root,
                 )
+            # 先交付已经收到的停止回执，避免最终结果先退出进程而丢失确认。
+            stop_controls.join()
             completed.set()
             send('result', result=result)
         except Exception as exc:

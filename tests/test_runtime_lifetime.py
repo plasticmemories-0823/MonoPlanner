@@ -104,6 +104,8 @@ def test_native_pause_is_not_projected_as_confirmed_before_worker_cleanup(tmp_pa
     scheduler._emit(task, 'work_state', {'status': 'paused', 'event': 'task_returned'})
     assert store.work(task)['status'] == 'pausing'
     scheduler._emit(task, 'work_state', {'status': 'paused'})
+    assert store.work(task)['status'] == 'pausing'
+    scheduler._emit(task, 'work_state', {'status': 'paused', 'stopped_confirmed': True})
     assert store.work(task)['status'] == 'paused'
     scheduler.works.clear()
 

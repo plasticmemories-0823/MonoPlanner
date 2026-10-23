@@ -363,8 +363,17 @@ class ManagedEnvironments:
                 unregister_active_container(control)
 
 
+    def _plan(self, repo, project_scope=None):
+        from agent.execution.projects import ProjectEnvironments
+
+        plan = inspect_project(repo, project_scope=project_scope)
+        if ProjectEnvironments(self.root.parent).get(repo).get('wine_cmd'):
+            from agent.execution.wine import recipe_key
+            plan.recipe = {**plan.recipe, 'wine_cmd': recipe_key()}
+        return plan
+
     def status(self, repo):
-        plan = inspect_project(repo)
+        plan = self._plan(repo)
         record = _load(self._record(plan.root))
         current = record and record.get('fingerprint') == plan.fingerprint
         if current:
@@ -661,11 +670,11 @@ LABEL org.monoplanner.managed-base="{key}"
     # ============================================================
     # 隔离容器中的依赖安装
     # ============================================================
-    def _setup(self, plan, base, work, progress, cancelled):
+    def _setup(self, plan, base, work, progress, cancelled, *, wine=False):
         with _default_downloads():
-            return self._setup_with_downloads(plan, base, work, progress, cancelled)
+            return self._setup_with_downloads(plan, base, work, progress, cancelled, wine=wine)
 
-    def _setup_with_downloads(self, plan, base, work, progress, cancelled):
+    def _setup_with_downloads(self, plan, base, work, progress, cancelled, *, wine=False):
         identity = uuid.uuid4().hex
         network, proxy, setup = (
             'monoplanner-prepare-' + identity + suffix for suffix in ('-net', '-proxy', '-work')
@@ -712,7 +721,10 @@ LABEL org.monoplanner.managed-base="{key}"
         proxy_code = Path(managed_proxy.__file__).read_text(encoding='utf-8')
         setup_code = Path(managed_setup.__file__).read_bytes()
         (work / 'setup.py').write_bytes(setup_code)
-        _save(work / 'plan.json', {'projects': plan.projects})
+        _save(work / 'plan.json', {'projects': plan.projects, 'wine_cmd': wine})
+        if wine:
+            from agent.execution.wine import copy_installer
+            copy_installer(work / 'wine', plan.recipe['wine_cmd'])
         constraints = [
             '--cap-drop',
             'ALL',
@@ -727,6 +739,13 @@ LABEL org.monoplanner.managed-base="{key}"
             *LOG_OPTIONS,
             *label_args,
         ]
+        setup_constraints = list(constraints)
+        if wine:
+            # 只在无项目资料的受信任 Wine 基础安装容器中开放包管理所需能力。
+            if plan.projects or plan.materials:
+                raise PreparationError('Wine 基础安装不能混入项目安装脚本。')
+            setup_constraints += [arg for name in ('CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID')
+                            for arg in ('--cap-add', name)]
         try:
             # 分派前先记录名称：取消或 CLI 失败时，Docker 可能已经
             # 创建了这个名称唯一、由程序管理的资源。
@@ -816,7 +835,7 @@ LABEL org.monoplanner.managed-base="{key}"
                     'never',
                     '--network',
                     network,
-                    *constraints,
+                    *setup_constraints,
                     '--init',
                     *proxy_environment('http://download-proxy:3128'),
                     '--env',
@@ -842,13 +861,15 @@ LABEL org.monoplanner.managed-base="{key}"
                 (source, '/monoplanner-source'),
                 (work / 'setup.py', '/opt/monoplanner/setup.py'),
                 (work / 'plan.json', '/monoplanner-plan.json'),
+                *([(work / 'wine', '/opt/monoplanner/wine-installer')] if wine else []),
             ):
                 self._run(
                     ['cp', str(local), setup + ':' + destination],
                     log=work / ('copy-' + local.name + '.log'),
                     cancelled=cancelled,
                 )
-            progress('installing', '正在按项目配置安装依赖，安装过程在独立容器中运行。')
+            progress('installing', '正在下载并安装 Wine CMD 兼容环境。' if wine else
+                     '正在按项目配置安装依赖，安装过程在独立容器中运行。')
             self._run(
                 ['start', '--attach', setup],
                 log=work / 'install.log',
@@ -875,6 +896,9 @@ LABEL org.monoplanner.managed-base="{key}"
             modules = result.get('node_modules') if isinstance(result, dict) else None
             if not isinstance(modules, list) or len(modules) > 64:
                 raise PreparationError('项目环境检查结果无效。')
+            if wine:
+                from agent.execution.wine import verify_receipt
+                verify_receipt(result.get('wine_cmd'))
             seen = set()
             for item in modules:
                 relative = item.get('relative') if isinstance(item, dict) else None
@@ -901,6 +925,9 @@ LABEL org.monoplanner.managed-base="{key}"
                     'ENV ' + ' '.join(name + '=' for name in PROXY_VARIABLES),
                     '--change',
                     'LABEL org.monoplanner.project-fingerprint=' + plan.fingerprint,
+                    *(['--change', 'LABEL org.monoplanner.wine-cmd=1',
+                       '--change', 'ENV WINEARCH=win64 WINEPREFIX=/tmp/monoplanner-wine '
+                                   'WINEDEBUG=-all WINEDLLOVERRIDES=mscoree,mshtml='] if wine else []),
                     '--change',
                     'ENTRYPOINT ["/bin/bash"]',
                     '--change',
@@ -928,6 +955,7 @@ LABEL org.monoplanner.managed-base="{key}"
                     'node_modules': modules,
                     'manifest_count': len(plan.files),
                     'base_image': base,
+                    **({'wine_cmd': True} if plan.recipe.get('wine_cmd') else {}),
                 },
             }
         finally:
@@ -944,7 +972,7 @@ LABEL org.monoplanner.managed-base="{key}"
                 for key in control_keys:
                     unregister_active_container(key)
 
-    def _empty_environment(self, plan, base, work, progress, cancelled):
+    def _empty_environment(self, plan, base, work, progress, cancelled, *, allow_wine_install=False):
         """无项目依赖时，共享同一套已准备的基础工具。"""
         from agent.execution.managed_plan import ProjectPlan
 
@@ -969,14 +997,17 @@ LABEL org.monoplanner.managed-base="{key}"
                 ):
                     progress('ready', '已复用基础工具环境，无需复制项目资料。')
                     return binding
-            binding = self._setup(empty, base, work, progress, cancelled)
+            if plan.recipe.get('wine_cmd') and not allow_wine_install:
+                raise PreparationError('Wine 环境尚未安装或需要更新；请在项目环境中点击安装 Wine。')
+            binding = self._setup(empty, base, work, progress, cancelled,
+                                  **({'wine': True} if plan.recipe.get('wine_cmd') else {}))
             _save(record, {'fingerprint': key, 'binding': binding})
             return binding
 
     # ============================================================
     # 环境准备的主流程
     # ============================================================
-    def prepare(self, repo, progress=None, cancelled=None, *, project_scope=None):
+    def prepare(self, repo, progress=None, cancelled=None, *, project_scope=None, allow_wine_install=False):
         scope = resolve_scope(project_root(repo), project_scope)
         record = self._record(scope.root)
         project_key = record.stem
@@ -984,7 +1015,7 @@ LABEL org.monoplanner.managed-base="{key}"
             _check_cancel(cancelled)
             # 等待锁期间目录范围可能变化；安装只使用作业已经冻结的范围。
             scope.validate(full_check=True)
-            plan = inspect_project(repo, project_scope=scope)
+            plan = self._plan(repo, project_scope=scope)
             work = self.root / 'attempts' / (time.strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex)
             work.mkdir(parents=True)
 
@@ -1040,13 +1071,19 @@ LABEL org.monoplanner.managed-base="{key}"
                     f"已确定安装资料：{materials['file_count']} 个文件，{materials['total_bytes']:,} 字节。",
                 )
                 base = self._base(plan, work, emit, cancelled)
+                wine_base = None
+                if plan.recipe.get('wine_cmd'):
+                    wine_work = work / 'wine-base'
+                    wine_work.mkdir()
+                    wine_base = self._empty_environment(plan, base, wine_work, emit, cancelled,
+                                                        allow_wine_install=allow_wine_install)
                 binding = (
-                    self._setup(plan, base, work, emit, cancelled)
+                    self._setup(plan, wine_base['image'] if wine_base else base, work, emit, cancelled)
                     if plan.projects
-                    else self._empty_environment(plan, base, work, emit, cancelled)
+                    else wine_base or self._empty_environment(plan, base, work, emit, cancelled)
                 )
                 scope.validate(full_check=True)
-                if inspect_project(repo, project_scope=scope).fingerprint != plan.fingerprint:
+                if self._plan(repo, project_scope=scope).fingerprint != plan.fingerprint:
                     raise PreparationError(
                         '依赖配置在安装过程中变化。已保留旧环境；请保存配置后重新准备。'
                     )

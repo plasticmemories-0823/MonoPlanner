@@ -29,12 +29,44 @@ class Review(BaseModel):
     decision: Literal["freeze", "revise"]
     trial_id: str
     reason: str = Field(min_length=1, max_length=1600)
-    test_code: str = Field(default="", max_length=32768)
+    test_code: str = Field(
+        default="", max_length=32768,
+        description=(
+            'Complete Python unittest source with actual newline characters. Do not wrap the '
+            'entire test module in exec/eval of an encoded string: test attribution must retain '
+            'real source locations. The test file is outside the project; locate the real '
+            'repository from cwd, not from the test file __file__.'
+        ),
+    )
     test_driver: list[str] = Field(default_factory=list, max_length=32)
     execution_checks: list[ExecutionCheck] = Field(default_factory=list, max_length=8)
     regression_command: str = Field(default="", max_length=16000)
     evidence: list[Evidence] = Field(default_factory=list, max_length=24)
     corrections: list[Correction] = Field(default_factory=list, max_length=24)
+
+
+def freeze_feedback(report):
+    """解释既有冻结闸门的失败位置，不改变其放行条件。"""
+    issues = []
+    for row in report.get('test_results') or []:
+        for error in row.get('exceptions') or []:
+            if error.get('phase') != 'test':
+                issues.append(
+                    str(row.get('id', 'unknown test'))[:160] + ': phase='
+                    + str(error.get('phase')) + ', origin=' + str(error.get('origin'))
+                )
+    if issues:
+        return ('Test failure attribution is not a test-body failure: '
+                + '; '.join(issues[:4]) + '. Submit direct Python unittest source with real '
+                'newlines and test methods; do not wrap the module in exec/eval strings. '
+                'Inspect the returned baseline record before revising. Existing source '
+                'failures may remain; unknown phases and fixture/loading errors cannot freeze.')
+    return ('Inspect the returned baseline record and revise the draft: '
+            f"status={report.get('status')}, error_kind={report.get('error_kind')}, "
+            f"tests_run={report.get('tests_run')}, integrity_ok={report.get('integrity_ok')}, "
+            f"execution_ready={report.get('execution_ready')}. "
+            'Require complete collected tests, attributable test execution and intact evidence. '
+            'No original requirement or fixed command may be weakened.')
 
 
 def checked(root, ref):
@@ -537,7 +569,7 @@ def review(loop, decision, response):
     report = checked(loop.root, current_trial["baseline_result"])
     if not tests_ready_for_candidate(report):
         raise ValueError(
-            "Acceptance is not runnable; inspect its baseline errors and revise it before freezing"
+            "Acceptance cannot be frozen. " + freeze_feedback(report)
         )
     version = {
         **proposal,

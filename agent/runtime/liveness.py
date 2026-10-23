@@ -72,7 +72,18 @@ class Lease:
     def _write(self, value):
         if not self.binding.is_file():
             raise OSError('Container lifetime original is missing')
-        atomic_write(self.directory / 'heartbeat', (value + '\n').encode('ascii'))
+        # Docker 的只读句柄可能短暂阻止 Windows 原子替换；只在现有失效窗口内重试。
+        # 持续失写仍须撤销租约，不能用无限重试掩盖宿主或存储故障。
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                atomic_write(self.directory / 'heartbeat', (value + '\n').encode('ascii'))
+                return
+            except PermissionError as error:
+                if (getattr(error, 'winerror', None) not in {5, 32, 33}
+                        or time.monotonic() >= deadline):
+                    raise
+                time.sleep(0.05)
 
     def arm(self):
         if self.thread and self.stopped.is_set():
@@ -97,11 +108,14 @@ class Lease:
                         return
                     self.sequence += 1
                     self._write(self.token + ' ' + str(self.sequence))
-        except Exception:
+        except Exception as error:
             # 无法续租时保留最后一份文件，容器按自身时间失效，不能保持运行。
             self.stopped.set()
             if self.signal:
-                self.signal.interrupt('pause', 'lifetime-renewal-failed')
+                self.signal.interrupt('pause', 'lifetime-renewal-failed', details={
+                    'type': type(error).__name__, 'errno': getattr(error, 'errno', None),
+                    'winerror': getattr(error, 'winerror', None),
+                })
 
     def revoke(self):
         self.stopped.set()

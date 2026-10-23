@@ -20,8 +20,8 @@ class RequestReservation:
     call_id: int
     used_steps: int
     purpose: str
-    remaining_steps: int
-    working_steps: int
+    remaining_steps: int | None
+    working_steps: int | None
     report_steps: int
     reported_tokens: int
     unknown_usage_steps: int
@@ -42,7 +42,7 @@ class ServiceReservation:
 
 @dataclass
 class StepBudget:
-    max_steps: int = 1000
+    max_steps: int | None = None
     used_steps: int = 0
     reported_tokens: int = 0
     unknown_usage_steps: int = 0
@@ -73,7 +73,7 @@ class StepBudget:
     started_at: float = field(default_factory=time.monotonic)
 
     def __post_init__(self):
-        if self.max_steps <= 0:
+        if self.max_steps is not None and self.max_steps <= 0:
             raise ValueError("max_steps 必须大于 0")
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError("max_tokens 必须大于 0")
@@ -89,13 +89,14 @@ class StepBudget:
     @property
     def remaining_steps(self) -> int:
         with _BUDGET_LOCK:
-            return max(0, self.max_steps - self.used_steps)
+            return None if self.max_steps is None else max(0, self.max_steps - self.used_steps)
 
     @property
     def working_steps(self) -> int:
         with _BUDGET_LOCK:
-            return max(
-                0, self.remaining_steps - max(0, self.report_reserve - self.report_used_steps)
+            remaining = self.remaining_steps
+            return None if remaining is None else max(
+                0, remaining - max(0, self.report_reserve - self.report_used_steps)
             )
 
     def available_steps(self, purpose="work"):
@@ -103,9 +104,9 @@ class StepBudget:
             if self.cancelled:
                 return 0
             if purpose == "report":
-                return min(
-                    self.remaining_steps, max(0, self.report_reserve - self.report_used_steps)
-                )
+                reports = max(0, self.report_reserve - self.report_used_steps)
+                remaining = self.remaining_steps
+                return reports if remaining is None else min(remaining, reports)
             return self.working_steps
 
     def request_cancel(self, reason="用户请求停止任务。"):

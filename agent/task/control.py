@@ -14,18 +14,28 @@ class Signal:
         self.kind = None
         self.sequence = 0
         self.pending = {}
+        self.causes = {}
         self.callbacks = set()
         self.lock = RLock()
 
-    def interrupt(self, kind, identity=None):
+    def interrupt(self, kind, identity=None, *, details=None):
         with self.lock:
             self.sequence += 1
             self.pending[self.sequence] = (kind, identity)
+            self.causes[self.sequence] = {
+                'kind': kind, 'identity': identity,
+                'source': 'system' if system_identity(identity) else 'control' if identity else 'unknown',
+                **({'error': dict(details)} if details else {}),
+            }
             self._refresh()
             callbacks = tuple(self.callbacks)
         for callback in callbacks:
             callback()
         return self.sequence
+
+    def diagnostics(self):
+        with self.lock:
+            return [dict(self.causes[key]) for key in self.pending]
 
     def _refresh(self):
         kinds = [kind for kind, _ in self.pending.values()]
@@ -44,6 +54,7 @@ class Signal:
             for sequence, (_, saved) in list(self.pending.items()):
                 if saved == identity:
                     self.pending.pop(sequence)
+                    self.causes.pop(sequence, None)
             self._refresh()
 
     @contextmanager
@@ -58,6 +69,28 @@ class Signal:
         finally:
             with self.lock:
                 self.callbacks.discard(callback)
+
+
+def system_identity(identity):
+    return isinstance(identity, str) and (identity in {
+        'host-lease-expired', 'host-disconnected', 'lifetime-renewal-failed',
+        'dispatcher-lease-expired',
+    } or identity.startswith(('worker-exited-', 'startup-stop-', 'shutdown-', 'storage-fault:')))
+
+
+def reason(kind, causes):
+    identities = {row.get('identity') for row in causes}
+    if any(str(value).startswith('storage-fault:') for value in identities):
+        return 'Local runtime records could not be saved; work stopped to preserve unresolved results'
+    if any(str(value).startswith('shutdown-') for value in identities):
+        return 'The application is closing or its desktop owner was lost; work was stopped'
+    if 'lifetime-renewal-failed' in identities:
+        return 'Runtime heartbeat renewal failed; work was paused by the safety monitor'
+    if identities & {'host-lease-expired', 'host-disconnected', 'dispatcher-lease-expired'}:
+        return 'Runtime host heartbeat was lost; work was paused by the safety monitor'
+    return 'Model reply interrupted by a new input' if kind == 'message' else (
+        'Work paused by a control signal; inspect the saved cause before attributing it to the user'
+    )
 
 
 def current():

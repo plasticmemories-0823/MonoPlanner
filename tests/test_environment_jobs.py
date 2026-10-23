@@ -40,7 +40,7 @@ def job_fixture(tmp_path, monkeypatch):
                 else {'state': 'needs_preparation', 'stage': 'checking'}
             )
 
-        def prepare(self, repo, *, progress, cancelled, project_scope):
+        def prepare(self, repo, *, progress, cancelled, project_scope, allow_wine_install=False):
             project_scope.validate()
             calls.append(repo)
             entered.set()
@@ -204,16 +204,24 @@ def test_close_waits_for_thread_after_future_is_done(job_fixture):
     assert all(not thread.is_alive() for thread in fixture.jobs.pool._threads)
 
 
-def test_orphaned_preparation_never_replays_on_status(job_fixture):
+def test_retired_json_does_not_override_current_environment_jobs(job_fixture):
     fixture = job_fixture
     path = fixture.root / 'environment-jobs' / (
         hashlib.sha256(str(fixture.repos[0]).encode()).hexdigest() + '.json')
     atomic_write(path, b'{"status":"preparing","id":"old","stage":"installing"}')
     original = path.read_bytes()
     result = fixture.jobs.status(fixture.repos[0])
-    assert result['status'] == 'interrupted' and result['stage'] == 'interrupted'
+    assert result['status'] == 'idle' and result['stage'] == 'checking'
     assert path.read_bytes() == original
     assert fixture.calls == []
+    assert fixture.jobs.catalog.environment_job(str(fixture.repos[0])) is None
+    fixture.behavior['block'] = False
+    started = fixture.jobs.start(fixture.repos[0])
+    settled(fixture.jobs)
+    assert started['id'] != 'old'
+    assert fixture.jobs.status(fixture.repos[0])['status'] == 'ready'
+    assert fixture.calls == [str(fixture.repos[0])]
+    assert path.read_bytes() == original
 
 
 def test_manual_binding_wins_and_automatic_reset_does_not_change_frozen_copy(job_fixture):

@@ -68,9 +68,9 @@ class CliTests(unittest.TestCase):
                 self.assertEqual([row['kind'] for row in run.call_args.args[2]()], ['resume'])
                 self.assertEqual((root / 'bridge-job.json').read_bytes(), raw)
 
-    def test_acceptance_extension_requires_explicit_flag_and_bound_pause(self):
+    def test_unified_continue_routes_old_bound_kernel_pause_without_new_task(self):
         import json
-        from agent.task.acceptance_limit import STATUS
+        from agent.application.legacy_stop import STATUS
 
         with tempfile.TemporaryDirectory() as name:
             root = Path(name) / 'records'
@@ -92,7 +92,7 @@ class CliTests(unittest.TestCase):
                 run.assert_not_called()
                 persistent_main(['--state-dir', str(root)])
                 self.assertEqual(run.call_args.args[2](), [])
-                persistent_main(['--state-dir', str(root), '--continue-acceptance'])
+                persistent_main(['--state-dir', str(root), '--continue'])
                 controls = run.call_args.args[2]()
                 self.assertEqual(len(controls), 1)
                 self.assertEqual(controls[0]['acceptance_pause_id'], 'saved-pause')

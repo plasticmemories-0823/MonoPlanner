@@ -12,7 +12,7 @@ from agent.application.api import build_routes
 from agent.application.scheduler import Scheduler
 from agent.application.store import ACTIVE, TERMINAL, ApplicationStore, Conflict
 from agent.application.work_bridge import public_fact
-from agent.task.acceptance_limit import STATUS
+from agent.application.legacy_stop import STATUS
 
 
 def command(kind, **fields):
@@ -42,15 +42,37 @@ def work(tmp_path, monkeypatch):
     return store, conversation, job
 
 
-def test_acceptance_pause_has_durable_notice_snapshot_and_sse_without_model(work):
+def report_stop(work, *, fail=False):
+    store, conversation, job = work
+    scheduler = Scheduler(store)
+    def explain(_conversation, facts):
+        if fail:
+            raise TimeoutError('offline report failure')
+        saved = facts['task']['acceptance_limit']
+        return {'output': f"已完成 {saved['completed_rounds']} 轮验收，最近一次未通过。继续任务可从断点追加额度。"}
+    scheduler.chatbot.progress = explain
+    try:
+        scheduler.emit(job['task_id'], 'work_state', {'status': STATUS, 'acceptance_limit': store.work(job['task_id'])['acceptance_limit']})
+        with store.connection() as db:
+            last = db.execute('SELECT last_started FROM app_progress WHERE task_id=?', (job['task_id'],)).fetchone()[0]
+        pending = store.reserve_progress(now=max(__import__('time').time(), last) + 60)
+        assert pending
+        scheduler._report(pending)
+    finally:
+        scheduler.close()
+
+
+def test_acceptance_pause_has_one_durable_explanation_and_sse(work):
     store, conversation, job = work
     from agent.task.resumption import stopped
     assert stopped(STATUS) and STATUS not in TERMINAL and STATUS not in ACTIVE
     store.work_state(job['task_id'], STATUS, acceptance_limit=limit())
+    report_stop(work)
+    report_stop(work)
     client = TestClient(Starlette(routes=build_routes(store, object())))
     snapshot = client.get(f'/conversations/{conversation}/snapshot').json()
     assert snapshot['work']['acceptance_limit'] == limit()
-    notices = [row for row in snapshot['messages'] if row['source'] == 'system']
+    notices = [row for row in snapshot['messages'] if row['source'] == 'progress']
     assert len(notices) == 1
     assert '3 轮' in notices[0]['content'] and '未通过' in notices[0]['content']
     assert '继续任务' in notices[0]['content'] and '断点' in notices[0]['content']
@@ -109,7 +131,8 @@ def test_stale_page_cannot_extend_new_pause_and_command_retry_keeps_identity(wor
     fresh = command('resume', acceptance_pause_id='pause-6')
     assert not store.submit(conversation, fresh)['applied']
     assert store.commands(task=job['task_id'])[0]['acceptance_pause_id'] == 'pause-6'
-    assert len([m for m in store.snapshot(conversation)['messages'] if m['source'] == 'system']) == 2
+    report_stop(work)
+    assert store.work(job['task_id'])['acceptance_limit']['completed_rounds'] == 6
 
 
 @pytest.mark.parametrize('rounds', [3, 6])
@@ -174,28 +197,23 @@ def test_unconsumed_resume_does_not_spin_after_work_returns(work, outcome):
         scheduler.close()
 
 
-def test_acceptance_notice_does_not_require_progress_model(work):
+def test_acceptance_explanation_failure_retains_notice_without_retry(work):
     store, conversation, job = work
-    scheduler = Scheduler(store)
-    scheduler.chatbot.progress = lambda *_: pytest.fail('Pause notice requested a model')
-    try:
-        scheduler.emit(job['task_id'], 'work_state', {
-            'status': STATUS, 'event': STATUS, 'acceptance_limit': limit(),
-        })
-        assert store.reserve_progress(now=1_000_000) is None
-        scheduler._report({'task_id': job['task_id'], 'conversation': conversation,
-                           'reported_seq': 0, 'pending_seq': 10})
-        assert any('继续任务' in row['content'] for row in store.snapshot(conversation)['messages'])
-    finally:
-        scheduler.close()
-
+    report_stop(work, fail=True)
+    report_stop(work, fail=True)
+    notices = [row for row in store.snapshot(conversation)['messages'] if row['source'] == 'progress']
+    assert len(notices) == 1
+    assert '未重发' in notices[0]['content']
+    assert store.work(job['task_id'])['acceptance_limit'] == limit()
 
 
 
 def test_public_progress_facts_include_only_acceptance_summary():
     state = {'acceptance_limit': {**limit(), 'private_test': 'DO_NOT_PUBLISH'}}
     details = public_fact(state, STATUS)
-    assert details['acceptance_limit'] == limit()
+    assert 'acceptance_limit' not in details
+    from agent.application.legacy_stop import public
+    assert public(state) == limit()
     assert 'DO_NOT_PUBLISH' not in str(details)
 
 

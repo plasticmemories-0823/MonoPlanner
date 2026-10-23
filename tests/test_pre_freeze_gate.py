@@ -25,7 +25,7 @@ class PreFreezeGateTests(unittest.TestCase):
 
     def test_missing_complete_acceptance_cannot_execute_edits(self):
         result = self.run_replies([f.reply(self.candidate(test_code='')), self.blocked()])
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'task_cancelled')
         self.assertIn('验收代码不能为空', self.model.calls[-1][-1].content)
         self.assertIn('return 0', (self.repo / 'sample.py').read_text())
         self.assertFalse(result['rounds'])
@@ -35,7 +35,7 @@ class PreFreezeGateTests(unittest.TestCase):
         result = self.run_replies(
             [f.reply(self.candidate(test_code=' \n', test_driver=['-m', 'pytest'])), self.blocked()]
         )
-        self.assertEqual(result['status'], 'task_blocked')
+        self.assertEqual(result['status'], 'task_cancelled')
         self.assertIn('验收代码不能为空', self.model.calls[-1][-1].content)
         self.assertIn('return 0', (self.repo / 'sample.py').read_text())
 

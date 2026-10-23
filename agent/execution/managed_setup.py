@@ -246,6 +246,11 @@ def retain_node_dependencies():
 # ============================================================
 def main():
     plan = json.loads(Path('/monoplanner-plan.json').read_text(encoding='utf-8'))
+    wine = None
+    if plan.get('wine_cmd'):
+        import runpy
+        installer = runpy.run_path('/opt/monoplanner/wine-installer/install-wine.py')
+        wine = installer['install']()
     # Windows 文件复制不保留可执行位。运行包生命周期钩子前，
     # 只在一次性副本中恢复带有 shebang 的脚本权限。
     for path in SOURCE.rglob('*'):
@@ -271,7 +276,7 @@ def main():
         shutil.rmtree(path, ignore_errors=True)
     Path('/tmp').mkdir(mode=0o1777, exist_ok=True)
     Path('/monoplanner-result.json').write_text(
-        json.dumps({'node_modules': modules}), encoding='utf-8'
+        json.dumps({'node_modules': modules, **({'wine_cmd': wine} if wine else {})}), encoding='utf-8'
     )
     print('Environment ready', flush=True)
 

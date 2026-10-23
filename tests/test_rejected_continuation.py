@@ -91,12 +91,12 @@ class RejectedContinuationTests(unittest.TestCase):
         self.assertEqual(result['planner_calls'], 4)
         self.assertEqual(result['usage']['unknown_calls'], 0)
 
-    def test_repeated_known_empty_reply_stops_after_one_correction(self):
+    def test_repeated_known_empty_reply_keeps_correcting_within_budget(self):
         result = self.run_replies([self.known_empty(), self.known_empty(), self.stop])
-        self.assertEqual(result['status'], 'empty_model_response', result)
-        self.assertEqual(len(self.model.calls), 2)
-        self.assertEqual(self.load_state()['empty_response_repairs'], 1)
-        self.assertIsNotNone(self.load_state()['response_pending'])
+        self.assertEqual(result['status'], 'task_cancelled', result)
+        self.assertEqual(len(self.model.calls), 3)
+        self.assertEqual(self.load_state()['empty_response_repairs'], 2)
+        self.assertIsNone(self.load_state()['response_pending'])
         self.assertEqual(self.load_state()['plan_count'], 0)
 
     def test_empty_reply_unknown_usage_does_not_trigger_correction(self):
@@ -113,7 +113,7 @@ class RejectedContinuationTests(unittest.TestCase):
         with interrupt, self.assertRaises(error):
             self.run_replies([self.known_empty()])
         result = self.run_replies([self.stop])
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(result['calls_this_invocation'], 1)
         self.assertEqual(result['planner_calls'], 2)
         state = self.load_state()
@@ -152,8 +152,9 @@ class RejectedContinuationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'paused', result)
         self.assertEqual(self.load_state()['empty_response_repairs'], 1)
         result = self.run_replies([self.known_empty(), self.stop])
-        self.assertEqual(result['status'], 'empty_model_response', result)
-        self.assertEqual(result['calls_this_invocation'], 1)
+        self.assertEqual(result['status'], 'task_cancelled', result)
+        self.assertEqual(result['calls_this_invocation'], 2)
+        self.assertEqual(self.load_state()['empty_response_repairs'], 2)
         self.assertEqual(self.load_state()['plan_count'], 1)
 
     def test_pause_before_empty_feedback_commit_preserves_original_until_resume(self):
@@ -171,14 +172,14 @@ class RejectedContinuationTests(unittest.TestCase):
         self.assertEqual(self.load_state()['history'], before['history'])
         self.assertEqual(self.load_state()['rejection_pending'], before['rejection_pending'])
         result = self.run_replies([self.stop])
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(result['calls_this_invocation'], 1)
         self.assertEqual(self.load_state()['empty_response_repairs'], 1)
 
     def test_complete_invalid_arguments_are_returned_with_thought_and_original_bytes(self):
         response = self.rejected()
         result = self.run_replies([response, self.stop], interactive=True)
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assert_cycle(self.model.calls[1], response)
         self.assertEqual(self.engine.state['plan_count'], 0)
         self.assertEqual(
@@ -197,7 +198,7 @@ class RejectedContinuationTests(unittest.TestCase):
     def test_malformed_json_is_returned_without_fabrication(self):
         response = self.rejected(malformed=True)
         result = self.run_replies([response, self.stop])
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assert_cycle(self.model.calls[1], response)
         self.assertEqual(self.engine.state['plan_count'], 0)
 
@@ -238,7 +239,7 @@ class RejectedContinuationTests(unittest.TestCase):
         second.additional_kwargs[RAW_TOOL_CALLS][0]['id'] = 'second-call'
         second.additional_kwargs['reasoning_content'] = 'Second retained thought.'
         result = self.run_replies([first, second, self.stop])
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         body = wire_input(self.model.calls[2], self.engine.tools)['messages']
         self.assertEqual(
             [m['tool_call_id'] for m in body if m['role'] == 'tool'],
@@ -259,7 +260,7 @@ class RejectedContinuationTests(unittest.TestCase):
             }
         )
         result = self.run_replies([response, self.stop])
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         body = wire_input(self.model.calls[1], self.engine.tools)['messages']
         self.assertEqual(
             [m['tool_call_id'] for m in body if m['role'] == 'tool'],
@@ -288,7 +289,7 @@ class RejectedContinuationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'paused', result)
         self.assertEqual(len(self.model.calls), 0)
         result = self.run_replies([self.stop], interactive=True)
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'task_cancelled', result)
         self.assert_cycle(self.model.calls[0], response)
         self.assertEqual(
             [
@@ -336,7 +337,7 @@ class RejectedContinuationTests(unittest.TestCase):
         from agent.task.budget import StepBudget
 
         result = self.engine.run([], 'return 4', StepBudget(max_steps=4))
-        self.assertEqual(result['status'], 'task_blocked', result)
+        self.assertEqual(result['status'], 'budget_exhausted', result)
         body = wire_input(self.model.calls[-1], self.engine.tools)['messages']
         self.assertEqual(body[-2]['tool_calls'][0]['function']['name'], 'freeze_acceptance')
         self.assertEqual(body[-2]['reasoning_content'], 'Retain review thought.')
