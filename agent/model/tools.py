@@ -205,10 +205,9 @@ def prepare_work(**kwargs) -> dict:
 # ========================================================================
 @tool(args_schema=ASSISTANT_SCHEMA['retrieve_evidence'])
 def retrieve_evidence(**kwargs) -> dict:
-    """Search authorized original text with rg and automatic BM25 file ranking.
-    mode=exact uses query; mode=keywords uses terms and an empty query.
-    match=whole_word for complete identifiers; substring for fragments. Case-sensitive.
-    path only limits scope;
+    """Search authorized original text with literal substring matching and BM25 file ranking.
+    Only mode=exact is supported. Preserve the complete query, case, whitespace, punctuation
+    and repeated text; never split or rewrite it. path only limits scope;
     query is not an inferred filename or symbol. Use cursor for returned search continuation,
     or offset for an initial hit offset. Returns original ranges, versions and coverage gaps.
     Each hit indexes one result; each result indexes one source. Text and source metadata appear once.

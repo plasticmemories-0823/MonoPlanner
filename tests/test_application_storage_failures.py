@@ -107,8 +107,9 @@ def test_pause_still_requests_owned_termination_when_command_write_fails(applica
     # 空间恢复也不自动开启派发；同一紧急命令不会再排一次控制。
     result = scheduler.submit(conversation, pause)
     assert not result['recorded']
-    with pytest.raises(OSError):
-        scheduler.submit(conversation, {'id': str(uuid.uuid4()), 'kind': 'resume'})
+    # 派发仍被闭锁；只有明确继续且写探针与原件核对成功后才能解除。
+    receipt = scheduler.submit(conversation, {'id': str(uuid.uuid4()), 'kind': 'resume'})
+    assert receipt['received'] and not scheduler.status()['storage_error']
 
 
 def test_storage_failure_never_grants_emergency_control_over_unknown_or_legacy_conversation(application):

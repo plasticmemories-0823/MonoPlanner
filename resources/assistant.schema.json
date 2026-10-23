@@ -161,10 +161,9 @@
       "mode": {
         "type": "string",
         "enum": [
-          "exact",
-          "keywords"
+          "exact"
         ],
-        "description": "exact: one literal query. keywords: explicit terms, query empty. rg matches; BM25 automatically ranks files."
+        "description": "One case-sensitive literal substring query; BM25 automatically ranks matching files."
       },
       "offset": {
         "type": "integer",
@@ -209,21 +208,6 @@
           ]
         },
         "description": "Required source types, at most 4; empty when not required."
-      },
-      "match": {
-        "type": "string",
-        "enum": [
-          "whole_word",
-          "substring"
-        ],
-        "description": "whole_word for complete identifiers; substring for partial names, error text or fragments. Case-sensitive; no rewriting."
-      },
-      "terms": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "description": "keywords only: explicit literal terms, any term matches; empty for exact."
       }
     },
     "required": [
@@ -235,9 +219,7 @@
       "cursor",
       "intent",
       "required_entities",
-      "required_kinds",
-      "match",
-      "terms"
+      "required_kinds"
     ]
   }
 }

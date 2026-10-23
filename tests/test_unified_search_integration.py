@@ -35,12 +35,13 @@ def test_work_search_adapter_passes_original_query_offset_and_limit(tmp_path, mo
     assert observed[0][1]['offset'] == 57
     assert observed[0][1]['limit'] == 80
     assert observed[0][1]['mode'] == 'exact'
+    assert not {'match', 'terms'} & observed[0][1].keys()
 
 
 def test_exact_chat_search_works_before_binding_without_models(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     project.mkdir()
-    (project / 'file.py').write_text('answer = 42\n', encoding='utf-8')
+    (project / 'file.py').write_text('answer = 42\nanswer_extra = answer\n', encoding='utf-8')
     store = ApplicationStore(tmp_path / 'state')
     conversation = store.create(repo=str(project))['thread_id']
     bot = Chatbot(store, lambda *_: pytest.fail('Unexpected work handoff'))
@@ -49,6 +50,8 @@ def test_exact_chat_search_works_before_binding_without_models(tmp_path, monkeyp
     assert result['query'] == 'answer'
     assert result['hits'][0]['line'] == 1
     assert result['mode'] == 'exact' and result['complete']
+    assert result['total_matches'] == 3
+    assert not {'match', 'terms'} & result.keys()
 
 
 def test_same_line_distinct_match_ranges_survive_deduplication():
@@ -94,7 +97,7 @@ def test_exact_searches_beyond_previous_single_source_limit(tmp_path, monkeypatc
     source.write_bytes(b'x' * 2_000_100 + b'UNIQUE_TAIL')
     sources = integration.authorized_chat_sources(str(tmp_path), [], 'large.txt')
     result = integration._retrieve(SimpleNamespace(), sources,
-        {'query': 'UNIQUE_TAIL', 'path': str(source), 'match': 'substring'}, root=tmp_path / 'state',
+        {'query': 'UNIQUE_TAIL', 'path': str(source)}, root=tmp_path / 'state',
         cache_root=tmp_path / 'cache', repo=tmp_path, task_id='large', request_id='request',
         config={'version': 'exact-v1', 'values': __import__('dataclasses').asdict(integration.RagConfig())},
         reader_scope='authorized')

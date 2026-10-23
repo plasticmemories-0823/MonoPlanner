@@ -287,7 +287,6 @@ class OperationExecutor:
 
         return retrieve_work(getattr(self, 'retrieval_owner', self), {
             'query': step.query, 'path': step.path, 'mode': step.mode,
-            'match': step.match, 'terms': step.terms,
             'offset': step.offset, 'limit': step.limit, 'cursor': step.cursor,
             'intent': step.intent, 'required_entities': step.required_entities,
             'required_kinds': step.required_kinds,

@@ -3,6 +3,10 @@
 import os
 
 
+class LeaseBusy(RuntimeError):
+    """原执行者仍持有租约；这不表示任务故障，也不能启动第二个执行者。"""
+
+
 class ServiceLease:
     def __init__(self, root):
         self.path = root / '.application.lock'
@@ -27,7 +31,7 @@ class ServiceLease:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             handle.close()
-            raise RuntimeError('该数据目录已有运行中的 MonoPlanner 服务；请连接原服务或选择独立数据目录') from exc
+            raise LeaseBusy('该数据目录已有运行中的 MonoPlanner 服务；请连接原服务或选择独立数据目录') from exc
         self.handle = handle
 
     def close(self):

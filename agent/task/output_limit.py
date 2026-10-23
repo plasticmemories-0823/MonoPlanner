@@ -84,11 +84,11 @@ def resume_input(loop):
     )
 
 
-def resume_validated(loop):
+def resume_validated(loop, control=None):
     """只在历史、源码、验收和环境身份核验之后调用。"""
     if not active(loop.state):
         return False
-    control = resume_input(loop)
+    control = control or resume_input(loop)
     if not control:
         return False
     value = loop.state['output_limit']

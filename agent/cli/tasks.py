@@ -12,11 +12,16 @@ from agent.runtime.bridge import run_work
 from agent.execution.projects import workspace_binding
 from agent.storage.history import LocalHistory
 from agent.storage.preferences import Preferences
-from agent.storage.records import save
+from agent.storage.records import digest, save
 
 
 def _history(folder, query=None):
     """只读旧索引和原件，不取得执行租约或创建检查点。"""
+    for name in ('preparation-failed.json', 'preparation-interrupted.json'):
+        if query is None and (folder / name).exists():
+            from agent.source.snapshots import _safe_file
+
+            return json.loads(_safe_file(folder, Path(name)).read_bytes())
     if not (folder / 'history.sqlite3').is_file():
         return None
     if (folder / 'engine-binding.json').exists():
@@ -51,6 +56,8 @@ def main(argv=None):
     parser.add_argument('--pause-after-steps', type=int)
     parser.add_argument('--find', help='Search existing history metadata; no model or shell')
     parser.add_argument('--status', action='store_true')
+    parser.add_argument('--continue', dest='continue_task', action='store_true',
+                        help='明确继续原任务；成功任务复查，耗尽维度追加一批原始额度')
     parser.add_argument('--continue-acceptance', action='store_true',
                         help='明确批准增加一批验收轮次，从原任务断点继续')
     args = parser.parse_args(argv)
@@ -76,8 +83,10 @@ def main(argv=None):
             parser.error('任务入口原件无效或记录目录已改变；不会迁移旧任务。')
     folder = root / 'tasks' / job['task_id'] if job else root
     old = _history(folder)
-    if args.continue_acceptance and (args.find is not None or args.status):
-        parser.error('--continue-acceptance cannot be combined with read-only queries')
+    if args.continue_task and job is None:
+        parser.error('Continue requires an existing task')
+    if (args.continue_task or args.continue_acceptance) and (args.find is not None or args.status):
+        parser.error('Continuation cannot be combined with read-only queries')
     from agent.task import acceptance_limit
 
     limit = acceptance_limit.public(old or {})
@@ -88,7 +97,7 @@ def main(argv=None):
             parser.error('No existing indexed task at this path')
         value = (_history(folder, args.find) if args.find is not None else
                  {key: old.get(key) for key in ('status', 'reason', 'source', 'plan_count',
-                                                               'acceptance_limit')})
+                                                               'acceptance_limit', 'continuation')})
         print(json.dumps(value, ensure_ascii=False, indent=2))
         return 0
     if old is not None and job is None:
@@ -135,25 +144,40 @@ def main(argv=None):
                 parser.error('已有任务的需求、项目和验收原件不能替换，请使用新的 --state-dir。')
 
     invocation = {**job, 'budget': dict(job['budget'])}
-    if args.max_steps is not None:
-        invocation['budget']['max_steps'] = args.max_steps
+    if args.max_steps is not None and args.max_steps != job['budget']['max_steps']:
+        parser.error('已有任务额度只能用 --continue 按批追加，不能替换原始限额。')
     # 步数暂停是本次调用的调试边界，不在下次显式续跑时重复触发。
     invocation['pause_after_steps'] = args.pause_after_steps
-    if args.continue_acceptance:
-        controls = [{'id': uuid.uuid4().hex, 'kind': 'resume',
+    if args.continue_acceptance or (args.continue_task and (limit or {}).get("active")):
+        controls = [{'id': uuid.uuid5(uuid.UUID(job['task_id']), limit['pause_id']).hex, 'kind': 'resume',
                      'acceptance_pause_id': limit['pause_id']}]
     elif (limit or {}).get('active'):
         controls = []
     else:
-        controls = ([{'id': uuid.uuid4().hex, 'kind': 'resume'}]
-                    if old and old.get('status') in {'paused', 'awaiting_user', 'output_limit_reached', 'interrupted',
-                                                                  'model_request_unknown', 'execution_unknown',
-                                                                  'runtime_error', 'compaction_commit_unknown'}
-                    else [])
+        from agent.task.resumption import stopped
+
+        token = ((old or {}).get('continuation') or {}).get('stop_id')
+        # 崩溃可能发生在首次检查点之前，或留下 executing 状态。人工继续仍须
+        # 交付明确控制；是否还在运行由真实租约判断，不靠旧状态猜测。
+        controls = ([{
+            'id': uuid.uuid5(uuid.UUID(job['task_id']), token or digest(old or job)).hex,
+            'kind': 'resume', 'native_stop_id': token,
+        }] if args.continue_task else [])
+        if old and stopped(old.get('status')) and not controls:
+            print(json.dumps(old, ensure_ascii=False, indent=2))
+            return 0
     save(root / 'cli-invocations' / (uuid.uuid4().hex + '.json'),
          {'task_id': job['task_id'], 'budget': invocation['budget'],
           'pause_after_steps': invocation.get('pause_after_steps'), 'controls': controls})
-    result = run_work(invocation, lambda *_: None, lambda: controls)
+    from agent.application.lease import LeaseBusy
+
+    try:
+        result = run_work(invocation, lambda *_: None, lambda: controls)
+    except LeaseBusy:
+        # 仅租约占用可返回运行状态；内部故障不能被伪装成“正在运行”。
+        print(json.dumps({'status': 'running', 'task_id': job['task_id'],
+                          'dispatch_started': False}, ensure_ascii=False, indent=2))
+        return 0
     print(json.dumps({key: value for key, value in result.items()
                       if key not in {'messages', 'rounds', 'verification'}},
                      ensure_ascii=False, indent=2))

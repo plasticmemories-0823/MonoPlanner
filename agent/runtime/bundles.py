@@ -14,7 +14,8 @@ from agent.storage.resources import preflight_space, remove_private_tree
 from agent.runtime.distribution import python_files, tree_files
 
 
-PROTOCOL = 1
+PROTOCOL = 2
+SUPPORTED_PROTOCOLS = {1, 2}
 BUNDLE_FORMAT = 1
 
 
@@ -121,7 +122,7 @@ def _register(root, *, source=None):
         if required not in runtime_sources:
             raise ValueError('Frozen production runtime is missing: ' + required)
     sources = {}
-    for area in ('agent', 'resources', 'launcher/runtime/ripgrep'):
+    for area in ('agent', 'resources'):
         for path in tree_files(source / area):
             sources[path.relative_to(source).as_posix()] = path
     for name in ('requirements.txt', 'requirements-web.txt', 'requirements.lock',
@@ -148,7 +149,7 @@ def resolve(root, identifier):
     root = Path(root).resolve()
     folder = safe_path(root / 'engines', identity(identifier))
     manifest = _verify(folder, identifier)
-    if manifest.get('protocol') != PROTOCOL:
+    if manifest.get('protocol') not in SUPPORTED_PROTOCOLS:
         raise ValueError('The task needs an unsupported worker protocol; no work was dispatched')
     runtime_id = identity(manifest['runtime_id'])
     runtime = safe_path(root / 'engine-runtimes', runtime_id)
@@ -176,9 +177,11 @@ def binding(root, task, *, source=None, create=False):
             save(path, value)
     value = json.loads(path.read_text('utf-8'))
     if (set(value) != {'format', 'protocol', 'task_id', 'engine_id'} or value['format'] != 1
-            or value['protocol'] != PROTOCOL or value['task_id'] != task):
+            or value['protocol'] not in SUPPORTED_PROTOCOLS or value['task_id'] != task):
         raise ValueError('Task engine binding changed')
-    resolve(root, value['engine_id'])
+    _, _, manifest = resolve(root, value['engine_id'])
+    if manifest['protocol'] != value['protocol']:
+        raise ValueError('Task protocol differs from its pinned engine')
     return value
 
 

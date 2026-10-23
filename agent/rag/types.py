@@ -16,7 +16,7 @@ def canonical(value) -> str:
 RAG_PARENT_MEMORY_BYTES = 256 * 1024 * 1024
 CANDIDATE_MEMORY_BYTES = 32 * 1024 * 1024
 
-# 旧只读适配仍保留保守的正文分配额度；rg 文件扫描不整体分配原文。
+# 逐份扫描原文，分配正文前按共享内存额度核验。
 SOURCE_FIXED_MEMORY_BYTES = 136 * 1024 * 1024
 # 混合 Unicode 字符串可占原始 UTF-8 的四倍；包含旧正文、读取、校验及临时复制。
 SOURCE_TRANSIENT_MULTIPLIER = 16
@@ -36,7 +36,7 @@ class SourceReadBudgetExceeded(ValueError):
 
 
 def source_read_limit():
-    """从共享父进程预留推导读入上限，不复用语义模型的输入大小限制。"""
+    """从共享父进程预留推导原件读入上限。"""
     return max(0, (RAG_PARENT_MEMORY_BYTES - SOURCE_FIXED_MEMORY_BYTES)
                // SOURCE_TRANSIENT_MULTIPLIER)
 
@@ -82,8 +82,6 @@ class Query:
     source_versions: Mapping[str, str]
     intent: str = "diagnostic"
     mode: str = "exact"
-    match: str = "whole_word"
-    terms: tuple[str, ...] = ()
     cursor: str = ""
     limit: int = 80
     offset: int = 0

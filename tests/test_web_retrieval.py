@@ -302,7 +302,7 @@ class WebRetrievalTests(unittest.TestCase):
 
     def test_received_response_archive_failure_retains_unknown_fee_without_replay(self):
         with self.mocked_provider({'results': []}) as (provider, loop, folder, _):
-            with patch('pathlib.Path.write_bytes', side_effect=OSError('disk full')):
+            with patch('agent.execution.web.write_bytes', side_effect=OSError('disk full')):
                 with self.assertRaises(WebUnknown):
                     provider.search('query', loop, folder)
             self.assertIsNotNone(loop.state['web_request_pending'])

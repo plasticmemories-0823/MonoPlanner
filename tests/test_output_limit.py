@@ -281,6 +281,7 @@ class ContainerContinuationTests(unittest.TestCase):
         }
         self.container._continuation_container = lambda: deepcopy(self.actual)
         self.container._prepare_project_masks = Mock()
+        self.container.lifetime = Mock()
         self.container.start = Mock()
         self.container._docker = Mock(return_value=type('Result', (), {'returncode': 0})())
         self.receipt = self.container.output_limit_stop_receipt()

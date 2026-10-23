@@ -57,6 +57,8 @@ class RuntimeFactsTests(unittest.TestCase):
                     'SecurityOpt': ['no-new-privileges'],
                 },
                 'Mounts': [
+                    {'Source': str(environment.lifetime().directory),
+                     'Destination': '/monoplanner-lifetime', 'RW': False},
                     {'Source': str(environment.repo_root), 'Destination': '/testbed', 'RW': True},
                     {
                         'Source': str(environment.artifact_root),

@@ -29,6 +29,9 @@ class DockerEnvironmentTests(unittest.TestCase):
             return subprocess.CompletedProcess(arguments, 0, self.cid + "\n", "")
         if arguments[1] == "stop":
             return subprocess.CompletedProcess(arguments, 0, self.cid + "\n", "")
+        if arguments[1] == "inspect":
+            return subprocess.CompletedProcess(arguments, 0,
+                json.dumps([{'Id': self.cid, 'State': {'Running': False}}]), '')
         payload = json.loads(base64.b64decode(arguments[-1]))
         filename = Path(payload["status_path"]).name
         (self.artifacts / filename).write_text(
@@ -52,12 +55,13 @@ class DockerEnvironmentTests(unittest.TestCase):
         self.environment.start()
         self.environment.close()
         self.environment.close()
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 3)
         args = run.call_args_list[0].args[0]
         self.assertEqual(args[args.index("--network") + 1], "none")
         mounts = [args[i + 1] for i, arg in enumerate(args) if arg == "--mount"]
-        self.assertEqual(len(mounts), 2)
-        self.assertIn(f"source={self.repo.resolve()},target=/testbed", mounts[0])
+        self.assertEqual(len(mounts), 3)
+        self.assertTrue(any(f"source={self.repo.resolve()},target=/testbed" in value for value in mounts))
+        self.assertTrue(any('target=/monoplanner-lifetime,readonly' in value for value in mounts))
         self.assertNotIn("docker.sock", " ".join(args))
         self.assertNotIn("--env-file", args)
         self.assertEqual(run.call_args_list[-1].args[0][-1], self.cid)

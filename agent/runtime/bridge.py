@@ -9,7 +9,7 @@ from threading import Event, Lock, Thread
 import time
 import uuid
 
-from agent.runtime.bundles import PROTOCOL, binding, resolve, safe_path
+from agent.runtime.bundles import binding, resolve, safe_path
 from agent.storage.preferences import state_root
 
 
@@ -34,6 +34,7 @@ class Session:
     def __init__(self, root, task, *, create=False):
         self.root, self.task = Path(root).resolve(), task
         self.binding = binding(self.root, task, create=create)
+        self.protocol = self.binding['protocol']
         self.source, runtime, _ = resolve(self.root, self.binding['engine_id'])
         environment = dict(os.environ)
         for name in ('DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'MONOPLANER_WORKER_CREDENTIAL',
@@ -64,7 +65,7 @@ class Session:
         try:
             for line in self.process.stdout:
                 value = json.loads(line)
-                if value.get('protocol') != PROTOCOL:
+                if value.get('protocol') != self.protocol:
                     raise WorkerError('Worker returned an unsupported protocol')
                 if value['kind'] == 'reply':
                     with self.reply_lock:
@@ -82,7 +83,7 @@ class Session:
                 raise WorkerError('Worker exited before command receipt')
             try:
                 self.process.stdin.write(json.dumps(
-                    {'protocol': PROTOCOL, 'kind': kind, **values}, ensure_ascii=False
+                    {'protocol': self.protocol, 'kind': kind, **values}, ensure_ascii=False
                 ) + '\n')
                 self.process.stdin.flush()
             except (OSError, ValueError) as exc:
@@ -155,6 +156,8 @@ def _run_work(job, emit, controls, root, task):
         raise WorkerUnavailable(str(exc)) from exc
     received_result = False
     try:
+        if getattr(session, 'protocol', 2) < 2:
+            raise WorkerUnavailable('原内核缺少失联停止协议；已保留原件，请先进行显式迁移。')
         session.send('run', root=str(root), task_id=task,
                      engine_id=session.binding['engine_id'], job=job,
                      credential=settings['api_key'], initial_controls=controls())
@@ -162,7 +165,16 @@ def _run_work(job, emit, controls, root, task):
             if key in _sessions:
                 raise WorkerError('Task already has an active worker')
             _sessions[key] = session
+        heartbeat_at = time.monotonic()
+        acknowledged_at = heartbeat_at
+        ready = False
         while True:
+            now = time.monotonic()
+            if now - acknowledged_at > (8 if ready else 60):
+                raise WorkerError('Worker control heartbeat expired; stopping owned execution')
+            if now - heartbeat_at >= 1:
+                session.send('heartbeat')
+                heartbeat_at = now
             for command in controls():
                 if session.finished.is_set() or session.process.poll() is not None:
                     break
@@ -173,13 +185,18 @@ def _run_work(job, emit, controls, root, task):
                 if session.finished.is_set():
                     raise WorkerError('Worker ended without a final saved result')
                 continue
-            if value['kind'] == 'event':
+            if value['kind'] == 'ready':
+                ready = True
+                acknowledged_at = time.monotonic()
+            elif value['kind'] == 'event':
                 emit(value['event'], value['payload'])
+            elif value['kind'] == 'heartbeat':
+                acknowledged_at = time.monotonic()
             elif value['kind'] == 'result':
                 received_result = True
                 return value['result']
             elif value['kind'] == 'error':
-                raise WorkerError('Frozen worker stopped: ' + value['error'])
+                raise WorkerError('Frozen worker stopped: ' + value['error'] + ': ' + value.get('message', ''))
     finally:
         session.close()
         with _sessions_lock:

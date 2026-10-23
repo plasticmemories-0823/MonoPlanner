@@ -64,7 +64,10 @@ class ConsoleConversation:
             while True:
                 snapshot = self.store.snapshot(self.conversation)
                 work = snapshot['work']
-                if snapshot['chat_status'] not in ACTIVE and (not work or work['status'] not in ACTIVE):
+                waiting = any(row['id'] == command['id'] for row in self.store.commands(
+                    conversation=self.conversation, states=('pending', 'running')))
+                if (not waiting and snapshot['chat_status'] not in ACTIVE
+                        and (not work or work['status'] not in ACTIVE)):
                     break
                 time.sleep(0.1)
         except KeyboardInterrupt:

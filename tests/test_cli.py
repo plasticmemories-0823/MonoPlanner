@@ -62,6 +62,8 @@ class CliTests(unittest.TestCase):
                 'agent.cli.tasks._history', return_value={'status': 'output_limit_reached'}
             ), redirect_stdout(io.StringIO()):
                 self.assertEqual(persistent_main(['--state-dir', str(root)]), 0)
+                run.assert_not_called()
+                self.assertEqual(persistent_main(['--state-dir', str(root), '--continue']), 0)
                 self.assertEqual(run.call_args.args[0]['task_id'], saved['task_id'])
                 self.assertEqual([row['kind'] for row in run.call_args.args[2]()], ['resume'])
                 self.assertEqual((root / 'bridge-job.json').read_bytes(), raw)
@@ -105,6 +107,56 @@ class CliTests(unittest.TestCase):
                                  '--repo', name, '--task', 'request'])
             run.assert_not_called()
             self.assertFalse((Path(name) / 'records').exists())
+
+    def test_continue_after_crash_before_first_checkpoint_keeps_explicit_control(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as name:
+            root, repo = Path(name) / 'records', Path(name) / 'repo'
+            repo.mkdir()
+            with patch('agent.cli.tasks.run_work', return_value={'status': 'paused'}), patch(
+                'agent.cli.tasks._history', return_value=None
+            ), redirect_stdout(io.StringIO()):
+                persistent_main(['--state-dir', str(root), '--repo', str(repo), '--task', 'task'])
+            original = (root / 'bridge-job.json').read_bytes()
+            for stored in (None, {'status': 'executing', 'request_sequence': 4}):
+                with self.subTest(stored=stored), patch('agent.cli.tasks._history', return_value=stored), patch(
+                    'agent.cli.tasks.run_work', return_value={'status': 'paused'}
+                ) as run, redirect_stdout(io.StringIO()):
+                    persistent_main(['--state-dir', str(root), '--continue'])
+                    first = run.call_args.args[2]()
+                    self.assertEqual(len(first), 1)
+                    self.assertEqual(first[0]['kind'], 'resume')
+                    persistent_main(['--state-dir', str(root), '--continue'])
+                    self.assertEqual(run.call_args.args[2](), first)
+                    self.assertEqual(run.call_args.args[0]['task_id'], json.loads(original)['task_id'])
+            self.assertEqual((root / 'bridge-job.json').read_bytes(), original)
+
+    def test_continue_while_native_owner_runs_returns_status_without_dispatch(self):
+        import json
+        from agent.application.lease import ServiceLease
+
+        with tempfile.TemporaryDirectory() as name:
+            root, repo = Path(name) / 'records', Path(name) / 'repo'
+            repo.mkdir()
+            with patch('agent.cli.tasks.run_work', return_value={'status': 'paused'}), patch(
+                'agent.cli.tasks._history', return_value=None
+            ), redirect_stdout(io.StringIO()):
+                persistent_main(['--state-dir', str(root), '--repo', str(repo), '--task', 'task'])
+            job = json.loads((root / 'bridge-job.json').read_bytes())
+            folder = root / 'tasks' / job['task_id']
+            folder.mkdir(parents=True)
+            owner = ServiceLease(folder)
+            owner.acquire()
+            try:
+                output = io.StringIO()
+                with patch('agent.cli.tasks._history', return_value={'status': 'executing'}), patch(
+                    'agent.runtime.bridge.Session', side_effect=AssertionError('No second worker')
+                ), redirect_stdout(output):
+                    self.assertEqual(persistent_main(['--state-dir', str(root), '--continue']), 0)
+                self.assertEqual(json.loads(output.getvalue())['status'], 'running')
+            finally:
+                owner.close()
 
     def test_workspace_check_is_offline(self):
         with tempfile.TemporaryDirectory() as name, patch.object(

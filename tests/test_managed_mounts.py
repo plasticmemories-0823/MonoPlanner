@@ -139,7 +139,9 @@ class ManagedMountTests(unittest.TestCase):
         for args in seeds:
             self.assertEqual(args[args.index('--network') + 1], 'none')
             self.assertIn('--read-only', args)
-            self.assertNotIn('type=bind', repr(args))
+            binds = [value for value in args if value.startswith('type=bind')]
+            self.assertEqual(len(binds), 1)
+            self.assertTrue(binds[0].endswith('target=/monoplanner-lifetime,readonly'))
             self.assertNotIn(str(self.repo), repr(args))
             variables = [args[i + 1] for i, arg in enumerate(args) if arg == '--env']
             self.assertTrue(all(name + '=' in variables for name in PROXY_VARIABLES))
@@ -344,6 +346,8 @@ class ManagedMountTests(unittest.TestCase):
                         'Destination': '/agent-artifacts',
                         'RW': True,
                     },
+                    {'Type': 'bind', 'Source': str(env.lifetime().directory),
+                     'Destination': '/monoplanner-lifetime', 'RW': False},
                     *(
                         {'Type': 'volume', 'Name': volume, 'Destination': target, 'RW': False}
                         for target, volume in env.dependency_mounts.items()

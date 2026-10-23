@@ -24,18 +24,26 @@ def watch_desktop_close(shutdown):
     kernel.CloseHandle.restype = wintypes.BOOL
     handle = kernel.OpenEventW(0x00100000, False, name)
     if not handle:
-        # HTTP 退出仍可用；不猜测或创建另一个同名控制对象。
-        import logging
-        logging.getLogger(__name__).warning('Desktop close event unavailable')
+        # 已声明的桌面控制对象丢失，不能悄悄降级成无人管理的服务。
+        shutdown.start()
+        return lambda: None
+    heartbeat_name = os.getenv('MONOPLANER_DESKTOP_HEARTBEAT')
+    heartbeat = kernel.OpenEventW(0x00100000, False, heartbeat_name) if heartbeat_name else None
+    if heartbeat_name and not heartbeat:
+        kernel.CloseHandle(handle)
+        shutdown.start()
         return lambda: None
     # 已关闭的桌面可能早于后端启动；同步读取，不能等待监听线程调度后才闭锁。
     if kernel.WaitForSingleObject(handle, 0) == 0:
         kernel.CloseHandle(handle)
+        if heartbeat:
+            kernel.CloseHandle(heartbeat)
         shutdown.start()
         return lambda: None
     stopped = Event()
 
     def watch():
+        last_pulse = time.monotonic()
         try:
             while not stopped.is_set():
                 result = kernel.WaitForSingleObject(handle, 100)
@@ -43,9 +51,19 @@ def watch_desktop_close(shutdown):
                     shutdown.start()
                     return
                 if result != 258:
+                    shutdown.start()
                     return
+                if heartbeat:
+                    pulse = kernel.WaitForSingleObject(heartbeat, 0)
+                    if pulse == 0:
+                        last_pulse = time.monotonic()
+                    elif pulse != 258 or time.monotonic() - last_pulse > 8:
+                        shutdown.start()
+                        return
         finally:
             kernel.CloseHandle(handle)
+            if heartbeat:
+                kernel.CloseHandle(heartbeat)
 
     thread = Thread(target=watch, name='desktop-close-event', daemon=True)
     thread.start()

@@ -350,6 +350,15 @@ class DockerEnvironment:
         self._control_key = None
         self._execution_unknown = False
         self.disposable = False
+        self._lifetime = None
+
+    def lifetime(self):
+        if self._lifetime is None:
+            from agent.runtime.liveness import Lease
+
+            root = self.resource_root if self.resource_owner else self.artifact_root.parent
+            self._lifetime = Lease(root, self.container_name)
+        return self._lifetime
 
     def _check_cancelled(self):
         from agent.storage.resources import owner_cancelled
@@ -358,6 +367,8 @@ class DockerEnvironment:
             raise InterruptedError('任务已立即暂停；容器及操作现场已保留。')
 
     def _kill_now(self):
+        if self._lifetime is not None:
+            self._lifetime.revoke()
         self._execution_unknown = True
         result = self._docker(
             ['kill', self._container_id or self.container_name], timeout=8,
@@ -367,6 +378,21 @@ class DockerEnvironment:
         if result.returncode and not any(text in result.stderr.lower()
                                         for text in ('no such container', 'is not running')):
             raise RuntimeError('Docker 未确认任务容器已停止。')
+        return self._confirm_stopped()
+
+    def _confirm_stopped(self):
+        target = self._container_id or self.container_name
+        result = self._docker(['inspect', target], timeout=5, capture_output=True,
+                              text=True, encoding='utf-8', errors='replace')
+        if result.returncode:
+            if 'no such' in (result.stdout + result.stderr).lower():
+                return {'stopped': True, 'resource_state': 'missing', 'container_id': self._container_id}
+            raise RuntimeError('无法核验容器停止状态；租约已撤销。')
+        actual = json.loads(result.stdout)[0]
+        if (self._container_id and actual.get('Id') != self._container_id
+                or actual.get('State', {}).get('Running') is not False):
+            raise RuntimeError('原容器仍在运行或身份变化，不能报告已停止。')
+        return {'stopped': True, 'resource_state': 'stopped', 'container_id': actual['Id']}
 
     def _register_control(self):
         if not self.resource_owner:
@@ -515,6 +541,9 @@ class DockerEnvironment:
         record()
         control = register_active_container(owner, name, stop, root=self.resource_root)
         complete = False
+        from agent.runtime.liveness import Lease
+
+        guard = Lease(self.resource_root, name, cancelled=lambda: owner_cancelled(owner, self.resource_root))
         try:
             arguments = [
                 'create', '--pull', 'never', '--name', name, '--network', 'none', '--read-only',
@@ -526,6 +555,7 @@ class DockerEnvironment:
                 '--entrypoint', '/bin/cp', self.image, '-R', '--no-preserve=ownership',
                 item['image_path'] + '/.', '/prepared/',
             ]
+            arguments = guard.wrap(arguments, self.image)
             container_id = self._dependency_query(arguments, check_after=False).strip()
             if not re.fullmatch(r'[0-9a-f]{64}', container_id):
                 raise RuntimeError('依赖复制容器身份未确认。')
@@ -539,6 +569,7 @@ class DockerEnvironment:
                 raise RuntimeError('项目依赖准备失败；复制结果未确认。')
             complete = True
         finally:
+            guard.revoke()
             try:
                 if complete and not owner_cancelled(owner, self.resource_root):
                     self._finish_resources(owner, [identity], completed=True)
@@ -740,6 +771,7 @@ class DockerEnvironment:
             arguments[1:1] = [
                 '--mount', f'type=bind,source={source},target={target},readonly',
             ]
+        arguments = self.lifetime().wrap(arguments, self.image)
         result = self._docker(
             arguments, capture_output=True, text=True, encoding="utf-8", errors="replace"
         )
@@ -967,6 +999,8 @@ class DockerEnvironment:
     # ============================================================
     def close(self):
         """只停止本实例管理的容器，保留容器和全部本机记录。"""
+        if self._lifetime is not None:
+            self._lifetime.revoke()
         if self._closed:
             return
         if self._container_id is not None:
@@ -985,6 +1019,7 @@ class DockerEnvironment:
             )
             if result.returncode != 0:
                 raise RuntimeError(f"无法停止任务容器：{result.stderr.strip()}")
+            save(self.artifact_root / 'container-stopped.json', self._confirm_stopped())
         self._closed = True
         from agent.storage.resources import owner_cancelled, unregister_active_container
 

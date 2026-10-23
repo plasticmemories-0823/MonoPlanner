@@ -14,16 +14,13 @@ from agent.storage.usage import summarize
 from agent.task.acceptance_limit import STATUS as ACCEPTANCE_LIMIT
 
 
-ACTIVE = {'queued', 'running', 'needs_plan', 'executing', 'pausing'}
+from agent.task.resumption import ACTIVE, describe, explicit_continue, stopped
 TERMINAL = {'verified_success', 'task_blocked', 'task_cancelled', 'chat_complete',
             'existing_complete', 'stalled', 'budget_exhausted', 'preparation_failed'}
 UNKNOWN = {'model_request_unknown', 'execution_unknown', 'state_conflict', 'interrupted'}
-RESUMABLE = {'paused', 'awaiting_user', 'output_limit_reached', ACCEPTANCE_LIMIT,
-             'interrupted', 'model_request_unknown', 'execution_unknown', 'runtime_error',
-             'compaction_commit_unknown', 'state_conflict'}
 SUPPLEMENTABLE = (ACTIVE - {'pausing'}) | {'paused', 'awaiting_user'}
 WORK_STATE_FIELDS = {
-    'status', 'reason', 'updated_at', 'revision', 'usage', 'control_unconfirmed', 'acceptance_limit',
+    'status', 'reason', 'updated_at', 'revision', 'usage', 'control_unconfirmed', 'acceptance_limit', 'continuation',
 }
 _UNSET = object()
 
@@ -67,7 +64,7 @@ class ApplicationStore:
                     seq INTEGER PRIMARY KEY, id TEXT NOT NULL,
                     conversation TEXT NOT NULL, kind TEXT NOT NULL,
                     body TEXT NOT NULL, state TEXT NOT NULL, task_id TEXT,
-                    acceptance_pause_id TEXT,
+                    acceptance_pause_id TEXT, resume_token TEXT,
                     UNIQUE(conversation,id));
                 CREATE TABLE IF NOT EXISTS app_events (
                     seq INTEGER PRIMARY KEY, conversation TEXT NOT NULL,
@@ -191,7 +188,7 @@ class ApplicationStore:
 
     def submit(self, conversation, command):
         conversation = identity(conversation)
-        allowed = {'id', 'kind', 'text', 'repo', 'runtime_settings', 'acceptance_pause_id', 'confirmed_requirements', 'proposal_id'}
+        allowed = {'id', 'kind', 'text', 'repo', 'runtime_settings', 'acceptance_pause_id', 'confirmed_requirements', 'proposal_id', 'resume_token'}
         if not isinstance(command, dict) or set(command) - allowed:
             raise ValueError('Invalid command fields')
         command = dict(command)
@@ -230,27 +227,31 @@ class ApplicationStore:
             if kind != 'supplement':
                 raise ValueError('Only confirmed supplements can update delivery requirements')
             checked(command['confirmed_requirements'])
+        if 'resume_token' in command and (kind != 'resume'
+                or not isinstance(command['resume_token'], str)
+                or not 1 <= len(command['resume_token']) <= 200):
+            raise ValueError('Invalid continuation stop identity')
         body = encode(command)
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if self.closing.is_set():
                 raise Conflict('MonoPlanner 正在退出，未接收新命令。')
             value = self._get(db, conversation, writable=True)
-            old = db.execute('SELECT body,state FROM app_commands WHERE conversation=? AND id=?',
+            old = db.execute('SELECT body,state,kind FROM app_commands WHERE conversation=? AND id=?',
                              (conversation, command['id'])).fetchone()
             if old:
                 if old['body'] != body:
                     raise Conflict('Command identity was reused for different content')
                 return {'received': True, 'id': command['id'],
-                        'applied': old['state'] in {'applied', 'coalesced'}}
+                        'applied': old['state'] in {'applied', 'coalesced'}, 'kind': old['kind']}
             task = self._work(db, value.get('work_id'))
+            if kind == 'message' and task and explicit_continue(command['text']):
+                kind = 'resume'
             if kind == 'workspace' and task and task['status'] not in TERMINAL:
                 raise Conflict('Pause the original task and select the workspace in a new conversation')
             if kind in {'pause', 'resume', 'supplement'} and not task:
                 if kind != 'pause':
                     raise Conflict('There is no work task to control')
-            if kind == 'resume' and task and task['status'] not in RESUMABLE:
-                raise Conflict('当前任务不处于可恢复状态')
             if kind == 'resume' and task:
                 deferred = db.execute(
                     "SELECT id,body FROM app_commands WHERE task_id=? AND kind='supplement' "
@@ -263,23 +264,35 @@ class ApplicationStore:
                                (conversation, row['id']))
             acceptance_pause_id = None
             duplicate_resume = False
+            resume_token = None
             if kind == 'resume' and task:
+                continuation = task.get('continuation') or {}
+                resume_token = continuation.get('stop_id')
+                if command.get('resume_token') and command['resume_token'] != resume_token:
+                    raise Conflict('停止状态已变化，请刷新后重新决定是否继续')
+                duplicate_resume = task['status'] in ACTIVE or bool(db.execute(
+                    "SELECT 1 FROM app_commands WHERE task_id=? AND kind='resume' "
+                    "AND resume_token=? AND state IN ('pending','running','applied')",
+                    (task['task_id'], resume_token),
+                ).fetchone())
                 limit = task.get('acceptance_limit') or {}
                 acceptance_pause_id = limit.get('pause_id') if limit.get('active') else None
                 expected = command.get('acceptance_pause_id')
+                if command['kind'] == 'message':
+                    expected = acceptance_pause_id
                 if (not acceptance_pause_id
                         and (task['status'] == ACCEPTANCE_LIMIT or limit.get('active'))):
                     raise Conflict('验收暂停记录不完整，请先核对任务记录')
                 if (limit.get('active') or expected is not None) and expected != acceptance_pause_id:
                     raise Conflict('验收暂停状态已变化，请刷新后重新决定是否继续')
                 if acceptance_pause_id:
-                    duplicate_resume = bool(db.execute(
+                    duplicate_resume = duplicate_resume or bool(db.execute(
                         "SELECT 1 FROM app_commands WHERE task_id=? AND kind='resume' "
                         "AND acceptance_pause_id=? AND state IN ('pending','running','applied')",
                         (task['task_id'], acceptance_pause_id),
                     ).fetchone())
             if kind == 'supplement' and task and task['status'] not in SUPPLEMENTABLE:
-                if not (command.get('confirmed_requirements') and task['status'] in RESUMABLE):
+                if not (command.get('confirmed_requirements') and stopped(task['status'])):
                     raise Conflict('当前任务不能接收补充；输出或验收轮次达到上限时请先点击继续任务')
             if kind in {'workspace', 'message'}:
                 before_configuration = (value['repo'], value['runtime_settings'])
@@ -294,11 +307,11 @@ class ApplicationStore:
             deferred_supplement = (kind == 'supplement' and task
                                    and task['status'] not in SUPPLEMENTABLE)
             db.execute(
-                'INSERT INTO app_commands(id,conversation,kind,body,state,task_id,acceptance_pause_id) '
-                'VALUES(?,?,?,?,?,?,?)',
+                'INSERT INTO app_commands(id,conversation,kind,body,state,task_id,acceptance_pause_id,resume_token) '
+                'VALUES(?,?,?,?,?,?,?,?)',
                 (command['id'], conversation, kind, body,
                  'coalesced' if duplicate_resume else 'deferred' if deferred_supplement else 'pending',
-                 task['task_id'] if task and kind != 'message' else None, acceptance_pause_id),
+                 task['task_id'] if task and kind != 'message' else None, acceptance_pause_id, resume_token),
             )
             if kind == 'supplement' and command.get('confirmed_requirements'):
                 included = {source['id'] for source in command['confirmed_requirements']['sources']}
@@ -309,7 +322,7 @@ class ApplicationStore:
                             and not json.loads(saved['body']).get('confirmed_requirements')):
                         db.execute("UPDATE app_commands SET state='coalesced' WHERE conversation=? AND id=?",
                                    (conversation, saved['id']))
-            if kind in {'message', 'supplement', 'confirm_work'}:
+            if command['kind'] in {'message', 'supplement', 'confirm_work'}:
                 self._message(db, conversation, command['id'], 'human', command['text'], 'user')
                 if not value['title']['revision']:
                     value['title'] = {'title': ' '.join(command['text'].split())[:80],
@@ -321,7 +334,7 @@ class ApplicationStore:
                 self._put_work_state(db, task)
             self._put(db, value)
             self._event(db, conversation, 'command_received', {'id': command['id'], 'kind': kind})
-        return {'received': True, 'id': command['id'], 'applied': duplicate_resume}
+        return {'received': True, 'id': command['id'], 'applied': duplicate_resume, 'kind': kind}
 
     def commands(self, *, conversation=None, task=None, states=('pending',)):
         query = 'SELECT * FROM app_commands WHERE state IN (%s)' % ','.join('?' for _ in states)
@@ -363,10 +376,38 @@ class ApplicationStore:
     def _work(db, task):
         row = db.execute('SELECT w.data AS original,s.data AS state FROM app_work w '
                          'JOIN app_work_state s ON s.id=w.id WHERE w.id=?', (task,)).fetchone() if task else None
-        return {**json.loads(row['original']), **json.loads(row['state'])} if row else None
+        if row is None:
+            return None
+        value = {**json.loads(row['original']), **json.loads(row['state'])}
+        if stopped(value.get('status')) and not value.get('continuation'):
+            from agent.storage.records import digest
+
+            value['continuation'] = describe(value['status'], digest([
+                task, value.get('revision'), value['status'],
+            ]), reason=value.get('reason', ''))
+        return value
 
     @staticmethod
     def _put_work_state(db, work):
+        previous = db.execute('SELECT data FROM app_work_state WHERE id=?',
+                              (work['task_id'],)).fetchone()
+        old = json.loads(previous[0]) if previous else {}
+        old_stop = old.get('continuation') or {}
+        current = work.get('continuation') or {}
+        if stopped(work['status']):
+            token = (current.get('stop_id') if current.get('available')
+                     and current != old_stop else None)
+            pause_changed = ((work.get('acceptance_limit') or {}).get('pause_id') !=
+                             (old.get('acceptance_limit') or {}).get('pause_id'))
+            if pause_changed:
+                token = uuid.uuid4().hex
+            if not token:
+                token = old_stop.get('stop_id') if stopped(old.get('status')) else None
+            work['continuation'] = describe(work['status'], token or uuid.uuid4().hex,
+                                             reason=work.get('reason', ''),
+                                             additions=current.get('additions'))
+        elif old_stop:
+            work['continuation'] = {**old_stop, 'available': False}
         mutable = {key: work[key] for key in WORK_STATE_FIELDS if key in work}
         db.execute('UPDATE app_work_state SET data=? WHERE id=?', (encode(mutable), work['task_id']))
 
@@ -456,6 +497,8 @@ class ApplicationStore:
             work = {**json.loads(row['data']), 'task_id': task, 'conversation_id': row['conversation']}
             if expected_revision is not None and work['revision'] != expected_revision:
                 return None
+            if facts.get('continuation'):
+                work['continuation'] = facts.pop('continuation')
             if status is not None:
                 work['status'] = status
             if reason is not None:
@@ -489,7 +532,8 @@ class ApplicationStore:
             seq = self._event(db, work['conversation_id'], 'work_state',
                               {'task_id': task, 'status': work['status'], 'reason': work['reason'],
                                'revision': work['revision'],
-                               'acceptance_limit': work.get('acceptance_limit'), **facts})
+                               'acceptance_limit': work.get('acceptance_limit'),
+                               'continuation': work.get('continuation'), **facts})
             if work['status'] == ACCEPTANCE_LIMIT and limit.get('active'):
                 self._acceptance_notice(db, work, limit)
         return seq
@@ -793,8 +837,9 @@ class ApplicationStore:
                 work = self._work(db, row['task_id'])
                 if row['state'] == 'deferred' and work and work['status'] not in TERMINAL:
                     continue
-                allowed = RESUMABLE if row['kind'] == 'resume' else SUPPLEMENTABLE
-                if work is None or work['status'] not in allowed:
+                allowed = bool(work) and (stopped(work['status']) if row['kind'] == 'resume'
+                                           else work['status'] in SUPPLEMENTABLE)
+                if not allowed:
                     db.execute("UPDATE app_commands SET state='failed' WHERE conversation=? AND id=?",
                                (row['conversation'], row['id']))
                     self._event(db, row['conversation'], 'command_state', {
@@ -830,7 +875,7 @@ class ApplicationStore:
         usage = self.usage(conversation)
         public_work = ({key: work.get(key) for key in
                        ('task_id', 'input_id', 'repo', 'project_path', 'status', 'reason', 'revision',
-                        'created_at', 'updated_at', 'acceptance_limit')}
+                        'created_at', 'updated_at', 'acceptance_limit', 'continuation')}
                        if work else None)
         return {**value, 'work': public_work, 'messages': messages, 'pending_messages': [],
                 'workspace_bound': bool(work), 'usage': usage, 'event_cursor': cursor,

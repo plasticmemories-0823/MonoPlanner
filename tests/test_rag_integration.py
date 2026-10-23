@@ -379,3 +379,23 @@ def test_full_source_cache_prunes_stale_versions_before_admitting_replacement(pr
     assert observations == [[]]
     assert result['results'] and result['results'][0]['version'] == 'new'
     assert not any(reason == 'retrieval_index_unavailable' for reason in result['reasons'])
+
+
+
+@pytest.mark.parametrize('retired', [
+    {'match': 'substring'}, {'match': 'whole_word'}, {'terms': []},
+    {'terms': ['alpha', 'beta'], 'mode': 'keywords', 'query': ''},
+])
+def test_retired_search_parameters_rejected_by_chat_and_work(retired):
+    from agent.task.contracts import Operation
+    from agent.model.tools import ASSISTANT_SCHEMA
+
+    with pytest.raises(ValueError):
+        integration.validate_arguments({'query': 'needle', 'path': '.', **retired})
+    with pytest.raises(ValueError):
+        Operation(id='lookup', op='search', query='needle', **{
+            key: value for key, value in retired.items() if key != 'query'
+        })
+    properties = ASSISTANT_SCHEMA['retrieve_evidence']['properties']
+    assert not {'match', 'terms'} & properties.keys()
+    assert properties['mode']['enum'] == ['exact']

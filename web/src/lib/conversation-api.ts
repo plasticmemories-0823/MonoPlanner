@@ -7,7 +7,7 @@ export function readStorageFailure(value: unknown): StorageFailure | null {
   if (fault.code !== "storage_unavailable" || fault.dispatch_suspended !== true) return null;
   return {
     code: "storage_unavailable",
-    message: "本地记录写入失败，已停止派发；可请求紧急暂停，不能直接恢复。",
+    message: "本地记录写入失败，已停止派发；修复存储后可点击继续，先核对原件及停止状态。",
     operation: typeof fault.operation === "string" ? fault.operation.slice(0, 80) : "",
     dispatch_suspended: true,
   };

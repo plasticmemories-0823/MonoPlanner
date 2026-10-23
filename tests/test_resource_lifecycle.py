@@ -176,6 +176,9 @@ def test_create_race_kills_actual_container_and_preserves_it(tmp_path, monkeypat
             if args[0] == 'run':
                 cancel_owned_containers('task:race', root)
                 return SimpleNamespace(returncode=0, stdout='a' * 64, stderr='')
+            if args[0] == 'inspect':
+                return SimpleNamespace(returncode=0, stdout=json.dumps([
+                    {'Id': 'a' * 64, 'State': {'Running': False}}]), stderr='')
             return SimpleNamespace(returncode=0, stdout='', stderr='')
 
         monkeypatch.setattr(environment, '_docker', docker)

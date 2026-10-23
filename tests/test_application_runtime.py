@@ -750,13 +750,13 @@ def test_finished_or_uncertain_work_does_not_accept_pending_control(setup, statu
     store.work_state(task, status)
     with pytest.raises(Conflict):
         store.submit(conversation, command('只针对原任务补充', 'supplement'))
-    if status in {'execution_unknown', 'model_request_unknown', 'runtime_error'}:
-        assert store.submit(conversation, command(kind='resume'))['received']
-        assert store.work(task)['status'] == status
+    receipt = store.submit(conversation, command(kind='resume'))
+    assert receipt['received']
+    assert store.work(task)['status'] == status
+    if status == 'pausing':
+        assert receipt['applied'] and not store.commands(task=task)
     else:
-        with pytest.raises(Conflict):
-            store.submit(conversation, command(kind='resume'))
-        assert not store.commands(task=task)
+        assert store.commands(task=task)[0]['kind'] == 'resume'
 
 
 @pytest.mark.parametrize('restart', [False, True])

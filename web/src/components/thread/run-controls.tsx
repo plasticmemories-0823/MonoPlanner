@@ -22,7 +22,7 @@ export function statusLabel(status?: string) {
         paused: "已暂停",
         interrupted: "运行已中断，点击继续核对断点",
         awaiting_user: "等待补充或继续",
-        task_blocked: "任务受阻",
+        task_blocked: "模型报告受阻，可继续调查",
         runtime_error: "任务已停止，运行记录已保留",
         acceptance_limit_reached: "验收轮次已用完，等待手动继续",
         output_limit_reached: "回复达到输出上限，等待手动继续",
@@ -67,7 +67,8 @@ export function useRunControls(
       : undefined;
     if (
       pending.current?.kind !== kind ||
-      (kind === "resume" && pending.current.acceptance_pause_id !== pauseId)
+      (kind === "resume" && (pending.current.acceptance_pause_id !== pauseId ||
+        pending.current.resume_token !== stream.values.work?.continuation?.stop_id))
     )
       pending.current =
         kind === "resume"

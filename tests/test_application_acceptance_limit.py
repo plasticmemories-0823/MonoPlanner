@@ -10,7 +10,7 @@ from starlette.testclient import TestClient
 
 from agent.application.api import build_routes
 from agent.application.scheduler import Scheduler
-from agent.application.store import ACTIVE, RESUMABLE, TERMINAL, ApplicationStore, Conflict
+from agent.application.store import ACTIVE, TERMINAL, ApplicationStore, Conflict
 from agent.application.work_bridge import public_fact
 from agent.task.acceptance_limit import STATUS
 
@@ -44,7 +44,8 @@ def work(tmp_path, monkeypatch):
 
 def test_acceptance_pause_has_durable_notice_snapshot_and_sse_without_model(work):
     store, conversation, job = work
-    assert STATUS in RESUMABLE and STATUS not in TERMINAL and STATUS not in ACTIVE
+    from agent.task.resumption import stopped
+    assert stopped(STATUS) and STATUS not in TERMINAL and STATUS not in ACTIVE
     store.work_state(job['task_id'], STATUS, acceptance_limit=limit())
     client = TestClient(Starlette(routes=build_routes(store, object())))
     snapshot = client.get(f'/conversations/{conversation}/snapshot').json()

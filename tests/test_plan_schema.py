@@ -61,6 +61,9 @@ class PlanSchemaTests(unittest.TestCase):
                     project(child)
 
         project(expected)
+        mode = expected["properties"]["steps"]["items"]["properties"]["mode"]
+        self.assertEqual(mode["enum"], ["exact"])
+        self.assertNotIn("const", mode)
         actual = deepcopy(WORK_SCHEMA)
         project(actual)
         self.assertEqual(actual, WORK_SCHEMA)

@@ -141,7 +141,7 @@ def normalize_result(tool_name, value, *, source_version=None, project=None):
 
 def _search_view(value):
     """原件保留完整检索身份；模型只接收共享来源表、原文和命中位置。"""
-    if value.get('format') not in {'monoplanner-retrieval-excerpts-v2', 'monoplanner-retrieval-excerpts-v3', 'monoplanner-retrieval-excerpts-v4'}:
+    if value.get('format') not in {'monoplanner-retrieval-excerpts-v2', 'monoplanner-retrieval-excerpts-v3', 'monoplanner-retrieval-excerpts-v4', 'monoplanner-retrieval-excerpts-v5'}:
         return value
     sources, results, source_ids, result_ids = [], [], {}, {}
     for item in value['results']:

@@ -43,6 +43,7 @@ internal static class Program
         {
             start.EnvironmentVariables["MONOPLANER_DESKTOP_JOB"] = desktop.Name;
             start.EnvironmentVariables["MONOPLANER_CLOSE_SIGNAL"] = desktop.SignalName;
+            start.EnvironmentVariables["MONOPLANER_DESKTOP_HEARTBEAT"] = desktop.HeartbeatName;
         }
         string gateName = desktop == null ? null : desktop.Name + "-Start-" + Guid.NewGuid().ToString("N");
         using (var gate = gateName == null ? null : new EventWaitHandle(false, EventResetMode.ManualReset, gateName))
@@ -81,6 +82,12 @@ internal static class Program
     {
         if (desktop != null)
             desktop.RequestClose();
+    }
+
+    internal static void PulseDesktop()
+    {
+        if (desktop != null)
+            desktop.Pulse();
     }
 
     internal static string Failure()
@@ -196,7 +203,9 @@ internal sealed class DesktopLifetime : IDisposable
 {
     internal readonly string Name;
     internal readonly string SignalName;
+    internal readonly string HeartbeatName;
     private readonly EventWaitHandle signal;
+    private readonly EventWaitHandle heartbeat;
     private IntPtr job;
     internal bool Closing { get { return signal.WaitOne(0); } }
 
@@ -239,7 +248,9 @@ internal sealed class DesktopLifetime : IDisposable
     {
         Name = "Local\\MonoPlanner-Services-" + key + "-" + Process.GetCurrentProcess().Id;
         SignalName = Name + "-Close";
+        HeartbeatName = Name + "-Heartbeat";
         signal = new EventWaitHandle(false, EventResetMode.ManualReset, SignalName);
+        heartbeat = new EventWaitHandle(true, EventResetMode.AutoReset, HeartbeatName);
         job = CreateJobObject(IntPtr.Zero, Name);
         if (job == IntPtr.Zero)
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
@@ -277,6 +288,7 @@ internal sealed class DesktopLifetime : IDisposable
     }
 
     internal void RequestClose() { signal.Set(); }
+    internal void Pulse() { if (!Closing) heartbeat.Set(); }
 
     public void Dispose()
     {
@@ -286,5 +298,6 @@ internal sealed class DesktopLifetime : IDisposable
             job = IntPtr.Zero;
         }
         signal.Dispose();
+        heartbeat.Dispose();
     }
 }

@@ -58,24 +58,26 @@ await test("acceptance budget pause exposes Continue but never supplement or run
     pause_id: "pause-3",
     last_verification_status: "failed",
   };
-  assert.equal(canResumeWork("acceptance_limit_reached"), true);
+  const continuation = { protocol: 2, available: true, stop_id: "stop-3", mode: "continue", additions: {}, requirements: [] };
+  assert.equal(canResumeWork({ continuation }), true);
   assert.equal(canSupplementWork("acceptance_limit_reached"), false);
   assert.equal(isWorking("acceptance_limit_reached"), false);
   assert.match(acceptanceLimitLabel(limit), /3 \/ 3 轮验收/);
   assert.equal(acceptanceLimitLabel({ ...limit, active: false }), null);
-  assert.deepEqual(resumeCommand({ task_id: "task", acceptance_limit: limit }, "resume-id"), {
+  assert.deepEqual(resumeCommand({ task_id: "task", acceptance_limit: limit, continuation }, "resume-id"), {
     kind: "resume",
     id: "resume-id",
     acceptance_pause_id: "pause-3",
+    resume_token: "stop-3",
   });
   assert.deepEqual(resumeCommand({ task_id: "task", status: "paused" }, "ordinary"), {
     kind: "resume",
     id: "ordinary",
   });
-  for (const status of ["stalled", "verified_success"])
-    assert.equal(canResumeWork(status), false, status);
-  for (const status of ["interrupted", "execution_unknown", "model_request_unknown", "runtime_error", "state_conflict"]) {
-    assert.equal(canResumeWork(status), true, status);
+  assert.equal(canResumeWork(undefined), false);
+  assert.equal(canResumeWork({ continuation: { ...continuation, available: false } }), false);
+  for (const status of ["stalled", "verified_success", "interrupted", "execution_unknown", "model_request_unknown", "runtime_error", "state_conflict"]) {
+    assert.equal(canResumeWork({ status, continuation }), true, status);
     assert.equal(canSupplementWork(status), false, status);
     assert.equal(isWorking(status), false, status);
   }

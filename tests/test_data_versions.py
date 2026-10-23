@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from agent.storage.schema import initialize, DataVersionError
+from agent.storage.schema import initialize, DataVersionError, DATA_VERSION
 from agent.application.store import ApplicationStore
 from agent.storage.product import ProductDatabase
 
@@ -13,14 +13,14 @@ from agent.storage.product import ProductDatabase
 def test_current_database_has_one_explicit_version_and_no_legacy_import(tmp_path):
     store = ApplicationStore(tmp_path)
     with store.connection() as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 1
+        assert db.execute('PRAGMA user_version').fetchone()[0] == DATA_VERSION
     with closing(sqlite3.connect(tmp_path / 'conversations.sqlite3')) as old:
         old.execute('CREATE TABLE sessions (thread TEXT, data TEXT)')
     assert store.list() == []
     ProductDatabase(tmp_path)
 
 
-@pytest.mark.parametrize('version', [0, 2])
+@pytest.mark.parametrize('version', [0, DATA_VERSION + 1])
 def test_unversioned_or_future_existing_database_is_not_changed(tmp_path, version):
     path = tmp_path / 'application.sqlite3'
     with closing(sqlite3.connect(path)) as db:
@@ -36,7 +36,7 @@ def test_unversioned_or_future_existing_database_is_not_changed(tmp_path, versio
 
 def test_migration_backup_and_failure_preserve_original_rows(tmp_path):
     path = tmp_path / 'application.sqlite3'
-    initialize(path)
+    initialize(path, target=1)
     with closing(sqlite3.connect(path)) as db:
         db.execute('CREATE TABLE retained (value TEXT)')
         db.execute("INSERT INTO retained VALUES ('original')")
@@ -68,9 +68,9 @@ def test_migration_cannot_modify_a_live_application_database(tmp_path):
     lease.acquire()
     try:
         with pytest.raises(RuntimeError, match='MonoPlanner'):
-            initialize(store.path, target=2, migrations={1: lambda db: None})
+            initialize(store.path, target=DATA_VERSION + 1, migrations={DATA_VERSION: lambda db: None})
         with store.connection() as db:
-            assert db.execute('PRAGMA user_version').fetchone()[0] == 1
+            assert db.execute('PRAGMA user_version').fetchone()[0] == DATA_VERSION
         assert not (tmp_path / 'data-backups').exists()
     finally:
         lease.close()

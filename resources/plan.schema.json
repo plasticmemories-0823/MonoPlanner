@@ -48,26 +48,11 @@
             "type": "integer"
           },
           "mode": {
-            "description": "exact uses one literal query; keywords uses explicit terms and an empty query. BM25 automatically ranks rg matches.",
+            "description": "One case-sensitive literal substring query. Preserve whitespace and repeated text; BM25 ranks matching files automatically.",
+            "type": "string",
             "enum": [
-              "exact",
-              "keywords"
-            ],
-            "type": "string"
-          },
-          "match": {
-            "description": "whole_word for complete identifiers; substring for partial names, errors or fragments. Case-sensitive; no rewriting.",
-            "enum": [
-              "whole_word",
-              "substring"
-            ],
-            "type": "string"
-          },
-          "terms": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
+              "exact"
+            ]
           },
           "intent": {
             "enum": [
@@ -121,8 +106,6 @@
           "offset",
           "limit",
           "mode",
-          "match",
-          "terms",
           "intent",
           "required_entities",
           "required_kinds",

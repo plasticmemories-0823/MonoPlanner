@@ -231,7 +231,7 @@ class ProjectDockerTests(unittest.TestCase):
         first_request = (records / 'requests/call-0001/request.json').read_bytes()
         selected_model = BlockedModel()
         with patch('agent.cli.tasks.run_work', side_effect=execute), redirect_stdout(io.StringIO()):
-            self.assertEqual(main(['--state-dir', str(folder)]), 1)
+            self.assertEqual(main(['--state-dir', str(folder), '--continue']), 1)
         self.assertEqual(len(list(records.glob('plans/*/*/result.json'))), 2)
         self.assertEqual(before[0][0].read_bytes(), before[0][1])
         self.assertEqual((records / 'requests/call-0001/request.json').read_bytes(), first_request)

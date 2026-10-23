@@ -116,7 +116,7 @@ def engines(tmp_path_factory):
         path.write_text(path.read_text('utf-8') + '\nENGINE_RELEASE = ' + repr(release) + OFFLINE_APPEND,
                         encoding='utf-8')
         sources = {p.relative_to(source).as_posix(): p for p in bundles.tree_files(source)}
-        contents = bundles._manifest(sources, protocol=1, runtime_id=manifest['runtime_id'],
+        contents = bundles._manifest(sources, protocol=bundles.PROTOCOL, runtime_id=manifest['runtime_id'],
                                      code_key=code_key(source))
         versions[release] = bundles._publish(root, 'engines', contents, sources)
         assert source.parent == area
@@ -131,7 +131,7 @@ def job_for(root, engine, tmp_path, *, pause=False):
     (repo / 'sample.py').write_text('def value():\n    return 0\n', encoding='utf-8')
     if engine:
         save(root / 'tasks' / task / 'engine-binding.json', {
-            'format': 1, 'protocol': 1, 'task_id': task, 'engine_id': engine,
+            'format': 1, 'protocol': bundles.PROTOCOL, 'task_id': task, 'engine_id': engine,
         })
     return {'task_id': task, 'state_root': str(root), 'repo': str(repo),
             'request': 'value must return 4', 'settings': {},
@@ -272,7 +272,7 @@ def test_referenced_engines_cannot_be_collected(engines):
     for release, engine in versions.items():
         task = uuid.uuid4().hex
         save(root / 'tasks' / task / 'engine-binding.json', {
-            'format': 1, 'protocol': 1, 'task_id': task, 'engine_id': engine,
+            'format': 1, 'protocol': bundles.PROTOCOL, 'task_id': task, 'engine_id': engine,
         })
     result = bundles.collect(root)
     assert set(versions.values()).issubset(result['retained'])
@@ -315,3 +315,25 @@ def test_lost_worker_result_requests_owned_cleanup_without_restarting(tmp_path, 
     with pytest.raises(bridge.WorkerError):
         bridge._run_work({'task_id': task}, lambda *_: None, lambda: [], tmp_path, task)
     assert sent == ['run'] and stopped == [(task, tmp_path)]
+
+
+def test_open_but_silent_host_pipe_stops_worker_without_waiting_for_restart(engines, tmp_path):
+    root, versions = engines
+    job = {**job_for(root, versions['A'], tmp_path), 'probe_wait': True}
+    marker = root / 'waiting.txt'
+    marker.unlink(missing_ok=True)
+    session = bridge.Session(root, job['task_id'])
+    session.send('run', root=str(root), task_id=job['task_id'], engine_id=versions['A'],
+                 job=job, credential='offline-secret')
+    deadline = time.monotonic() + 60
+    try:
+        while not marker.exists() and time.monotonic() < deadline:
+            session.send('heartbeat')
+            time.sleep(0.25)
+        assert marker.exists()
+        # 故意保持宿主进程和管道存活，只停止协议心跳。
+        session.process.wait(timeout=14)
+        assert not session.process.stdin.closed
+        assert not (Path(job['repo']) / 'edits.txt').exists()
+    finally:
+        session.close()

@@ -1,6 +1,7 @@
 """使用 DeepSeek Search / Fetch 原始接口，保留检索原件和独立请求账本。"""
 
 import asyncio
+import hashlib
 import json
 import time
 from urllib.parse import urlsplit
@@ -14,7 +15,7 @@ from agent.model.errors import ModelInterrupted
 from agent.model.network import model_http_clients
 from agent.model.tool_results import normalize_result
 from agent.settings import load_settings
-from agent.storage.records import save
+from agent.storage.records import save, write_bytes
 from agent.task import control
 
 ENDPOINT = 'https://api.deepseek.com/v1/tools/'
@@ -128,6 +129,7 @@ class WebProvider:
         }
         started = time.monotonic()
         response = None
+        response_recorded = False
         sent = False
 
         def dispatch():
@@ -165,6 +167,11 @@ class WebProvider:
                     asyncio.run(clients['http_async_client'].aclose())
 
         def settle(outcome):
+            save(folder / 'provider-completion.json', {
+                'pending': dict(loop.state['web_request_pending']), 'outcome': outcome,
+                'seconds': time.monotonic() - started,
+                'response_sha256': hashlib.sha256(response.content).hexdigest() if response_recorded else None,
+            })
             row = loop.budget.settle_service(ticket, outcome)
             row.update(seconds=time.monotonic() - started,
                        record=str(folder / 'provider-response.json') if response else None)
@@ -184,7 +191,8 @@ class WebProvider:
             response = dispatch()
             # 保留完整响应字节；展示整理和载荷卸载均发生在原件落盘之后。
             path = folder / 'provider-response.json'
-            path.write_bytes(response.content)
+            write_bytes(path, response.content)
+            response_recorded = True
             archive_file(loop, path, 'web_provider_response')
             if response.status_code != 200:
                 settle('failed')
@@ -253,7 +261,11 @@ def execute_calls(loop, response, history=None):
             return
         except (ValueError, OSError, KeyError) as exc:
             result, status = {'error': str(exc)}, 'failed'
-        save(folder / 'result.json', {'status': status, 'data': result})
+        from agent.storage.records import digest
+
+        record = {'status': status, 'data': result}
+        save(folder / 'completion.json', {'request': call, 'result_digest': digest(record)})
+        save(folder / 'result.json', record)
         loop.history_store.register_derived(folder / 'result.json', 'web_result', '')
         from agent.model.tool_payloads import project
 

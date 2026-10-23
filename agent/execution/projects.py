@@ -134,7 +134,7 @@ def require_binding(repo, binding=None):
     return {**binding, 'runtime': runtime_profile(binding.get('runtime'))}
 
 
-def prepare_binding(repo, *, progress=None, cancelled=None, project_scope=None):
+def prepare_binding(repo, *, progress=None, cancelled=None, project_scope=None, retry=False):
     """仅在首次执行前读取最新的项目偏好。"""
     if project_scope is not None:
         from agent.source.scope import project_scope as resolve_scope
@@ -147,4 +147,5 @@ def prepare_binding(repo, *, progress=None, cancelled=None, project_scope=None):
 
     options = {"project_scope": project_scope} if project_scope is not None else {}
     return require_binding(
-        repo, ensure_prepared(repo, progress=progress, cancelled=cancelled, **options))
+        repo, ensure_prepared(repo, progress=progress, cancelled=cancelled,
+                              **({"retry": True} if retry else {}), **options))

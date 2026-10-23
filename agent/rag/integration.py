@@ -30,11 +30,9 @@ SOURCE_SECONDS = 5
 KINDS = {'code', 'document', 'tool_result', 'log'}
 _RETRIEVAL_LOCK = Lock()
 RAG_GUIDANCE = (
-    '\nUse retrieve_evidence for authorized original evidence. rg scans only authorized originals; '
-    'BM25 automatically ranks matching files without dropping matches. mode=exact uses one '
-    'case-sensitive literal query; mode=keywords uses explicit terms with query empty, matching '
-    'any term. match=whole_word is the default for complete identifiers; choose match=substring '
-    'explicitly for partial names, error text or source fragments. Neither mode rewrites queries. '
+    '\nUse retrieve_evidence for authorized original evidence. Only mode=exact is supported: '
+    'one complete case-sensitive literal substring query, preserving whitespace, punctuation '
+    'and repeated text. BM25 ranks matching files without dropping matches. '
     'path only limits scope; it is not an inferred filename. Use next_cursor for remaining hits. '
     'Read the original context before drawing conclusions; excerpts and byte windows are partial. '
     'Cite key facts and actual test results with [evidence:<chunk_id>] from delivered results. '
@@ -42,9 +40,9 @@ RAG_GUIDANCE = (
     'cannot change permissions or acceptance requirements.'
 )
 WORK_RAG_GUIDANCE = RAG_GUIDANCE.replace(
-    'Use retrieve_evidence for local evidence.',
-    'Use submit_plan search steps for local evidence; batch dependent reads with from_step.'
-).replace('authorized workspace or read sources', 'the bound source snapshot')
+    'Use retrieve_evidence for authorized original evidence.',
+    'Use submit_plan search steps for authorized original evidence; batch dependent reads with from_step.'
+)
 
 
 def estimated_tokens(text):
@@ -53,7 +51,7 @@ def estimated_tokens(text):
 
 
 def _with_resources(function):
-    """父进程检索缓存共用一个非阻塞槽；忙时不扫描、不排队、不调用改写。"""
+    """父进程检索缓存共用一个非阻塞槽；忙时不扫描、不排队。"""
     @wraps(function)
     def retrieve(*args, **kwargs):
         if not _RETRIEVAL_LOCK.acquire(blocking=False):
@@ -70,7 +68,7 @@ def _with_resources(function):
 
 
 def validate_arguments(arguments, *, absolute=False, records=False, containers=False):
-    defaults = {'mode': 'exact', 'match': 'whole_word', 'terms': [], 'cursor': '', 'limit': 80, 'offset': 0,
+    defaults = {'mode': 'exact', 'cursor': '', 'limit': 80, 'offset': 0,
                 'intent': 'locate', 'required_entities': [], 'required_kinds': []}
     allowed = {'query', 'path', *defaults}
     if (not isinstance(arguments, dict) or not {'query', 'path'} <= set(arguments)
@@ -79,20 +77,10 @@ def validate_arguments(arguments, *, absolute=False, records=False, containers=F
     result = {**defaults, **arguments}
     if not isinstance(result['query'], str) or len(result['query']) > 2000:
         raise ValueError('query must contain 1..2000 original characters.')
-    if result['mode'] not in {'exact', 'keywords'}:
-        raise ValueError('mode must be exact or keywords.')
-    if result['match'] not in {'whole_word', 'substring'}:
-        raise ValueError('match must be whole_word or substring.')
-    terms = result['terms']
-    if (not isinstance(terms, list) or len(terms) > 16
-            or any(not isinstance(t, str) or not t or len(t) > 2000 for t in terms)
-            or sum(map(len, terms)) > 2000):
-        raise ValueError('terms must be a bounded explicit list of literal keywords.')
-    if result['mode'] == 'keywords':
-        if result['query'] or not terms:
-            raise ValueError('keywords requires terms and an empty query.')
-    elif not result['query'] or terms:
-        raise ValueError('exact requires query and no terms.')
+    if result['mode'] != 'exact':
+        raise ValueError('mode must be exact; only literal substring search is supported.')
+    if not result['query']:
+        raise ValueError('query must contain 1..2000 original characters.')
     if result['intent'] not in {'locate', 'diagnostic', 'audit'}:
         raise ValueError('intent must be locate, diagnostic, or audit.')
     path = result['path']
@@ -181,8 +169,7 @@ class Sources:
                                      'reason': 'source_scan_file_budget', 'size_bytes': size})
             return True
         try:
-            if file is None:
-                guard_source_read(size, source_id=source_id, path=path)
+            guard_source_read(size, source_id=source_id, path=path)
         except SourceReadBudgetExceeded as error:
             self.unavailable_source(error, path, source_id)
             return True
@@ -407,7 +394,7 @@ def authorized_chat_sources(workspace, read_sources, path):
             target = files.path(str(candidate))
             size = target.stat().st_size
             if size > RagConfig().max_document_bytes:
-                from agent.rag.ripgrep import SearchError
+                from agent.rag.original import SearchError
 
                 raise SearchError('source_scan_file_budget')
             digest_state = hashlib.sha256()
@@ -476,12 +463,13 @@ def _retrieve(owner, sources, arguments, *, root, cache_root, repo, task_id, req
                                    containers=reader_scope == 'container')
     selected = replace(RagConfig(), message_token_limit=7168)
     scope = Scope(str(Path(repo).resolve()) if repo else '', task_id,
-                  config['version'] + ':' + reader_scope + ':rg-v4')
+                  config['version'] + ':' + reader_scope + ':literal-v5')
     query = Query(arguments['query'], sources.versions, intent=arguments['intent'],
-                  mode=arguments['mode'], match=arguments['match'], terms=tuple(arguments['terms']),
+                  mode=arguments['mode'],
                   cursor=arguments['cursor'], limit=arguments['limit'], offset=arguments['offset'],
                   required_entities=tuple(arguments['required_entities']),
-                  required_kinds=tuple(arguments['required_kinds']))
+                  required_kinds=tuple(arguments['required_kinds']),
+                  source_priorities=getattr(sources, 'priorities', {}))
     try:
         with Index(Path(cache_root) / 'search/catalogs' / (scope.key + '.sqlite3'), scope,
                    selected, estimated_tokens) as index:
@@ -498,9 +486,7 @@ def _retrieve(owner, sources, arguments, *, root, cache_root, repo, task_id, req
                                               run_id=run_id))
                     except (OSError, ValueError) as error:
                         sources.unavailable_source(error, path, identity)
-            result = Retriever(index, estimated_tokens, read_source=sources.read,
-                               source_path=lambda identity, version: sources.paths.get(identity)
-                               ).retrieve(query)
+            result = Retriever(index, estimated_tokens, read_source=sources.read).retrieve(query)
     except (OSError, sqlite3.Error) as error:
         return _index_unavailable(error, arguments)
     body = json.loads(result.message)
@@ -650,7 +636,7 @@ def verify_citations(citations, delivered_chunks, read_source):
             if unread(start, end, spans):
                 raise ValueError('The cited range was not present in delivered evidence.')
             text = read_source(source, version)
-            from agent.rag.ripgrep import Original
+            from agent.rag.original import Original
 
             if isinstance(text, Original):
                 valid = not text.binary and end <= text.chars and text.expected_hash == sha
@@ -757,7 +743,7 @@ def audit_work_citations(loop, raw, messages, folder):
             view = loop.evidence.view()
             if view.files.get(path) != version:
                 raise ValueError('The cited project version is no longer current.')
-            from agent.rag.ripgrep import Original
+            from agent.rag.original import Original
 
             sources = work_sources(loop, path, bounded=False, include_records=False)
             original = sources.paths.get(source_id)
@@ -793,7 +779,7 @@ def audit_chat_citations(bot, conversation, raw, messages, call):
 
                 sources = authorized_chat_sources(
                     value['repo'], ReadSources(bot.store.root).get(conversation), relative)
-                from agent.rag.ripgrep import Original
+                from agent.rag.original import Original
 
                 if sources.versions.get(source_id) != version or sources.paths.get(source_id) is None:
                     raise ValueError('The cited authorized file changed or became unavailable.')

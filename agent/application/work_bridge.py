@@ -107,6 +107,7 @@ class WorkRunner(TaskRunner):
             "applied_inputs": list(self.state.get("applied_inputs", [])),
             "usage": summarize(self.state),
             "acceptance_limit": acceptance_limit.public(self.state),
+            "continuation": self.state.get("continuation"),
         }
         # 公开事实只携带标识和结果，测试正文、完整模型推理及源码不自动外传。
         fact["details"] = public_fact(self.state, event, payload)
@@ -184,7 +185,7 @@ def supplement_work(task_id, command_id, *, root=None):
     control.interrupt(Path(root or state_root()).resolve(), task_id, "message", command_id)
 
 
-def _existing(data, environment, directory, owner, emit):
+def _existing(data, environment, directory, owner, emit, recovery_id=None):
     """已有入口只有一次执行；请求原件或结果不明时不能借恢复重跑。"""
     from agent.execution.existing import execute
     from agent.server.assistant import validate
@@ -202,8 +203,28 @@ def _existing(data, environment, directory, owner, emit):
                 old = json.loads(record_path.read_text(encoding="utf-8"))
                 if old["arguments"] != arguments:
                     raise ValueError("Existing task arguments changed")
-                if old["status"] == "completed":
-                    return old["result"]
+                if old["status"] == "completed" or recovery_id:
+                    if not recovery_id:
+                        return old["result"]
+                    from agent.source.snapshots import SourceSnapshot
+                    from agent.storage.records import digest
+
+                    review = directory / "existing-reviews" / digest(recovery_id)
+                    receipt = review / "result.json"
+                    if receipt.exists():
+                        return json.loads(receipt.read_text("utf-8"))
+                    snapshot = SourceSnapshot.capture(
+                        environment.repo_root, review / "source",
+                        runtime_files=getattr(environment, "runtime_files", ()),
+                        project_scope=getattr(environment, "project_scope", None),
+                    )
+                    result = {"status": "awaiting_user", "applied_inputs": [recovery_id],
+                              "stop_reason": "已重新核对项目现状并保存复查记录；原命令未重放。若需再次执行，请确认新的工作方案。",
+                              "previous_result": old.get("result", {"status": "execution_unknown"}),
+                              "review": {"source": snapshot.digest, "command_id": recovery_id,
+                                         "prior_receipt": digest(old), "commands_executed": 0}}
+                    save(receipt, result)
+                    return result
                 return {"status": "execution_unknown", "applied_inputs": [],
                         "stop_reason": "已有任务上次执行结果不明，未重新运行。"}
             loop = SimpleNamespace(
@@ -250,7 +271,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
         if key in _owners:
             raise RuntimeError("Task already has an execution owner")
         _owners[key] = owner
-    from agent.storage.resources import container_owner, release_task_resources
+    from agent.storage.resources import container_owner
 
     environment = None
     result = None
@@ -263,10 +284,17 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
     preparing = True
     try:
         failed_path = directory / "preparation-failed.json"
-        if failed_path.exists():
-            return json.loads(failed_path.read_text(encoding="utf-8"))
         recovery_id = next((item["id"] for item in reversed(controls())
                             if item["kind"] == "resume"), None)
+        if failed_path.exists():
+            if not recovery_id:
+                return json.loads(failed_path.read_text(encoding="utf-8"))
+            from agent.storage.records import immutable
+            import hashlib
+
+            raw = failed_path.read_bytes()
+            immutable(directory / "preparation-failures" / (hashlib.sha256(raw).hexdigest() + ".json"), raw)
+            failed_path.unlink()
         if (directory / "hard-interruption.json").exists() and not recovery_id:
             return {"status": "execution_unknown", "applied_inputs": [],
                     "stop_reason": "上次操作被强制中止；请先核对保留现场。"}
@@ -278,8 +306,13 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
             try:
                 with archive.lease():
                     saved = archive.load()
+                stop = (saved or {}).get('continuation') or {}
+                requested_stop = (data.get('continuation') or {}).get('stop_id')
+                if (recovery_id and requested_stop and stop.get('stop_id')
+                        and requested_stop != stop['stop_id']):
+                    raise ValueError('Task stop changed before dispatch; refresh before continuing')
                 if (saved and saved.get('code_key') == code_key()
-                        and saved.get('status') == 'verified_success'):
+                        and saved.get('status') == 'verified_success' and not recovery_id):
                     from agent.storage.records import digest
 
                     identity = digest([
@@ -290,7 +323,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                     ])
                     if saved['identity'] != identity:
                         raise ValueError('Task requirements changed; saved success was not reused')
-                    # 完成后的环境可能已正常回收。补发原终态，不再创建容器或调用模型。
+                    # 无人工继续时只补发已保存终态，不派发新的工作。
                     return {'status': 'verified_success', 'stop_reason': saved.get('reason', ''),
                             'usage': summarize(saved), 'result_reused': True,
                             'verification': saved.get('verification', {}),
@@ -334,6 +367,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                         binding = prepare_binding(
                             data["repo"], cancelled=cancelled, project_scope=scope,
                             progress=lambda value: emit("environment", value),
+                            **({"retry": True} if recovery_id else {}),
                         )
                     except PreparationCancelled:
                         # 尚未开始代码执行。暂停准备不应被误报成模型请求结果未知。
@@ -369,7 +403,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                 environment.start()
             if data.get("kind") == "existing":
                 preparing = False
-                result = _existing(data, environment, directory, owner, emit)
+                result = _existing(data, environment, directory, owner, emit, recovery_id)
                 return result
             settings = data.get("settings", data.get("runtime_settings", {}))
             if model is None:
@@ -419,6 +453,7 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
                 "task_id": task_id, "usage": result.get("usage", {}),
                 "applied_inputs": result["applied_inputs"],
                 "acceptance_limit": result.get("acceptance_limit"),
+                "continuation": result.get("continuation"),
             })
             return result
     except Exception as exc:
@@ -454,24 +489,20 @@ def run_work(job, emit, controls, *, model=None, environment_factory=TaskDocker,
         try:
             if environment is not None:
                 environment.close()
-                if (result and result.get("status") in {
-                    "paused", "awaiting_user", "output_limit_reached", acceptance_limit.STATUS,
-                } and not owner["interrupted_operation"]
+                if (not owner["interrupted_operation"]
                         and hasattr(environment, "output_limit_stop_receipt")):
                     save(directory / "pause-container.json", environment.output_limit_stop_receipt())
-            if result and result.get("status") in {
-                "verified_success", "task_blocked", "stalled", "existing_complete",
-            }:
-                from agent.storage.resources import delete_owned_docker_resource
-                cleanup = release_task_resources("task:" + task_id, completed=True, root=root,
-                                                 docker=delete_owned_docker_resource)
-                if cleanup.get("errors"):
-                    save(directory / "resource-cleanup-error.json", cleanup)
-                    emit("cleanup_pending", {"task_id": task_id,
-                                             "reason": "部分自有资源清理未完成，记录已保留。"})
+            # 停止只关闭执行者。任务资源引用由明确永久删除入口释放。
         except Exception as exc:
             # 已保存的实际结果不能被清理失败改写；保留可重试清理的诊断。
-            save(directory / "resource-cleanup-error.json", {"error_type": type(exc).__name__})
+            save(directory / "resource-cleanup-error.json", {
+                "error_type": type(exc).__name__, "previous_result": result,
+            })
+            if result is not None:
+                result.update(status="execution_unknown", stop_reason="停止尚未核验，失联租约已撤销；请核对容器状态后继续。")
+            save(directory / "hard-interruption.json", {
+                "status": "execution_unknown", "reason": "Container stop was not confirmed",
+            })
             emit("cleanup_pending", {"task_id": task_id, "reason": "资源收尾未完成，现场仍保留。"})
         finally:
             with _owners_lock:

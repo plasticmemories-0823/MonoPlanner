@@ -41,8 +41,10 @@ def build_routes(store, scheduler):
     async def conversations(request):
         async def run():
             if request.method == 'GET':
+                from agent.storage.schema import DATA_VERSION
+
                 rows = await asyncio.to_thread(store.list)
-                return response({'conversations': rows, 'data_version': 1})
+                return response({'conversations': rows, 'data_version': DATA_VERSION})
             value = await request.json()
             if hasattr(scheduler, 'ensure_dispatch_available'):
                 scheduler.ensure_dispatch_available()

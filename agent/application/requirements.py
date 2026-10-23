@@ -33,9 +33,7 @@ def source_messages(store, conversation, source_ids):
 
 def latest(store, conversation):
     work = store.work(store.get(conversation)["work_id"])
-    from agent.application.store import TERMINAL
-
-    if not work or work['status'] in TERMINAL:
+    if not work:
         return None
     value = work.get("confirmed_requirements")
     controls = store.commands(conversation=conversation, task=work["task_id"],

@@ -37,6 +37,8 @@ def code_key(root=None):
         'agent/runtime/bundles.py',
         'agent/runtime/bridge.py',
         'agent/runtime/worker.py',
+        'agent/runtime/liveness.py',
+        'resources/drivers/lifetime.sh',
         'agent/storage/schema.py',
         'agent/application/recovery.py',
         'agent/storage/continuation.py',
@@ -59,8 +61,7 @@ def code_key(root=None):
         'agent/rag/types.py',
         'agent/rag/index.py',
         'agent/rag/retrieval.py',
-        'agent/rag/ripgrep.py',
-        'resources/ripgrep.json',
+        'agent/rag/original.py',
         'agent/rag/integration.py',
         'agent/server/__init__.py',
         'agent/task/control.py',
@@ -68,6 +69,7 @@ def code_key(root=None):
         'agent/storage/resources.py',
         'agent/storage/disk_space.py',
         'agent/application/work_bridge.py',
+        'agent/application/lease.py',
         'agent/application/requirements.py',
         'resources/work-requirements.schema.json',
         'agent/source/__init__.py',
@@ -99,6 +101,7 @@ def code_key(root=None):
         'agent/task/runner.py',
         'agent/task/dispatch.py',
         'agent/task/dialogue.py',
+        'agent/task/resumption.py',
         'agent/task/output_limit.py',
         'agent/task/acceptance_limit.py',
         'agent/task/operations.py',
@@ -236,6 +239,14 @@ def restore(loop, stored, identity):
     loop.history_store.stats['resumed'] += 1
     from agent.storage.continuation import reconcile
 
+    from agent.task import resumption
+
+    resume_command = resumption.input_command(loop)
+    if (resume_command and resume_command.get('native_stop_id')
+            and resume_command['native_stop_id'] != (stored.get('continuation') or {}).get('stop_id')):
+        raise ValueError('The task stop identity changed; refresh before continuing')
+    if resume_command and not getattr(loop, 'recovery_id', None):
+        loop.recovery_id = resume_command['id']
     try:
         reconcile(loop)
     except ValueError as exc:
@@ -324,7 +335,11 @@ def restore(loop, stored, identity):
     # ========================================================================
     from agent.task.output_limit import resume_validated
 
-    resume_validated(loop)
+    if getattr(loop, 'recovery_id', None) in stored.get('rejected_recovery_ids', []):
+        return loop.result()
+    if not getattr(loop, 'current_cancel', False):
+        resume_validated(loop, resume_command)
+    resumption.resume_validated(loop, resume_command)
     if stored['status'] == 'verified_success':
         loop.reused_result = True
         loop.history_store.stats['direct_returns'] += 1
@@ -358,9 +373,22 @@ def restore_budget(loop, stored):
         'report_time_reserve',
         'transport_retry_limit',
     )
-    if any(stored['budget'][k] != getattr(loop.budget, k) for k in policy):
+    from agent.task.resumption import LIMITS
+
+    initial = stored.get('budget_initial', stored['budget'])
+    effective = dict(initial)
+    for grant in stored.get('budget_grants', []):
+        for key, before in grant['before'].items():
+            if (key not in LIMITS or effective[key] != before
+                    or grant['after'][key] != before + initial[key]):
+                raise ValueError('Invalid saved budget grant')
+            effective[key] = grant['after'][key]
+    if any(effective.get(k, stored['budget'][k]) != stored['budget'][k] for k in LIMITS):
+        raise ValueError('Budget grant ledger differs from checkpoint')
+    if any(initial.get(k, stored['budget'][k]) != getattr(loop.budget, k) for k in policy):
         raise ValueError('Budget policy changed; resume cannot reset consumption')
     original_cancel = loop.budget.cancelled
+    loop.current_cancel = original_cancel
     for item in fields(loop.budget):
         if item.name != 'started_at':
             setattr(loop.budget, item.name, stored['budget'][item.name])

@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 from threading import Event, Lock, Thread
 import traceback
+import time
 
 from agent.runtime.bundles import PROTOCOL
 
@@ -48,7 +49,8 @@ def query(root, task, method, arguments):
         if method == 'find':
             return history.find(arguments['query'])
         return {'status': state['status'], 'usage': summarize(state),
-                'acceptance_limit': public(state), 'applied_inputs': state.get('applied_inputs', [])}
+                'acceptance_limit': public(state), 'continuation': state.get('continuation'),
+                'reason': state.get('reason', ''), 'applied_inputs': state.get('applied_inputs', [])}
     finally:
         history.close()
 
@@ -122,6 +124,8 @@ def main():
     control_results = {}
     controls_lock = Lock()
     completed = Event()
+    host_lost = Event()
+    last_heartbeat = [time.monotonic()]
     interrupted_messages = set()
     from agent.application.work_bridge import run_work, pause_work, supplement_work
 
@@ -133,9 +137,13 @@ def main():
         try:
             for line in input_stream:
                 packet = json.loads(line)
-                request = packet['id']
                 if packet.get('protocol') != PROTOCOL:
                     raise ValueError('Worker protocol changed')
+                if packet['kind'] == 'heartbeat':
+                    last_heartbeat[0] = time.monotonic()
+                    send('heartbeat')
+                    continue
+                request = packet['id']
                 if packet['kind'] == 'interrupt':
                     if request not in interrupted_messages:
                         supplement_work(task, request, root=root)
@@ -176,24 +184,48 @@ def main():
         # 宿主退出或管道损坏必须中止实际工作，不能成为无人管理的后台执行器。
         if completed.is_set():
             return
+        host_lost.set()
         with controls_lock:
             controls['host-disconnected'] = {'id': 'host-disconnected', 'kind': 'pause', 'text': ''}
         pause_work(task, 'host-disconnected', root=root)
 
+    def host_alive():
+        return not host_lost.is_set() and time.monotonic() - last_heartbeat[0] <= 8
+
+    def watch_host():
+        while not completed.wait(0.25):
+            if host_alive():
+                continue
+            host_lost.set()
+            from agent.task.control import interrupt
+
+            interrupt(root, task, 'pause', 'host-lease-expired')
+            Thread(target=lambda: pause_work(task, 'host-lease-expired', root=root),
+                   name='lost-host-stop', daemon=True).start()
+            # 即使停止回调卡在 Docker API，也不能让失联内核再次派发。
+            # 容器自己的租约会独立到期；原生请求与未知预留仍由下次继续核对。
+            if not completed.wait(3):
+                os._exit(78)
+            return
+
     with redirect_stdout(sys.stderr):
         Thread(target=receive, name='engine-control', daemon=True).start()
+        Thread(target=watch_host, name='host-lease-watch', daemon=True).start()
         send('ready', engine_id=bound['engine_id'], task_id=task)
         try:
-            result = run_work(
-                first['job'], lambda kind, payload: send('event', event=kind, payload=payload),
-                current_controls, root=root,
-            )
+            from agent.runtime.liveness import host_scope
+
+            with host_scope(host_alive):
+                result = run_work(
+                    first['job'], lambda kind, payload: send('event', event=kind, payload=payload),
+                    current_controls, root=root,
+                )
             completed.set()
             send('result', result=result)
         except Exception as exc:
             completed.set()
             traceback.print_exc(file=sys.stderr)
-            send('error', error=type(exc).__name__)
+            send('error', error=type(exc).__name__, message=str(exc)[:1000])
         finally:
             os.environ.pop('MONOPLANER_WORKER_CREDENTIAL', None)
 

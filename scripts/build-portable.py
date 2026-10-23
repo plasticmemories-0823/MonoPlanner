@@ -175,7 +175,8 @@ def build(destination, make_zip=True):
     for name in (
         'third-party.md', 'security.md', 'managed-execution.md',
         'boundary-hints.md', 'confirmed-delivery.md', 'work-graph.md', 'rag.md',
-        'upgrade-compatibility.md', 'crash-continuation.md', 'assets/workspace.png',
+        'upgrade-compatibility.md', 'crash-continuation.md', 'unified-continuation.md',
+        'lifetime-safety.md', 'assets/workspace.png',
     ):
         source = ROOT / 'docs' / name
         target = destination / 'docs' / name
@@ -189,27 +190,17 @@ def build(destination, make_zip=True):
         'python/python.exe',
         'node/node.exe',
         'git/cmd/git.exe',
-        'ripgrep/rg.exe',
         'MonoPlanner.FilePicker.exe',
         'MonoPlanner.Applications.exe',
         'WebView2Loader.dll',
     )
     if any(not (runtime / name).is_file() for name in required):
         raise ValueError('Prepare all fixed runtimes before packaging; no first-run installation')
-    from agent.rag.ripgrep import executable
-
-    executable()
-    rg_manifest = json.loads((ROOT / 'resources/ripgrep.json').read_text('utf-8'))
-    for name, expected in rg_manifest['files'].items():
-        source = runtime / 'ripgrep' / name
-        if not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != expected:
-            raise ValueError('Fixed ripgrep runtime or license is missing/changed: ' + name)
     runtime_entries = {
         'python',
         'node',
         'git',
         'webview',
-        'ripgrep',
         'MonoPlanner.FilePicker.exe',
         'MonoPlanner.Applications.exe',
         'WebView2Loader.dll',
@@ -244,7 +235,6 @@ def build(destination, make_zip=True):
         'python': '3.13.15',
         'node': '24.14.0',
         'git': '2.53.0.2',
-        'ripgrep': '15.2.0',
         'webview2_sdk': '1.0.4258.31',
         'webview2_fixed': '155.0.4283.45',
         'startup_installs_dependencies': False,
@@ -372,7 +362,7 @@ def build(destination, make_zip=True):
     def shipped(path):
         name = path.relative_to(destination).as_posix()
         runtime_entries = {
-            'python', 'node', 'git', 'webview', 'ripgrep',
+            'python', 'node', 'git', 'webview',
             'MonoPlanner.FilePicker.exe', 'MonoPlanner.Applications.exe',
             'WebView2Loader.dll', 'Microsoft.Web.WebView2.Core.dll',
             'Microsoft.Web.WebView2.WinForms.dll', 'LICENSE.txt', 'version.txt',

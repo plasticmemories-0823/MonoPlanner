@@ -173,7 +173,8 @@ export function StreamProvider({ children }: { children: ReactNode }) {
     if (!target) throw new Error("请先创建对话。");
     if (target === latest.current.thread_id && latest.current.read_only)
       throw new Error("旧版会话仅供查看，请新建对话继续。");
-    if (storageError && value.kind !== "pause") throw new StorageRequestError(storageError);
+    if (storageError && value.kind !== "pause" && value.kind !== "resume")
+      throw new StorageRequestError(storageError);
     let receipt: CommandReceipt;
     try {
       receipt = await requestJson<CommandReceipt>(`${apiUrl}/conversations/${target}/commands`, {

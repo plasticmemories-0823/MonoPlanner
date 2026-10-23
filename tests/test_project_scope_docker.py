@@ -58,6 +58,7 @@ class ProjectScopeDockerTests(unittest.TestCase):
             'HostConfig': {'NetworkMode': 'none', 'CapDrop': ['ALL'],
                            'SecurityOpt': ['no-new-privileges']},
             'Mounts': [
+                {'Source': str(env.lifetime().directory), 'Destination': '/monoplanner-lifetime', 'RW': False},
                 {'Type': 'bind', 'Source': str(env.repo_root),
                  'Destination': '/testbed', 'RW': True},
                 {'Type': 'bind', 'Source': str(env.artifact_root),
@@ -78,7 +79,7 @@ class ProjectScopeDockerTests(unittest.TestCase):
             env.start()
         args = docker.call_args.args[0]
         mounts = [args[i + 1] for i, arg in enumerate(args) if arg == '--mount']
-        self.assertEqual(len(mounts), 4)
+        self.assertEqual(len(mounts), 5)
         self.assertEqual(set(env.project_masks), {'/testbed/other', '/testbed/nested/worktree'})
         for target, source in env.project_masks.items():
             self.assertIn(f'type=bind,source={source},target={target},readonly', mounts)
@@ -103,7 +104,8 @@ class ProjectScopeDockerTests(unittest.TestCase):
         )) as docker:
             env.start()
         mounts = [arg for arg in docker.call_args.args[0] if arg.startswith('type=bind,')]
-        self.assertEqual(len(mounts), 2)
+        self.assertEqual(len(mounts), 3)
+        self.assertTrue(any('target=/monoplanner-lifetime,readonly' in value for value in mounts))
         self.assertIn(f'type=bind,source={child},target=/testbed', mounts)
         self.assertFalse(env.project_masks)
 
@@ -241,7 +243,8 @@ class ProjectScopeDockerTests(unittest.TestCase):
         self.assertFalse((snapshot.root / 'other').exists())
         self.assertFalse((snapshot.root / 'nested/worktree').exists())
         mounts = [arg for arg in docker.call_args.args[0] if arg.startswith('type=bind,')]
-        self.assertEqual(len(mounts), 2)
+        self.assertEqual(len(mounts), 3)
+        self.assertTrue(any('target=/monoplanner-lifetime,readonly' in value for value in mounts))
         self.assertTrue(any(f'source={snapshot.root},target=/testbed' in value for value in mounts))
         self.assertNotIn(f'source={self.repo},', '\n'.join(mounts))
 

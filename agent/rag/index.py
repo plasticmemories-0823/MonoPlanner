@@ -139,12 +139,18 @@ class Index:
                 item = Chunk(**json.loads(raw))
                 path = item.path.replace("\\", "/")
                 if not any(path == p.rstrip("/") or path.startswith(p.rstrip("/") + "/")
-                           for p in query.excluded_paths):
+                           for p in (value.replace("\\", "/") for value in query.excluded_paths)):
                     result.append(item)
             return result
 
     def missing_sources(self, query):
-        return len(query.source_versions) - len(self.sources(query))
+        with self._connection() as connection:
+            return connection.execute(
+                "SELECT count(*) FROM json_each(?) a WHERE NOT EXISTS "
+                "(SELECT 1 FROM source_headers h WHERE h.scope=? "
+                "AND h.source_id=a.key AND h.version=a.value)",
+                (canonical(dict(query.source_versions)), self.scope.key),
+            ).fetchone()[0]
 
     def stats(self):
         with self._connection() as connection:

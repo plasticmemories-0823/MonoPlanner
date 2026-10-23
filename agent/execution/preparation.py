@@ -220,10 +220,10 @@ class PreparationJobs:
                                 'error': type(exc).__name__})
         return results
 
-    def wait(self, repo, *, progress=None, cancelled=None, project_scope=None):
+    def wait(self, repo, *, progress=None, cancelled=None, project_scope=None, retry=False):
         repo = workspace_path(repo)
         options = {"project_scope": project_scope} if project_scope is not None else {}
-        value = self.start(repo, background=False, **options)
+        value = self.start(repo, background=False, retry=retry, **options)
         if value.get('mode') == 'manual':
             return value['environment']
         owner = current_owner()
@@ -389,6 +389,6 @@ def active_count(root=None):
         return sum(not item['future'].done() for item in service.workers.values())
 
 
-def ensure_prepared(repo, *, progress=None, cancelled=None, root=None, project_scope=None):
+def ensure_prepared(repo, *, progress=None, cancelled=None, root=None, project_scope=None, retry=False):
     options = {"project_scope": project_scope} if project_scope is not None else {}
-    return jobs(root).wait(repo, progress=progress, cancelled=cancelled, **options)
+    return jobs(root).wait(repo, progress=progress, cancelled=cancelled, retry=retry, **options)

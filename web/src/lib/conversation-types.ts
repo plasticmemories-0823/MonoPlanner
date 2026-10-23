@@ -65,6 +65,15 @@ export type AcceptanceLimit = {
   pause_id: string;
   last_verification_status: string;
 };
+export type Continuation = {
+  protocol: number;
+  available: boolean;
+  stop_id: string;
+  mode: "continue" | "review";
+  reason?: string;
+  additions: Record<string, number>;
+  requirements: string[];
+};
 export type ConversationSnapshot = {
   thread_id: string;
   status: string;
@@ -77,6 +86,7 @@ export type ConversationSnapshot = {
     reason?: string;
     revision?: number;
     acceptance_limit?: AcceptanceLimit | null;
+    continuation?: Continuation | null;
   } | null;
   repo: string;
   runtime_settings?: RuntimeSettings;
@@ -99,6 +109,7 @@ export type ConversationCommand = {
   repo?: string;
   runtime_settings?: Record<string, unknown>;
   acceptance_pause_id?: string;
+  resume_token?: string;
   proposal_id?: string;
 };
 
@@ -166,12 +177,8 @@ export function canSupplementWork(status?: string): boolean {
 }
 
 /** 继续先核对原件；普通聊天、补充和重启都不能放行中断任务。 */
-export function canResumeWork(status?: string): boolean {
-  return ["paused", "awaiting_user", "output_limit_reached", "acceptance_limit_reached",
-    "interrupted", "model_request_unknown", "execution_unknown", "runtime_error",
-    "compaction_commit_unknown", "state_conflict"].includes(
-    status || "",
-  );
+export function canResumeWork(work?: ConversationSnapshot["work"]): boolean {
+  return Boolean(work?.continuation?.available && work.continuation.stop_id);
 }
 
 export function acceptanceLimitLabel(limit?: AcceptanceLimit | null): string | null {
@@ -183,6 +190,7 @@ export function resumeCommand(work: ConversationSnapshot["work"], id: string): C
   return {
     id,
     kind: "resume",
+    ...(work?.continuation?.stop_id ? { resume_token: work.continuation.stop_id } : {}),
     ...(work?.acceptance_limit?.active
       ? { acceptance_pause_id: work.acceptance_limit.pause_id }
       : {}),

@@ -7,7 +7,8 @@ import sqlite3
 import uuid
 
 from agent.application.chat import Chatbot
-from agent.application.store import ACTIVE, TERMINAL, RESUMABLE, SUPPLEMENTABLE, Conflict
+from agent.application.store import ACTIVE, TERMINAL, SUPPLEMENTABLE, Conflict
+from agent.task.resumption import stopped, explicit_continue
 from agent.application.lease import ServiceLease
 from agent.application.store import identity, encode
 
@@ -58,6 +59,7 @@ class Scheduler:
         self.control_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='application-control')
         self.worker = None
         self.starting = False
+        self.last_dispatch_tick = None
         self.lease = None
         from agent.application.shutdown import Shutdown
 
@@ -230,6 +232,10 @@ class Scheduler:
         if self.storage_error():
             if target:
                 return self._emergency_pause(target)
+            if isinstance(command, dict) and (command.get('kind') == 'resume' or (
+                command.get('kind') == 'message' and explicit_continue(command.get('text'))
+            )):
+                self._recover_storage(conversation)
             self.ensure_dispatch_available()
         try:
             return self._submit_saved(conversation, command)
@@ -239,11 +245,30 @@ class Scheduler:
                 return self._emergency_pause(target)
             raise StorageUnavailable(self.storage_error()['message']) from exc
 
+    def _recover_storage(self, conversation):
+        # 人工继续先验证数据库能提交；核对旧原件不是重放任务或批准权限。
+        with self.lock:
+            if self.works or self.chats or self.titles or self.reporting or self.controls_inflight:
+                raise Conflict('上次执行者尚未退出，请等待停止确认后继续。')
+            fault = self.storage_fault
+        try:
+            with self.store.connection() as db:
+                if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                    raise ValueError('运行数据库损坏，请先修复保留原件。')
+            self.store.recover_interrupted()
+            self.store.record_event(conversation, 'storage_recovered', {'previous_fault': fault})
+        except (OSError, sqlite3.Error) as exc:
+            raise StorageUnavailable('运行记录仍不能可靠保存，请先修复存储条件。') from exc
+        with self.lock:
+            if self.storage_fault == fault:
+                self.storage_fault = None
+
     def _submit_saved(self, conversation, command):
         if self.stop.is_set():
             raise ServiceClosing('MonoPlanner 正在退出，已停止接收新操作。')
         result = self.store.submit(conversation, command)
-        if command['kind'] == 'message' and not result['applied']:
+        routed = result.get('kind', command['kind'])
+        if routed == 'message' and not result['applied']:
             try:
                 self._reserve_title(conversation, command)
             except (OSError, sqlite3.Error):
@@ -303,7 +328,8 @@ class Scheduler:
             return self.store.create_work(conversation, command['id'], kind=kind,
                                           arguments=arguments, work_options=work_options,
                                           project_path=project_path, create=create)
-        if previous and previous['status'] not in TERMINAL:
+        packet = (work_options or {}).get('confirmed_requirements') or {}
+        if previous and (previous['status'] not in TERMINAL or packet.get('parent_digest')):
             if kind != 'coding':
                 raise Conflict('当前工作尚未结束，不能同时运行另一任务')
             from agent.application.project_location import resolve_location
@@ -321,6 +347,15 @@ class Scheduler:
                 control['text'] = '\n\n'.join(r['text'] for r in packet['sources'] if r['id'] not in old_sources)
                 control['confirmed_requirements'] = packet
             self.submit(conversation, control)
+            if stopped(previous['status']) and control.get('confirmed_requirements'):
+                continuation = previous.get('continuation') or {}
+                limit = previous.get('acceptance_limit') or {}
+                self.submit(conversation, {
+                    'id': str(uuid.uuid5(uuid.UUID(command['id']), 'confirmed-continue')),
+                    'kind': 'resume',
+                    **({'resume_token': continuation['stop_id']} if continuation.get('stop_id') else {}),
+                    **({'acceptance_pause_id': limit['pause_id']} if limit.get('active') else {}),
+                })
             return previous
         work = self.store.create_work(conversation, command['id'], kind=kind, arguments=arguments,
                                       work_options=work_options,
@@ -331,6 +366,9 @@ class Scheduler:
     def _loop(self):
         while not self.stop.is_set():
             try:
+                import time
+
+                self.last_dispatch_tick = time.monotonic()
                 self.tick()
             except ServiceClosing:
                 return
@@ -368,7 +406,7 @@ class Scheduler:
                     self.store.command_state(conversation, command['id'], 'failed',
                                              error='WorkNoLongerAcceptsControl')
                     continue
-                if row['state'] == 'pending' and target['status'] in RESUMABLE:
+                if row['state'] == 'pending' and stopped(target['status']):
                     self._schedule_work(target)
             if row['kind'] == 'message' or (row['kind'] == 'supplement'
                                            and not command.get('confirmed_requirements')):
@@ -430,13 +468,19 @@ class Scheduler:
                     self.store.command_state(conversation, command['id'], 'applied')
             elif row['kind'] in {'resume', 'supplement'}:
                 task = self.store.work(row['task_id'])
-                if (row['kind'] == 'supplement' and task and task['status'] in RESUMABLE
+                if (row['kind'] == 'resume' and task and stopped(task['status'])
+                        and row.get('resume_token')
+                        != (task.get('continuation') or {}).get('stop_id')):
+                    self.store.command_state(conversation, command['id'], 'failed',
+                                             error='StopChangedBeforeDispatch')
+                    continue
+                if (row['kind'] == 'supplement' and task and stopped(task['status'])
                         and any(command['kind'] == 'resume'
                                 for command in self.store.commands(task=task['task_id']))):
                     # 本轮明确继续会携带原补充；不能因旧的中断状态先把它判失败。
                     continue
-                allowed = RESUMABLE if row['kind'] == 'resume' else SUPPLEMENTABLE
-                if task and task['status'] in RESUMABLE and task['status'] in allowed:
+                allowed = bool(task) and (row['kind'] == 'resume' or task['status'] in SUPPLEMENTABLE)
+                if task and stopped(task['status']) and allowed:
                     self._schedule_work(task)
                 elif not task or task['status'] not in ACTIVE:
                     self.store.command_state(conversation, command['id'], 'failed',
@@ -540,6 +584,10 @@ class Scheduler:
             raise
 
     def controls(self, task):
+        import time
+
+        if self.last_dispatch_tick is not None and time.monotonic() - self.last_dispatch_tick > 8:
+            return [{'id': 'dispatcher-lease-expired', 'kind': 'pause', 'text': ''}]
         if self.stop.is_set():
             return [{'id': self.shutdown.identity, 'kind': 'pause', 'text': ''}]
         fault = self.storage_error()
@@ -565,8 +613,13 @@ class Scheduler:
         work = self.store.work(task)
         if kind == 'work_state':
             allowed = {key: payload[key] for key in (
-                'status', 'reason', 'usage', 'applied_inputs', 'acceptance_limit',
+                'status', 'reason', 'usage', 'applied_inputs', 'acceptance_limit', 'continuation',
             ) if key in payload}
+            if payload.get('event') and stopped(allowed.get('status')) and task in self.works:
+                # 原生已经停止规划，不代表所属容器及进程已完成收尾。
+                # 工作桥接返回并核验停止后，下面的最终投影才展示真正停止状态。
+                allowed['status'] = 'pausing'
+                allowed.pop('continuation', None)
             seq = self.store.work_state(task, **allowed, event=payload.get('event'),
                                         details=payload.get('details', {}))
         else:
@@ -599,6 +652,7 @@ class Scheduler:
             self.emit(task, 'work_state', {
                 'status': result['status'], 'reason': result.get('stop_reason', result.get('reason', '')),
                 'usage': result.get('usage', {}), 'applied_inputs': result.get('applied_inputs', []),
+                **({'continuation': result['continuation']} if result.get('continuation') else {}),
                 **({'acceptance_limit': result['acceptance_limit']}
                    if 'acceptance_limit' in result else {}),
             })

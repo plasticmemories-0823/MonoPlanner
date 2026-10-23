@@ -198,6 +198,9 @@ class ManagedEnvironments:
     def _stop_owned_container(self, name, metadata, owner):
         from agent.storage.resources import stop_recorded_container
 
+        guard = getattr(self, '_lifetime_guards', {}).get(name)
+        if guard:
+            guard.revoke()
         # 原件同时留在内存；磁盘已满时，仍能按原 ID、标签和镜像终止安装。
         return stop_recorded_container(name, metadata, owner, self.root.parent)
 
@@ -297,12 +300,15 @@ class ManagedEnvironments:
                       log=work / 'builder-volume.log', cancelled=cancelled)
             catalog.register(volume_identity, 'volume', volume, owner=owner,
                              metadata={'builder': name, 'labels': labels})
+            entry = image.get('Config', {}).get('Entrypoint') or ['/usr/bin/buildkitd']
             created = self._run([
                 'create', '--name', container, '--pull', 'never', '--init',
                 '--privileged', '--memory', '2g', '--memory-swap', '2g', '--cpus', '2',
                 '--pids-limit', '256', '--restart', 'no', *LOG_OPTIONS, *label_args,
                 '--mount', 'type=volume,source=' + volume + ',target=/var/lib/buildkit',
-                *proxy_environment(_DOWNLOAD_RELAY.get().url(container=True)), image['Id'],
+                *proxy_environment(_DOWNLOAD_RELAY.get().url(container=True)),
+                '--entrypoint', entry[0], image['Id'], *entry[1:],
+                *(image.get('Config', {}).get('Cmd') or []),
             ], log=work / 'builder-container.log', cancelled=cancelled)
             actual_id = created.stdout.strip()
             if not re.fullmatch(r'[0-9a-f]{64}', actual_id):
@@ -450,6 +456,26 @@ class ManagedEnvironments:
 
     def _run(self, arguments, *, log, cancelled=None, timeout=60, check=True):
         _check_cancel(cancelled)
+        if arguments[0] in {'run', 'create'}:
+            from agent.runtime.liveness import Lease
+
+            if '--name' not in arguments:
+                raise PreparationError('环境容器缺少唯一身份，未启动。')
+            name = arguments[arguments.index('--name') + 1]
+            if '--entrypoint' not in arguments:
+                raise PreparationError('环境容器缺少受保护入口，未启动。')
+            image = arguments[arguments.index('--entrypoint') + 2]
+            guards = self.__dict__.setdefault('_lifetime_guards', {})
+            guard = guards.get(name)
+            if guard is None:
+                guard = guards[name] = Lease(self.root.parent, name, cancelled=cancelled)
+            arguments = guard.wrap(arguments, image)
+        removing = (arguments[0] in {'stop', 'kill', 'rm'} or
+                    arguments[:2] in (['container', 'stop'], ['container', 'kill'], ['container', 'rm']))
+        if removing:
+            for name, lease in getattr(self, '_lifetime_guards', {}).items():
+                if arguments[-1] in {name, getattr(lease, 'container_id', None)}:
+                    lease.revoke()
         # 身份核验不需要 Env/Cmd；一次性中继口令不随 inspect 写入本地日志。
         if arguments[:2] == ['container', 'inspect'] and len(arguments) == 3:
             arguments = [*arguments[:2], '--format', _CONTAINER_INSPECT, arguments[2]]
@@ -489,6 +515,8 @@ class ManagedEnvironments:
         if log.stat().st_size > MAX_LOG:
             raise PreparationError('安装程序输出过多，已停止准备并保留日志。')
         text = log.read_text(encoding='utf-8', errors='replace')
+        if arguments[0] in {'run', 'create'} and process.returncode == 0:
+            guard.container_id = text.strip()
         if check and process.returncode:
             # 本地保留日志以便诊断；不要向模型或界面返回任意安装输出，
             # 因为其中可能包含项目数据。

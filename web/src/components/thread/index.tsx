@@ -605,9 +605,8 @@ export function Thread() {
                                   acceptanceLimitLabel(stream.values.work.acceptance_limit)) ||
                                 statusLabel(stream.values.status)}
                         </span>
-                        {!stream.storageError &&
-                          !stream.workRunning &&
-                          canResumeWork(stream.values.work?.status) && (
+                        {!stream.workRunning &&
+                          canResumeWork(stream.values.work) && (
                             <Button
                               type="button"
                               variant="ghost"
@@ -616,7 +615,7 @@ export function Thread() {
                               onClick={resume}
                               disabled={controlPending}
                             >
-                              {controlPending ? "正在提交" : "继续任务"}
+                              {controlPending ? "正在提交" : stream.values.work?.continuation?.mode === "review" ? "继续复查" : "继续任务"}
                             </Button>
                           )}
                       </div>

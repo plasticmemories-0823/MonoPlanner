@@ -212,6 +212,7 @@ class TaskDispatch:
     def record_blocked(self, state):
         self.owner.state.update(
             response_pending=None, status="task_blocked", reason=state["plan"].note,
+            blocked_report={"source": "model", "externally_verified": False},
         )
 
     def accept_plan(self, state):

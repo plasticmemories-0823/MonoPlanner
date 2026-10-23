@@ -147,6 +147,7 @@ internal sealed class DesktopWindow : Form
         focusTimer.Interval = 300;
         focusTimer.Tick += delegate
         {
+            Program.PulseDesktop();
             if (closing || !activate.WaitOne(0))
                 return;
             if (WindowState == FormWindowState.Minimized)
@@ -400,7 +401,9 @@ internal sealed class DesktopWindow : Form
         view.CoreWebView2.ProcessFailed += delegate (object sender, CoreWebView2ProcessFailedEventArgs e)
         {
             browserLost = e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited;
-            ShowError("界面进程已中断。可重新连接，后台任务与记录保留。");
+            // 界面进程失败也进入同一退出链，不能留下看不见的后台执行。
+            Program.RequestClose();
+            Close();
         };
     }
 

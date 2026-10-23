@@ -28,7 +28,7 @@ def corpus(tmp_path):
 
         def query(text, **kwargs):
             return Query(text, {key: value.version for key, value in documents.items()},
-                         **{"match": "substring", **kwargs})
+                         **kwargs)
 
         def retrieve(text, **kwargs):
             result = Retriever(index, tokens, read_source=lambda source, version:

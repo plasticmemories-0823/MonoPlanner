@@ -53,7 +53,7 @@ Chatbot 与工作内核均由 LangGraph 调度，但服务不依赖 Agent Server
 .\.venv-web\Scripts\python.exe -B -X utf8 main.py --repo 'E:/Projects/example' --check-workspace
 .\.venv-web\Scripts\python.exe -B -X utf8 -m agent --state-dir 'E:/AgentRuns/task-001' --repo 'E:/Projects/example' --task '任务描述'
 .\.venv-web\Scripts\python.exe -B -X utf8 -m agent --state-dir 'E:/AgentRuns/task-001' --status
-.\.venv-web\Scripts\python.exe -B -X utf8 -m agent --state-dir 'E:/AgentRuns/task-001'
+.\.venv-web\Scripts\python.exe -B -X utf8 -m agent --state-dir 'E:/AgentRuns/task-001' --continue
 ```
 
 交互命令包括 `/repo`、`/clear`、`/verify-command`、`/acceptance` 和 `/exit`。已有 `.venv` 仍可用于 CLI，不需要为界面升级原环境。
@@ -108,7 +108,7 @@ pnpm --dir web build
 
 ## 统一检索约定
 
-exact 原样保留完整 query，keywords 仅使用显式 terms；默认完整词，substring 明确选择子串。rg 枚举授权原文，BM25 自动排序，不删剩余命中，不提供语义或正则模式。Chatbot 工具与工作计划共用服务，不增加第二套调度；新功能替代旧执行器后，删除无调用的旧实现及只验证该实现的测试。AST解析缓存、
+仅支持 exact，原样保留完整 query 并按区分大小写的字面子串扫描。恢复旧版 BM25 文件排序，不丢弃剩余命中，不提供边界匹配、关键词列表、语义或正则模式。Chatbot 工具与工作计划共用服务，不增加第二套调度；新功能替代旧执行器后，删除无调用的旧实现及只验证该实现的测试。AST解析缓存、
 源码版本及已读范围仍保留；搜索测试应从实际工具/计划入口验证到下一次模型输入。
 
 分页、命中范围与字节续读均绑定查询和来源版本。结果不足、共享预算不足和来源不可读要
@@ -119,3 +119,8 @@ exact 原样保留完整 query，keywords 仅使用显式 terms；默认完整�
 ## 验收轮次与人工续跑
 
 详见 [验收轮次与断点续跑](acceptance-continuation.md)。轮次额度保存在任务检查点，额度用尽是 `acceptance_limit_reached` 暂停态。API 的 `resume` 命令绑定当前 `acceptance_pause_id`；同一暂停的重复点击合并，旧页面不能授权后来的新一批。基准之后的检查点由对应冻结内核恢复；发布前额度终态的只读投影已移除。
+
+
+## 当前继续与失联协议
+
+当前应用数据版本和工作管道协议均为 2。通用继续涵盖普通停止、额度耗尽及成功后复查，保留原任务与累计账本；旧协议保留查询与停止能力，执行迁移须单独明确。宿主与内核心跳、容器只读续租及看守限制遗留执行，停止状态以实际核验为准。见[人工继续](unified-continuation.md)、[失联保护](lifetime-safety.md)和[升级兼容](upgrade-compatibility.md)。

@@ -1,11 +1,14 @@
-"""统一检索的字面量、原件扫描、分页和互斥模型路由回归。"""
+"""统一检索的字面量、原件扫描、分页和资源边界回归。"""
 
 from dataclasses import replace
+import base64
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import unittest
+
+import pytest
 
 from agent.rag.index import Index
 from agent.rag.retrieval import Retriever
@@ -73,7 +76,7 @@ class UnifiedSearchTests(unittest.TestCase):
         self.add('one', text)
         # 长查询跨越旧分块边界，必须直接从原件定位并返回完整原文。
         query = text[5000:7000]
-        result = self.retrieve(query, match="substring")
+        result = self.retrieve(query)
         self.assertEqual(len(result['hits']), 1)
         hit = result['hits'][0]
         self.assertIn(query, result_text(result, hit))
@@ -112,7 +115,7 @@ class UnifiedSearchTests(unittest.TestCase):
         self.add('one', 'aaaaa')
         cursor, starts = '', []
         for _ in range(4):
-            result = self.retrieve('aa', match='substring', cursor=cursor, limit=1)
+            result = self.retrieve('aa', cursor=cursor, limit=1)
             starts.extend(hit['match_start'] for hit in result['hits'])
             cursor = result['next_cursor']
         self.assertEqual(starts, [0, 1, 2, 3])
@@ -251,3 +254,89 @@ class UnifiedSearchTests(unittest.TestCase):
                     break
         self.assertFalse(cursor)
         self.assertEqual(actual, expected)
+
+
+# 由退休的 rg 专属模块迁移：保留每个独立字面边界，不合并测试计数。
+@pytest.mark.parametrize("word,text,count", [
+    ("signal", "signal signaling _signal signal_extra SIGNAL", 4),
+    ("中文", "中文 中文资料", 2),
+    ("e\u0301", "e\u0301 e\u0301x", 2),
+    ("🙂", "🙂a🙂", 2),
+    ("a-a", "a-a-a", 2),
+    ("aba", "ababa", 2),
+    ("b\r\nc", "ab\r\ncd b\r\nc", 2),
+    ("x + y", "x + y ax + y x + yz x+y", 3),
+    ("echo echo", "echo echo echo ECHO echo", 2),
+])
+def test_literal_substring_boundaries(tmp_path, word, text, count):
+    document = Document('source', 'v1', text, path='source.txt')
+    with Index(tmp_path / 'catalog.db', Scope('p', 't'), RagConfig(), tokens) as index:
+        index.upsert(document)
+        result = Retriever(index, tokens, read_source=lambda *_: text).retrieve(
+            Query(word, {'source': 'v1'})
+        )
+    body = json.loads(result.message)
+    assert body['total_matches'] == count and body['scan_complete']
+    assert body['query'] == word
+    for hit in body['hits']:
+        assert text[hit['match_start']:hit['match_end']] == word
+
+
+def test_cursor_rejects_rg_version_even_with_matching_binding(tmp_path):
+    with Index(tmp_path / 'catalog.db', Scope('p', 't'), RagConfig(), tokens) as index:
+        index.upsert(Document('source', 'v1', 'needle needle'))
+        engine = Retriever(index, tokens, read_source=lambda *_: 'needle needle')
+        query = Query('needle', {'source': 'v1'}, limit=1)
+        cursor = json.loads(engine.retrieve(query).message)['next_cursor']
+        decoded = json.loads(base64.urlsafe_b64decode(cursor + '=' * (-len(cursor) % 4)))
+        assert decoded['schema'] == 5
+        decoded['schema'] = 4
+        retired = base64.urlsafe_b64encode(json.dumps(decoded).encode()).decode()
+        with pytest.raises(ValueError, match='[Cc]ursor'):
+            engine.retrieve(replace(query, cursor=retired))
+        with pytest.raises(ValueError, match='[Cc]ursor'):
+            engine.retrieve(replace(query, cursor=cursor, source_priorities={'source': 1}))
+
+
+def test_literal_timeout_is_incomplete_not_zero_match_proof(tmp_path, monkeypatch):
+    with Index(tmp_path / 'catalog.db', Scope('p', 't'), RagConfig(), tokens) as index:
+        index.upsert(Document('source', 'v1', 'needle'))
+        clock = [0]
+        monkeypatch.setattr('agent.rag.retrieval.time.monotonic', lambda: clock[0])
+
+        def slow_read(*_):
+            clock[0] = 31
+            return 'needle'
+
+        body = json.loads(Retriever(index, tokens, read_source=slow_read).retrieve(
+            Query('needle', {'source': 'v1'})
+        ).message)
+    assert not body['scan_complete'] and not body['complete']
+    assert 'source_scan_timeout' in body['reasons'] and not body['hits']
+
+
+def test_binary_original_is_explicitly_unavailable(tmp_path):
+    with Index(tmp_path / 'catalog.db', Scope('p', 't'), RagConfig(), tokens) as index:
+        index.upsert(Document('source', 'v1', 'needle\0private'))
+        body = json.loads(Retriever(index, tokens, read_source=lambda *_: 'needle\0private')
+                          .retrieve(Query('needle', {'source': 'v1'})).message)
+    assert 'binary_source_skipped' in body['reasons']
+    assert not body['scan_complete'] and not body['hits']
+    assert 'private' not in json.dumps(body)
+
+
+def test_literal_search_never_starts_process_or_retrieval_model(tmp_path, monkeypatch):
+    import subprocess
+    from agent.model import client
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Text retrieval must not invoke a process or a model')
+
+    monkeypatch.setattr(subprocess, 'Popen', forbidden)
+    monkeypatch.setattr(client, 'create_model', forbidden)
+    with Index(tmp_path / 'catalog.db', Scope('p', 't'), RagConfig(), tokens) as index:
+        index.upsert(Document('source', 'v1', 'needle'))
+        result = Retriever(index, tokens, read_source=lambda *_: 'needle').retrieve(
+            Query('needle', {'source': 'v1'})
+        )
+    assert result.exact_hit

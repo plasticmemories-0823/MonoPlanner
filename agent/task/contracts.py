@@ -5,6 +5,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from agent.acceptance.execution import ExecutionCheck, EXECUTION_DESCRIPTION
 
 
+def _exact_mode_schema(schema):
+    """单一字面值沿用严格工具支持的 enum 表示。"""
+    schema.pop("const", None)
+    schema["enum"] = ["exact"]
+
+
 class Operation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
@@ -34,15 +40,11 @@ class Operation(BaseModel):
         le=2000,
         description='read: default 2000, range 1..2000. Other operations: default 80, maximum 1000.',
     )
-    mode: Literal["exact", "keywords"] = Field(
+    mode: Literal["exact"] = Field(
         default="exact",
-        description="exact uses one literal query; keywords uses explicit terms and an empty query. BM25 automatically ranks rg matches.",
+        json_schema_extra=_exact_mode_schema,
+        description="One case-sensitive literal substring query. Preserve whitespace and repeated text; BM25 ranks matching files automatically.",
     )
-    match: Literal["whole_word", "substring"] = Field(
-        default="whole_word",
-        description="whole_word for complete identifiers; substring for partial names, errors or fragments. Case-sensitive; no rewriting.",
-    )
-    terms: list[str] = Field(default_factory=list, max_length=16)
     intent: Literal["locate", "diagnostic", "audit"] = "locate"
     required_entities: list[str] = Field(default_factory=list, max_length=16)
     required_kinds: list[Literal["code", "document", "tool_result", "log"]] = Field(
@@ -82,7 +84,6 @@ class Operation(BaseModel):
 
             validate_arguments({
                 "query": self.query, "path": self.path, "mode": self.mode,
-                "match": self.match, "terms": self.terms,
             }, records=True, containers=True)
         if self.from_step and self.op != "read":
             raise ValueError("Only read may refer to an earlier search")

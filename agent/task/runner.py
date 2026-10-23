@@ -754,6 +754,9 @@ class TaskRunner:
         from agent.rag.container_sources import expire_container_sources
 
         expire_container_sources(self)
+        from agent.task.resumption import save_stop
+
+        save_stop(self)
         self.persist("task_returned", {"status": self.state["status"]})
         report = f"{self.state['status']}: {self.state.get('reason', '')}"
         from agent.storage.usage import summarize
@@ -766,6 +769,7 @@ class TaskRunner:
             'pause_requested': self.state.get('pause_requested', False),
             'output_limit': public_limit(self.state),
             'acceptance_limit': public_acceptance_limit(self.state),
+            'continuation': self.state.get('continuation'),
             'usage': summarize(self.state),
             'existing_runs': self.state.get('existing_runs', []),
             "messages": [HumanMessage(content=self.state["request"]), AIMessage(content=report)],
@@ -806,5 +810,13 @@ class TaskRunner:
                 HumanMessage(content=self.state['request']),
                 *public,
             ]
-        save(self.root / "result.json", {k: v for k, v in outcome.items() if k != "messages"})
+        serial = {k: v for k, v in outcome.items() if k != "messages"}
+        stop = self.state.get('continuation') or {}
+        if stop.get('available'):
+            from agent.storage.records import immutable
+
+            path = self.root / 'stops' / (stop['stop_id'] + '.json')
+            if not path.exists():
+                immutable(path, json.dumps(serial, ensure_ascii=False, indent=2).encode('utf-8'))
+        save(self.root / "result.json", serial)
         return outcome

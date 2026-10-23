@@ -134,6 +134,7 @@ class TaskDocker(DockerEnvironment):
             expected = {
                 '/testbed': ('bind', self.repo_root, True),
                 '/agent-artifacts': ('bind', self.artifact_root, True),
+                '/monoplanner-lifetime': ('bind', self.lifetime().directory, False),
             }
             expected.update(
                 {
@@ -205,6 +206,7 @@ class TaskDocker(DockerEnvironment):
             'artifacts': str(self.artifact_root),
             'materials': self.material_mounts,
             'runtime_materials_sha256': self.runtime_materials_sha256,
+            'lifetime_token': self.lifetime().token,
         }
         if self.dependency_mounts:
             result['dependency_mounts'] = self.dependency_mounts
@@ -354,6 +356,7 @@ class TaskDocker(DockerEnvironment):
                 or actual['State'].get('Error')
             ):
                 raise ValueError('原任务容器停止状态已变化，不能继续。')
+            self.lifetime().arm()
             result = self._docker(
                 ['start', self._container_id],
                 capture_output=True,
@@ -401,6 +404,7 @@ class TaskDocker(DockerEnvironment):
                 or self._continuation_identity(stopped) != before['identity']):
             raise ValueError('Task container changed during recovery')
         save(record, {'before': before, 'stopped': stopped['State']})
+        self.lifetime().arm()
         result = self._docker(['start', self._container_id], capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError('Could not restart the original task container')

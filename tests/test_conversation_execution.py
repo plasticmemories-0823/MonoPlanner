@@ -40,6 +40,9 @@ class ConversationExecutionTests(unittest.TestCase):
                 workspace_binding(str(self.repo))
 
     def inspected(self, running=True):
+        from agent.runtime.liveness import Lease
+
+        guard = Lease(self.root, 'monoplanner-owned-task')
         return {
             'Image': self.image,
             'Name': '/monoplanner-owned-task',
@@ -51,6 +54,7 @@ class ConversationExecutionTests(unittest.TestCase):
                 'SecurityOpt': ['no-new-privileges'],
             },
             'Mounts': [
+                {'Source': str(guard.directory), 'Destination': '/monoplanner-lifetime', 'RW': False},
                 {'Source': str(self.repo), 'Destination': '/testbed'},
                 {
                     'Source': str(self.root / 'execution' / 'owned-task'),

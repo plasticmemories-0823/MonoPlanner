@@ -6,8 +6,16 @@ import sqlite3
 import uuid
 
 
-DATA_VERSION = 1
-MIGRATIONS = {}
+DATA_VERSION = 2
+
+
+def continuation_commands(db):
+    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_commands'").fetchone()
+    if exists:
+        db.execute('ALTER TABLE app_commands ADD COLUMN resume_token TEXT')
+
+
+MIGRATIONS = {1: continuation_commands}
 
 
 class DataVersionError(ValueError):
@@ -46,8 +54,8 @@ def initialize(path, *, target=DATA_VERSION, migrations=None):
                 )
             with db:
                 db.execute('BEGIN IMMEDIATE')
-                db.execute('PRAGMA user_version=1')
-            current = 1
+                db.execute(f'PRAGMA user_version={int(target)}')
+            current = target
         if current == target:
             return
         if any(number not in steps for number in range(current, target)):
