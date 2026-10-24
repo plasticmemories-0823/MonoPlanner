@@ -505,6 +505,7 @@ class TaskRunner:
         )
         criteria = [request] + ([self.state["acceptance"]] if self.state["acceptance"] else [])
         command = self.state["verify_command"]
+        from agent.task.requirements import output_paths
         spec = VerificationSpec(
             tuple(criteria),
             command=command,
@@ -512,6 +513,7 @@ class TaskRunner:
             test_driver=() if command else plan.test_driver,
             execution_checks=() if command else [item.model_dump() for item in plan.execution_checks],
             requirement_digest=self.state["requirements"]["digest"],
+            output_paths=output_paths(self),
         )
         self.state["verification_spec"] = asdict(spec)
         self.state["regression_command"] = plan.regression_command

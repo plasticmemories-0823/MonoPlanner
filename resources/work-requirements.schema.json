@@ -26,7 +26,9 @@
           "artifact_type": {
             "enum": [
               "generated_code",
-              "repository_entry"
+              "repository_entry",
+              "python_api",
+              "file_artifact"
             ],
             "type": "string",
             "description": "generated_code: a producer returns code for another runtime to consume. repository_entry: an actual project source entry, including newly written application files."

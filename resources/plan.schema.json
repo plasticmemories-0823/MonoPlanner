@@ -130,7 +130,7 @@
       "type": "array"
     },
     "execution_checks": {
-      "description": "Required for first generated acceptance: artifact type, real entry and consuming runtime. [] only for inspection, fixed user commands, or reuse of frozen checks. Compile/syntax-check and execute the actual artifact. Wine CMD instead parses and executes the unchanged BAT/CMD once; only exercised paths are validated in compatibility mode. Invocation-only call and unchecked executable consumers are not supported. No task-name detection or self-reported pass.",
+      "description": "Required for first generated acceptance: artifact type, real entry and consuming runtime. [] only for inspection, fixed user commands, or reuse of frozen checks. Compile/syntax-check and execute the actual artifact. Wine CMD instead parses and executes the unchanged BAT/CMD once; only exercised paths are validated in compatibility mode. Invocation-only call and unchecked executable consumers are not supported. Python APIs and file artifacts use python_tests: bind Class.test_method IDs in test_code. Call the original synchronous Python function/method in those tests, or read delivered bytes with acceptance_artifacts.read_artifact(relative_path) and validate them. The existing test execution supplies the receipt; do not add a substitute CLI or rerun it. No task-name detection or self-reported pass.",
       "items": {
         "additionalProperties": false,
         "properties": {
@@ -148,7 +148,9 @@
           "artifact_type": {
             "enum": [
               "generated_code",
-              "repository_entry"
+              "repository_entry",
+              "python_api",
+              "file_artifact"
             ],
             "type": "string"
           },
@@ -165,7 +167,8 @@
             "enum": [
               "command",
               "c_expression",
-              "c_statement"
+              "c_statement",
+              "python_tests"
             ],
             "type": "string"
           },
@@ -182,7 +185,22 @@
             ],
             "type": "string"
           },
+          "python_module": {
+            "description": "Optional dotted module for Python -m; entry_file must be its module .py or package __main__.py. Empty executes the original file.",
+            "type": "string"
+          },
           "argv": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "api_entry": {
+            "description": "For python_api only: the original module:function or module:Class.method actually called by the bound unittest methods.",
+            "type": "string"
+          },
+          "test_ids": {
+            "description": "For python_tests only: Class.test_method IDs in test_code. Each must actually call the API or read the original artifact through acceptance_artifacts.read_artifact(relative_path). No second execution is performed.",
             "items": {
               "type": "string"
             },
@@ -218,10 +236,6 @@
               "type": "object"
             },
             "type": "array"
-          },
-          "python_module": {
-            "description": "Optional dotted module for Python -m; entry_file must be its module .py or package __main__.py. Empty executes the original file.",
-            "type": "string"
           }
         },
         "required": [
@@ -237,6 +251,8 @@
           "interpreter",
           "python_module",
           "argv",
+          "api_entry",
+          "test_ids",
           "variables",
           "result_variable",
           "cases"

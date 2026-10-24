@@ -26,7 +26,7 @@ class Quote(BaseModel):
 class DeliveryTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
-    artifact_type: Literal["generated_code", "repository_entry"]
+    artifact_type: Literal["generated_code", "repository_entry", "python_api", "file_artifact"]
     target_runtime: str = Field(min_length=1, max_length=40)
     entry: str = Field(min_length=1, max_length=1024)
     behavior: str = Field(min_length=1, max_length=4000)
@@ -59,6 +59,20 @@ class DeliveryTarget(BaseModel):
 
     @model_validator(mode="after")
     def interface(self):
+        if self.artifact_type in {"python_api", "file_artifact"}:
+            if (self.target_runtime != "python" or self.imports or self.setup
+                    or self.expression or self.variables or self.required_values
+                    or self.argv or self.python_module):
+                raise ValueError("Library and file deliveries use Python unittest consumption, not a command")
+            if self.artifact_type == "python_api":
+                from agent.acceptance.execution import validate_python_api
+                validate_python_api(self.entry, allow_scope=True)
+            else:
+                path = PurePosixPath(self.entry)
+                if (path.is_absolute() or ".." in path.parts or ":" in self.entry
+                        or "\\" in self.entry or "\x00" in self.entry):
+                    raise ValueError("A file artifact requires its original relative delivery path")
+            return self
         if self.artifact_type == "generated_code":
             module, separator, name = self.entry.partition(":")
             if (not separator or not module or not name.isidentifier() or not self.expression
@@ -169,7 +183,9 @@ def check_execution(loop, checks):
         return contract['digest']
     targets = {item["id"]: item for item in contract["targets"]}
     for target in targets.values():
-        supported = {'c'} if target['artifact_type'] == 'generated_code' else {'python', 'node', 'shell', 'wine-cmd'}
+        supported = ({'c'} if target['artifact_type'] == 'generated_code' else
+                     {'python'} if target['artifact_type'] in {'python_api', 'file_artifact'} else
+                     {'python', 'node', 'shell', 'wine-cmd'})
         if target['target_runtime'] not in supported:
             raise ValueError('The confirmed target runtime has no execution adapter; report the capability gap without downgrade')
     covered, errors = set(), []
@@ -200,7 +216,7 @@ def check_execution(loop, checks):
             continue
         target = targets[identity]
         covered.add(identity)
-        runtime = check["interpreter"] if check["consumer"] == "command" else "c"
+        runtime = check["interpreter"] if check["consumer"] in {"command", "python_tests"} else "c"
         if (target["artifact_type"] != check["artifact_type"]
                 or target["target_runtime"] != runtime):
             issue([base], "Execution artifact or runtime differs from the confirmed original "
@@ -208,7 +224,17 @@ def check_execution(loop, checks):
                   "target_runtime": target["target_runtime"]}) + "; actual=" + encode({
                   "artifact_type": check["artifact_type"], "target_runtime": runtime}))
             continue
-        if target["artifact_type"] == "generated_code":
+        if target["artifact_type"] in {"python_api", "file_artifact"}:
+            field = "api_entry" if target["artifact_type"] == "python_api" else "entry_file"
+            matches = check[field] == target['entry']
+            if target['artifact_type'] == 'python_api' and target['entry'].endswith(':*'):
+                scope = target['entry'][:-2]
+                module = check[field].split(':', 1)[0]
+                matches = module == scope or module.startswith(scope + '.')
+            if not matches:
+                mismatch(base, field, target['entry'], check[field],
+                         "Consumption target differs from the confirmed original delivery")
+        elif target["artifact_type"] == "generated_code":
             imported = {}
             for node in ast.parse(check["imports"]).body:
                 if isinstance(node, ast.ImportFrom):
@@ -260,12 +286,20 @@ def check_execution(loop, checks):
     return contract["digest"]
 
 
+def output_paths(loop):
+    """只有人类确认的文件交付物可以在执行副本中被生成或更新。"""
+    return tuple(sorted({target['entry'] for target in active(loop)['targets']
+                         if target['artifact_type'] == 'file_artifact'}))
+
+
 def guard(loop, spec=None):
     contract = active(loop)
     if spec is not None:
         spec = spec if isinstance(spec, dict) else vars(spec)
         if spec.get("requirement_digest") != contract["digest"]:
             raise ValueError("Acceptance belongs to an earlier requirement revision")
+        if tuple(spec.get('output_paths', ())) != output_paths(loop):
+            raise ValueError('Acceptance output mutability differs from confirmed file deliveries')
         check_execution(loop, spec.get("execution_checks", ()))
 
 

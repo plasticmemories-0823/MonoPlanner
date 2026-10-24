@@ -15,9 +15,8 @@ from agent.acceptance import corrections, evidence
 from agent.acceptance.execution import ExecutionCheck, checked_execution
 from agent.acceptance.evidence import Correction, Evidence
 from agent.acceptance.runner import AcceptanceRun
-from agent.execution.local import LocalEnvironment
 from agent.model.errors import ModelRequestNotSent
-from agent.source.snapshots import SourceSnapshot, _safe_file
+from agent.source.snapshots import _safe_file
 from agent.storage.records import digest, save
 
 
@@ -167,7 +166,7 @@ def spec_for(loop, code, driver=(), execution_checks=()):
         '\n' + row['text'] for row in loop.state.get('user_updates', [])
     )
     criteria = tuple([request] + ([loop.state["acceptance"]] if loop.state["acceptance"] else []))
-    from agent.task.requirements import check_execution
+    from agent.task.requirements import check_execution, output_paths
     from agent.task.repair import ValidationErrors, fields
 
     requirement_digest = ""
@@ -186,6 +185,7 @@ def spec_for(loop, code, driver=(), execution_checks=()):
         spec = VerificationSpec(
             criteria, test_code=code, test_driver=driver, execution_checks=checks,
             requirement_digest=requirement_digest,
+            output_paths=output_paths(loop) if requirement_digest else (),
         )
     except ValueError as error:
         errors.append((fields(error, value), error))
@@ -195,26 +195,25 @@ def spec_for(loop, code, driver=(), execution_checks=()):
 
 
 def run_report(loop, snapshot, spec, directory, phase, repository_baseline=None):
-    # 本地执行没有系统级沙箱；必须使用一次性副本，不操作保留的原件。
-    if isinstance(loop.environment, LocalEnvironment):
-        snapshot = SourceSnapshot.capture(snapshot.root, directory / "source")
+    # 原始试跑与最终验收统一使用可写副本；输出可生成，原件始终不可变。
+    build = snapshot.build_copy(directory / 'build-workspace')
     timeout = min(
         loop.environment.timeout, loop.budget.remaining_time() or loop.environment.timeout
     )
-    with snapshot.environment_like(
-        loop.environment, directory / "runtime", read_only=True
-    ) as backend:
+    with build.environment_like(loop.environment, directory / "runtime") as backend:
         report = AcceptanceRun(
-            snapshot.root,
+            build.root,
             spec,
             artifacts_root=directory / "runtime",
             environment=backend,
             timeout=timeout,
             repository_baseline=repository_baseline,
         ).run(phase)
-        integrity = snapshot.verify_integrity()
+        integrity = build.verify_build_integrity(output_paths=spec.output_paths)
     report["source_integrity"] = integrity
-    if not integrity["valid"]:
+    report['snapshot_integrity'] = snapshot.verify_integrity()
+    report['build_manifest'] = str(build.manifest_path)
+    if not integrity["valid"] or not report['snapshot_integrity']['valid']:
         report.update(
             status="error",
             tests_ready=False,

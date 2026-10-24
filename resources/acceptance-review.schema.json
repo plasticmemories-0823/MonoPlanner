@@ -120,7 +120,9 @@
             "artifact_type": {
               "enum": [
                 "generated_code",
-                "repository_entry"
+                "repository_entry",
+                "python_api",
+                "file_artifact"
               ],
               "type": "string"
             },
@@ -137,7 +139,8 @@
               "enum": [
                 "command",
                 "c_expression",
-                "c_statement"
+                "c_statement",
+                "python_tests"
               ],
               "type": "string"
             },
@@ -198,10 +201,22 @@
             "python_module": {
               "description": "Optional dotted module for Python -m; entry_file must be its module .py or package __main__.py. Empty executes the original file.",
               "type": "string"
+            },
+            "api_entry": {
+              "description": "For python_api only: the original module:function or module:Class.method actually called by the bound unittest methods.",
+              "type": "string"
+            },
+            "test_ids": {
+              "description": "For python_tests only: Class.test_method IDs in test_code. Each must actually call the API or read the original artifact through acceptance_artifacts.read_artifact(relative_path). No second execution is performed.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "required": [
             "id",
+            "requirement_id",
             "requirement_quote",
             "artifact_type",
             "imports",
@@ -212,10 +227,11 @@
             "interpreter",
             "python_module",
             "argv",
+            "api_entry",
+            "test_ids",
             "variables",
             "result_variable",
-            "cases",
-            "requirement_id"
+            "cases"
           ],
           "type": "object"
         },

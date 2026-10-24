@@ -548,7 +548,7 @@ class SourceSnapshot:
         _save(path, manifest)
         return type(self)(root, dict(self.files), self.digest, path, dict(self.excluded_files))
 
-    def verify_build_integrity(self):
+    def verify_build_integrity(self, output_paths=()):
         """仅编译副本允许已知派生物变化；原件和显式输入仍按字节保护。"""
         report = self.verify_integrity()
         manifest = json.loads(self.manifest_path.read_bytes())
@@ -556,11 +556,16 @@ class SourceSnapshot:
         # 旧 Git 清单没有区分跟踪文件，保守保留全部输入保护。
         protected.update(manifest.get("tracked_files", self.files if manifest.get("selection") == "git" else ()))
         coq_sources = {Path(name) for name in self.files if Path(name).suffix == ".v"}
+        outputs = set(output_paths)
 
         def derived(name):
             if name in protected:
                 return False
             path = Path(name)
+            cache = any(part in {'.vitest-cache', '.vite-cache'} for part in path.parts[:-1])
+            if (name in outputs or cache
+                    or _reason(path) in {'generated_directory', 'generated_file'}):
+                return True
             if path.suffix in {".glob", ".vo", ".vos", ".vok"}:
                 return path.with_suffix(".v") in coq_sources
             if path.name.startswith(".") and path.name.endswith(".aux"):

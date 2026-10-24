@@ -46,7 +46,7 @@ def verify_final(
                     report.update(
                         status=extra["status"], reason="Frozen repository regression did not pass"
                     )
-        integrity = build.verify_build_integrity()
+        integrity = build.verify_build_integrity(output_paths=spec.output_paths)
         report["source_integrity"] = integrity
         report["snapshot_integrity"] = snapshot.verify_integrity()
         report["build_manifest"] = str(build.manifest_path)

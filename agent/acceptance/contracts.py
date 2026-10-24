@@ -62,8 +62,17 @@ class VerificationSpec:
     test_driver: tuple[str, ...] = ()
     execution_checks: tuple[dict, ...] = ()
     requirement_digest: str = ""
+    output_paths: tuple[str, ...] = ()
 
     def __post_init__(self):
+        from pathlib import PurePosixPath
+        if (not isinstance(self.output_paths, (list, tuple)) or len(self.output_paths) > 64
+                or any(not isinstance(p, str) or not p or not PurePosixPath(p).parts
+                       or PurePosixPath(p).is_absolute() or '..' in PurePosixPath(p).parts
+                       or ':' in p or '\\' in p or '\x00' in p for p in self.output_paths)
+                or len(set(self.output_paths)) != len(self.output_paths)):
+            raise ValueError('Output paths must be distinct original relative artifact files')
+        object.__setattr__(self, 'output_paths', tuple(self.output_paths))
         if (
             not isinstance(self.criteria, (tuple, list))
             or not self.criteria
@@ -97,6 +106,10 @@ class VerificationSpec:
                 object.__setattr__(self, "execution_checks", checked_execution(
                     self.execution_checks, self.criteria,
                 ))
+                if self.test_driver and any(
+                    check['consumer'] == 'python_tests' for check in self.execution_checks
+                ):
+                    raise ValueError("Library/file consumption currently requires the standard unittest driver")
             except (ValueError, SyntaxError) as exc:
                 errors.append((["/execution_checks"], ValueError("execution_checks: " + str(exc))))
         if errors:

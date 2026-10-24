@@ -16,6 +16,10 @@ EXECUTION_DESCRIPTION = (
     "Compile/syntax-check and execute the actual artifact. Wine CMD instead parses and "
     "executes the unchanged BAT/CMD once; only exercised paths are validated in compatibility mode. "
     "Invocation-only call and unchecked executable consumers are not supported. "
+    "Python APIs and file artifacts use python_tests: bind Class.test_method IDs in test_code. "
+    "Call the original synchronous Python function/method in those tests, or read delivered "
+    "bytes with acceptance_artifacts.read_artifact(relative_path) and validate them. "
+    "The existing test execution supplies the receipt; do not add a substitute CLI or rerun it. "
     "No task-name detection or self-reported pass."
 )
 
@@ -35,6 +39,15 @@ def validate_python_module(module, entry, interpreter):
     path = module.replace(".", "/")
     if entry not in {path + ".py", path + "/__main__.py"}:
         raise ValueError("python_module must match the confirmed module file or package __main__.py")
+
+
+def validate_python_api(entry, *, allow_scope=False):
+    identifier = r"[A-Za-z_]\w*"
+    dotted = identifier + r"(?:\." + identifier + r")*"
+    if allow_scope and re.fullmatch(dotted + r":\*", entry, re.ASCII):
+        return
+    if not re.fullmatch(dotted + ":" + dotted, entry, re.ASCII):
+        raise ValueError("api_entry requires an original module:public_function or module:Class.method")
 
 
 class NumericCase(BaseModel):
@@ -57,11 +70,11 @@ class ExecutionCheck(BaseModel):
         default="", max_length=12000,
         description="Verbatim original requirement scope; empty binds the complete original request.",
     )
-    artifact_type: Literal["generated_code", "repository_entry"]
+    artifact_type: Literal["generated_code", "repository_entry", "python_api", "file_artifact"]
     imports: str = Field(default="", max_length=2000)
     setup: str = Field(default="", max_length=4000)
     expression: str = Field(default="", max_length=4000)
-    consumer: Literal["command", "c_expression", "c_statement"]
+    consumer: Literal["command", "c_expression", "c_statement", "python_tests"]
     entry_file: str = Field(default="", max_length=1024)
     interpreter: Literal["", "python", "node", "shell", "wine-cmd"] = ""
     python_module: str = Field(
@@ -69,12 +82,44 @@ class ExecutionCheck(BaseModel):
         description="Optional dotted module for Python -m; entry_file must be its module .py or package __main__.py. Empty executes the original file.",
     )
     argv: list[str] = Field(default_factory=list, max_length=32)
+    api_entry: str = Field(
+        default="", max_length=1024,
+        description="For python_api only: the original module:function or module:Class.method actually called by the bound unittest methods.",
+    )
+    test_ids: list[str] = Field(
+        default_factory=list, max_length=64,
+        description="For python_tests only: Class.test_method IDs in test_code. Each must actually call the API or read the original artifact through acceptance_artifacts.read_artifact(relative_path). No second execution is performed.",
+    )
     variables: list[str] = Field(default_factory=list, max_length=8)
     result_variable: str = ""
     cases: list[NumericCase] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="after")
     def direct_producer(self):
+        if self.consumer == "python_tests":
+            if self.artifact_type not in {"python_api", "file_artifact"}:
+                raise ValueError("python_tests requires a library API or delivered file artifact")
+            if (self.interpreter != "python" or self.python_module or self.argv
+                    or self.imports or self.setup or self.expression or self.variables
+                    or self.cases or self.result_variable):
+                raise ValueError("python_tests uses the existing unittest code, not a second command or producer")
+            if (not self.test_ids or len(set(self.test_ids)) != len(self.test_ids)
+                    or any(not re.fullmatch(r"[A-Za-z_]\w*\.test\w+", name, re.ASCII)
+                           for name in self.test_ids)):
+                raise ValueError("python_tests needs distinct Class.test_method IDs")
+            if self.artifact_type == "python_api":
+                validate_python_api(self.api_entry)
+                if self.entry_file:
+                    raise ValueError("A Python API must not be substituted with a script path")
+            else:
+                path = PurePosixPath(self.entry_file)
+                if (self.api_entry or not self.entry_file or path.is_absolute()
+                        or ".." in path.parts or ":" in self.entry_file
+                        or "\\" in self.entry_file or "\x00" in self.entry_file):
+                    raise ValueError("A file artifact requires its original relative delivery path")
+            return self
+        if self.api_entry or self.test_ids:
+            raise ValueError("API and bound-test fields are only valid for python_tests")
         if self.consumer == "command":
             if self.artifact_type != "repository_entry":
                 raise ValueError("Generated code must compile its producer output, not a repository command")
@@ -172,11 +217,15 @@ def validate_execution_result(path, checks, *, repository=None, map_path=None):
         check = ExecutionCheck.model_validate(check).model_dump()
         if row.get("id") != check["id"] or row.get("consumer") != check["consumer"]:
             raise ValueError("execution_checks receipt identity differs from frozen declaration")
-        runtime = check["interpreter"] if check["consumer"] == "command" else "c"
+        runtime = check["interpreter"] if check["consumer"] in {"command", "python_tests"} else "c"
         if row.get("artifact_type") != check["artifact_type"] or row.get("target_runtime") != runtime:
             raise ValueError("execution_checks artifact/runtime differs from frozen declaration")
         if row.get("status") not in {"passed", "failed", "error"}:
             raise ValueError("execution_checks unknown execution state")
+        if check['consumer'] == 'python_tests':
+            from agent.acceptance.consumption import validate_row
+            validate_row(path, value, check, row, repository, map_path)
+            continue
         if row["status"] == "passed":
             if (row.get("producer_called") is not True
                     or not re.fullmatch(r"[0-9a-f]{64}", row.get("producer_source_sha256", ""))):
@@ -206,7 +255,14 @@ def validate_execution_result(path, checks, *, repository=None, map_path=None):
                                for run in runs)):
                     raise ValueError("execution_checks lacks complete consumed-artifact evidence")
             if repository is not None:
-                validate_originals(path, check, row, Path(repository), map_path)
+                original = path
+                if value.get('command_receipt_sha256'):
+                    from agent.acceptance.consumption import file_hash
+                    original = path.with_name(path.name.replace(
+                        '.execution.json', '.command-execution.json'))
+                    if file_hash(original) != value['command_receipt_sha256']:
+                        raise ValueError('Command receipt changed before consumption aggregation')
+                validate_originals(original, check, row, Path(repository), map_path)
     return value
 
 

@@ -5,6 +5,8 @@ import sys
 import traceback
 import unittest
 
+witness = None
+
 
 def exception_evidence(test, err, phase=None):
     """只记录事实：源码来源不能证明测试预期正确。"""
@@ -55,6 +57,16 @@ class EvidenceResult(unittest.TextTestResult):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.items = {}
+
+    def startTest(self, test):
+        super().startTest(test)
+        if witness is not None:
+            witness.start(test)
+
+    def stopTest(self, test):
+        if witness is not None:
+            witness.stop()
+        super().stopTest(test)
 
     def record(self, test, status, detail="", err=None):
         test = getattr(test, "test_case", test)
@@ -117,8 +129,17 @@ def test_ids(suite):
 
 
 def main():
-    global test_path, repo_root
-    test_path, repo_root, output_path = sys.argv[1:]
+    global test_path, repo_root, witness
+    test_path, repo_root, output_path = sys.argv[1:4]
+    if len(sys.argv) > 4:
+        # 固定助手先于项目导入；不能被仓库中的同名模块替换。
+        helper_path = Path(__file__).resolve().with_name('acceptance_consumption.py')
+        helper_spec = importlib.util.spec_from_file_location('agent_acceptance_consumption', helper_path)
+        helper = importlib.util.module_from_spec(helper_spec)
+        helper_spec.loader.exec_module(helper)
+        checks = json.loads(Path(sys.argv[4]).read_text('utf-8'))
+        witness = helper.Witness(checks, repo_root, test_path)
+        witness.install()
     sys.path.insert(0, repo_root)
     report = {
         "status": "error",
@@ -170,6 +191,8 @@ def main():
         traceback.print_exc()
         report.update(status="error", reason=f"无法运行验收测试：{type(exc).__name__}: {exc}")
         report["execution_exception"] = exception_evidence(None, sys.exc_info(), phase)
+    if witness is not None:
+        report['consumption'] = witness.finish(report['test_results'])
     Path(output_path).write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
     sys.exit(0 if report["status"] == "passed" else 1)
 

@@ -47,6 +47,20 @@ def describe(*, repo=None, root=None):
                             'Compilation uses isolated Python and does not import the project.',
         },
         'generated_code': {'c': ['numeric expression', 'numeric assignment']},
+        'python_api': {
+            'entry': 'An original repository module:function or module:Class.method. When the '
+                     'original request specifies a whole library rather than an exact API, '
+                     'module:* binds that original module/package scope without inventing a function.',
+            'verification': 'Standard unittest methods must actually call the synchronous Python '
+                            'implementation. Merely importing or replacing it is not execution.',
+        },
+        'file_artifact': {
+            'entry': 'The original relative output path, not an invented producer script name.',
+            'verification': 'Read unchanged delivered bytes inside the bound unittest method with '
+                            'acceptance_artifacts.read_artifact(relative_path), then parse/load and '
+                            'assert the required behavior. The test may not create its deliverable.',
+            'maximum_bytes': 512 * 1024 * 1024,
+        },
         'wine_cmd': {
             **wine_environment(repo, root),
             'scope': 'BAT/CMD runs in Wine compatibility mode. CMD has no compile-only mode; '
@@ -68,8 +82,9 @@ def describe(*, repo=None, root=None):
 
 def require_targets(targets, *, repo=None, root=None):
     for index, target in enumerate(targets):
-        supported = ({'c'} if target['artifact_type'] == 'generated_code'
-                     else {'python', 'node', 'shell', 'wine-cmd'})
+        supported = ({'c'} if target['artifact_type'] == 'generated_code' else
+                     {'python'} if target['artifact_type'] in {'python_api', 'file_artifact'} else
+                     {'python', 'node', 'shell', 'wine-cmd'})
         if target['target_runtime'] not in supported:
             raise ValueError(
                 f"targets[{index}].target_runtime={target['target_runtime']!r} has no supported "

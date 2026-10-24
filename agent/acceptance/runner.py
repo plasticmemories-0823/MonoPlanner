@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -41,6 +42,10 @@ class AcceptanceRun:
         if environment is None or not callable(getattr(environment, 'run_process', None)):
             raise ValueError('An explicit execution backend is required; host fallback is disabled')
         self.spec = spec
+        self.command_checks = tuple(c for c in spec.execution_checks
+                                    if c['consumer'] != 'python_tests')
+        self.consumption_checks = tuple(c for c in spec.execution_checks
+                                        if c['consumer'] == 'python_tests')
         self.version = hashlib.sha256(
             json.dumps(
                 {
@@ -50,6 +55,7 @@ class AcceptanceRun:
                     "test_driver": spec.test_driver,
                     "execution_checks": spec.execution_checks,
                     "requirement_digest": spec.requirement_digest,
+                    "output_paths": spec.output_paths,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -75,6 +81,7 @@ class AcceptanceRun:
             "test_file": self.test_path.name if spec.test_code is not None else None,
             "test_driver": spec.test_driver,
             "requirement_digest": spec.requirement_digest,
+            "output_paths": spec.output_paths,
         }
         self.plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
         paths = [self.plan_path]
@@ -82,12 +89,19 @@ class AcceptanceRun:
             self.execution_path = self.artifact_dir / "execution-checks.json"
             self.execution_runner = self.artifact_dir / "execution_runner.py"
             self.execution_path.write_text(
-                json.dumps(spec.execution_checks, ensure_ascii=False), encoding="utf-8"
+                json.dumps(self.command_checks, ensure_ascii=False), encoding="utf-8"
             )
             self.execution_runner.write_bytes(
                 (PROJECT_ROOT / "resources/drivers/execution.py").read_bytes()
             )
             paths.extend((self.execution_path, self.execution_runner))
+        if self.consumption_checks:
+            self.consumption_path = self.artifact_dir / 'consumption-checks.json'
+            self.consumption_path.write_text(
+                json.dumps(self.consumption_checks, ensure_ascii=False), encoding='utf-8')
+            helper = self.artifact_dir / 'acceptance_consumption.py'
+            helper.write_bytes((PROJECT_ROOT / 'resources/drivers/consumption.py').read_bytes())
+            paths.extend((self.consumption_path, helper))
         if spec.test_code is not None:
             self.test_path.write_text(spec.test_code, encoding="utf-8")
             # 源码文件使用 UTF-8，即使任务运行于 ASCII 区域设置下的 Python 3.6。
@@ -102,10 +116,11 @@ class AcceptanceRun:
 
     def _unchanged(self):
         try:
-            return all(
-                hashlib.sha256(path.read_bytes()).digest() == digest
-                for path, digest in self._hashes.items()
-            )
+            for path, expected in self._hashes.items():
+                with path.open('rb') as stream:
+                    if hashlib.file_digest(stream, 'sha256').digest() != expected:
+                        return False
+            return True
         except OSError:
             return False
 
@@ -128,6 +143,12 @@ class AcceptanceRun:
         stdout_path = self.artifact_dir / f"{phase}.stdout.log"
         stderr_path = self.artifact_dir / f"{phase}.stderr.log"
         outcome_path = self.artifact_dir / f"{phase}.tests.json"
+        if self.consumption_checks and outcome_path.exists():
+            raise ModelRequestNotSent(
+                'execution_unknown', 'Saved consumption test receipt exists; preserve it without replay')
+        if self.consumption_checks and (self.artifact_dir / (phase + '.command-execution.json')).exists():
+            raise ModelRequestNotSent(
+                'execution_unknown', 'Saved producer receipt exists; inspect it before any test or command replay')
         report = {
             "status": "error",
             "exit_code": None,
@@ -182,6 +203,8 @@ class AcceptanceRun:
                     if self.spec.test_driver:
                         command[6] = map_path(self.repository_runner)
                         command.append(json.dumps(self.spec.test_driver))
+                    elif self.consumption_checks:
+                        command.append(map_path(self.consumption_path))
                 outcome = backend.run_process(
                     command,
                     stdout_path=stdout_path,
@@ -296,15 +319,60 @@ class AcceptanceRun:
             )
         backend = self.environment
         mapped = backend.host_to_container
-        argv = [backend.python_executable, "-B", "-X", "utf8", mapped(self.execution_runner),
-                mapped(self.execution_path), mapped(self.repo_root), mapped(output), str(remaining)]
         try:
-            outcome = backend.run_process(
-                argv, stdout_path=stdout, stderr_path=stderr, timeout=remaining, shell=False,
-            )
-            report["execution_process"] = outcome
-            if outcome.get("timed_out") or outcome.get("error") or outcome.get("exit_code") != 0:
-                raise RuntimeError("execution_checks process did not return a complete successful receipt")
+            rows = []
+            consumption = None
+            if self.consumption_checks:
+                from agent.acceptance.consumption import file_hash
+                test_report = self.artifact_dir / (phase + '.tests.json')
+                original = json.loads(test_report.read_text('utf-8'))
+                consumption = {
+                    'checks': original.get('consumption', {}).get('checks', []),
+                    'test_report_sha256': file_hash(test_report),
+                    'test_source_sha256': file_hash(self.test_path),
+                }
+                if self.command_checks:
+                    # 先核对实际交付物的读取，再保存原字节；后续重建不能覆盖已验收证据。
+                    receipt = self.artifact_dir / (phase + '.consumption.execution.json')
+                    receipt.write_text(json.dumps(consumption, ensure_ascii=False), encoding='utf-8')
+                    validate_execution_result(receipt, self.consumption_checks,
+                                              repository=self.repo_root, map_path=mapped)
+                    if any(c['artifact_type'] == 'file_artifact' for c in self.consumption_checks):
+                        consumption['artifact_snapshot_sha256'] = self._retain_consumed_files(
+                            phase, consumption['checks'])
+                    receipt.write_text(json.dumps(consumption, ensure_ascii=False), encoding='utf-8')
+                    self._hashes[receipt] = hashlib.sha256(receipt.read_bytes()).digest()
+                rows.extend(consumption['checks'])
+            command_output = (output.with_name(phase + '.command-execution.json')
+                              if self.consumption_checks else output)
+            if self.command_checks:
+                if command_output.exists():
+                    raise RuntimeError('Saved command consumption exists; preserve it without replay')
+                argv = [backend.python_executable, "-B", "-X", "utf8", mapped(self.execution_runner),
+                        mapped(self.execution_path), mapped(self.repo_root),
+                        mapped(command_output), str(remaining)]
+                outcome = backend.run_process(
+                    argv, stdout_path=stdout, stderr_path=stderr, timeout=remaining, shell=False,
+                )
+                report["execution_process"] = outcome
+                if outcome.get("timed_out") or outcome.get("error") or outcome.get("exit_code") != 0:
+                    raise RuntimeError("execution_checks process did not return a complete successful receipt")
+                command_evidence = validate_execution_result(
+                    command_output, self.command_checks, repository=self.repo_root, map_path=mapped)
+                rows.extend(command_evidence['checks'])
+            if self.consumption_checks:
+                by_id = {r['id']: r for r in rows}
+                if len(rows) != len(by_id):
+                    raise ValueError('Consumption receipt IDs are duplicated')
+                if set(by_id) != {c['id'] for c in self.spec.execution_checks}:
+                    raise ValueError('Consumption receipt IDs are incomplete')
+                combined = {
+                    **{key: value for key, value in consumption.items() if key != 'checks'},
+                    'checks': [by_id[c['id']] for c in self.spec.execution_checks],
+                }
+                if self.command_checks:
+                    combined['command_receipt_sha256'] = file_hash(command_output)
+                output.write_text(json.dumps(combined, ensure_ascii=False), encoding='utf-8')
             execution = validate_execution_result(output, self.spec.execution_checks,
                                                   repository=self.repo_root, map_path=mapped)
             report["execution"] = execution
@@ -332,6 +400,39 @@ class AcceptanceRun:
                 json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             raise ModelRequestNotSent("execution_unknown", report["reason"]) from error
+
+    def _retain_consumed_files(self, phase, rows):
+        """只保存已观察到的交付物原字节，不把验收中后来生成的文件冒充交付物。"""
+        from agent.acceptance.consumption import file_hash
+        from agent.source.snapshots import _safe_file
+
+        folder = self.artifact_dir / (phase + '.consumed-files')
+        folder.mkdir()
+        files = {}
+        for row in rows:
+            if row['artifact_type'] != 'file_artifact' or row['status'] == 'error':
+                continue
+            name = row['artifact_path']
+            expected = row['artifact_sha256']
+            if name in files:
+                if files[name] != expected:
+                    raise ValueError('Repeated artifact reads disagree')
+                continue
+            files[name] = expected
+            if expected is None:
+                continue
+            source = _safe_file(self.repo_root, Path(name))
+            destination = folder / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with source.open('rb') as original, destination.open('xb') as output:
+                shutil.copyfileobj(original, output)
+            if file_hash(destination) != expected or file_hash(source) != expected:
+                raise ValueError('Consumed artifact changed while preserving its original bytes')
+            self._hashes[destination] = bytes.fromhex(expected)
+        manifest = self.artifact_dir / (phase + '.consumed-files.json')
+        manifest.write_text(json.dumps({'format': 1, 'files': files}, ensure_ascii=False), encoding='utf-8')
+        self._hashes[manifest] = hashlib.sha256(manifest.read_bytes()).digest()
+        return file_hash(manifest)
 
     # ============================================================
     # 仓库驱动结果的校验

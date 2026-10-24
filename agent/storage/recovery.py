@@ -149,6 +149,8 @@ def code_key(root=None):
         'resources/boundary-hints.json',
         'resources/boundary-hints.schema.json',
         'resources/drivers/execution.py',
+        'resources/drivers/consumption.py',
+        'agent/acceptance/consumption.py',
         'agent/source/snapshots.py',
         'agent/source/scope.py',
         'agent/application/project_location.py',

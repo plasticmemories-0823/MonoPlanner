@@ -22,6 +22,7 @@ EXECUTION_CHECK = {
     "imports": "", "setup": "", "expression": "", "consumer": "command",
     "entry_file": "sample.py", "interpreter": "python", "argv": [],
     "python_module": "",
+    "api_entry": "", "test_ids": [],
     "variables": [], "result_variable": "", "cases": [],
 }
 
