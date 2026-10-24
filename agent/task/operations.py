@@ -7,7 +7,7 @@ from agent.source.snapshots import SourceSnapshot
 from agent.source.errors import SourceStorageError
 from agent.task.contracts import WorkRequest
 from agent.acceptance.contracts import VerificationSpec
-from agent.acceptance.final import verify_final
+from agent.acceptance.final import require_source_integrity, verify_final
 from agent.acceptance import revisions
 from agent.storage.records import digest, save
 from agent.model.errors import ModelInterrupted, ModelRequestNotSent
@@ -211,6 +211,7 @@ def final_acceptance(self):
         "acceptance_digest": digest(self.state["verification_spec"]),
     })
     save(folder / "result.json", report)
+    require_source_integrity(report)
     snapshot.write_patch(self.baseline, self.root / "candidate.patch")
     self.state["rounds"].append(
         {"plan": pending["id"], "verification": report, "candidate_digest": snapshot.digest}

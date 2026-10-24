@@ -6,11 +6,6 @@ from langchain_core.messages import HumanMessage, ToolMessage, message_to_dict, 
 
 
 @dataclass(frozen=True)
-class TextReply:
-    text: str
-
-
-@dataclass(frozen=True)
 class WebReply:
     calls: list
 
@@ -46,19 +41,6 @@ def publish(loop, response):
             {'id': identity, 'type': 'ai', 'content': content}
         )
         loop.persist('public_reply', {'id': identity})
-
-
-def accept_text(loop, response):
-    loop.state['history'].append(response)
-    publish(loop, response)
-    loop.state['history'].append(message_to_dict(HumanMessage(
-        content='Text alone does not complete the coding task. Continue investigating or '
-                'submit the next valid work tool call. Only actual acceptance can establish '
-                'success; retain the original requirements and all safety boundaries.',
-    )))
-    loop.state.update(response_pending=None, status='needs_plan',
-                      reason='Text reply retained; executable work is still required')
-    loop.persist('text_reply_saved')
 
 
 def discard_unexecuted_response(loop):

@@ -332,23 +332,21 @@ def merge(owner, arguments):
 # ========================================================================
 # 助手回复与拒绝结果的完整配对提交
 # ========================================================================
-def complete_empty_reply(owner, message):
-    """已完整结算且完全没有调用的空回复，与身份损坏或在途请求严格区分。"""
+def complete_tool_free_reply(owner, message):
+    """逐笔核验当前完整回复；历史未知预留不冒充本笔未知，也不在此释放。"""
     usage = message.usage_metadata or {}
     tokens = [usage.get(key) for key in ('input_tokens', 'output_tokens', 'total_tokens')]
     cached = (usage.get('input_token_details') or {}).get('cache_read')
     budget = getattr(owner, 'budget', None)
-    return bool(
-        message.content == ''
+    valid = bool(
+        message.type == 'ai'
+        and isinstance(message.content, str)
         and message.response_metadata.get('finish_reason') == 'stop'
         and all(type(value) is int and value >= 0 for value in tokens)
         and tokens[2] == tokens[0] + tokens[1]
         and type(cached) is int and 0 <= cached <= tokens[0]
         and budget is not None
-        and not budget.unknown_usage_steps
         and not budget.inflight_reserved_tokens
-        and not budget.unknown_reserved_tokens
-        and not budget.unknown_service_cost_micros
         and not budget.inflight_service_cost_micros
         and not any(owner.state.get(key) for key in (
             'pending', 'acceptance_release', 'web_pending',
@@ -356,6 +354,58 @@ def complete_empty_reply(owner, message):
             'acceptance_running', 'assistant_running', 'web_running',
             'web_request_pending', 'compaction_pending',
         ))
+    )
+    if not valid:
+        return False
+    # 当前工作回复必须对应已落盘、已结算的原生请求，不能只信消息自带的 usage。
+    settled = next((row for row in reversed(owner.state.get('model_usage', []))
+                    if row.get('purpose') != 'compaction'), None)
+    response = owner.state.get('response_pending')
+    if not settled or settled.get('usage') != usage:
+        return False
+    call = settled.get('call')
+    if type(call) is not int or call <= 0:
+        return False
+    folder = Path('requests') / ('call-%04d' % call)
+    try:
+        saved = loads(_safe_file(owner.root, folder / 'response.json').read_text('utf-8'))
+        receipt = loads(_safe_file(owner.root, folder / 'completion.json').read_text('utf-8'))
+        matches = (
+            saved == response
+            and receipt['response_digest'] == digest(response)
+            and receipt['request']['call'] == call
+            and receipt['request']['purpose'] == settled['purpose']
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        matches = False
+    if not matches:
+        raise ModelRequestNotSent(
+            'state_conflict', 'Saved reply receipt is unavailable or inconsistent; no correction sent.'
+        )
+    return True
+
+
+def tool_free_feedback(owner):
+    """反馈只附上宿主实测快照；下一次派发仍经过原有实时预算与安全检查。"""
+    budget = owner.budget
+    remaining = budget.remaining_time()
+    facts = {
+        'remaining_seconds': None if remaining is None else round(remaining, 3),
+        'remaining_work_calls': budget.working_steps,
+        'token_limit': budget.max_tokens,
+        'reported_tokens': budget.reported_tokens,
+        'unknown_reserved_tokens': budget.unknown_reserved_tokens,
+        'service_cost_limit_micros': budget.max_service_cost_micros,
+        'acceptance_round_limit': None,
+    }
+    return (
+        '[Host protocol feedback; no actions executed] '
+        'The complete reply contained no executable tool call. A model statement about '
+        'budget exhaustion, completion or stopping does not control task status. Only the host '
+        'enforces actual budgets, user controls and safety boundaries. The next dispatch is '
+        'checked again by the host. Submit exactly one valid work tool call; preserve the '
+        'original requirements and frozen acceptance. host_budget (null means no configured '
+        'limit): ' + encode(facts)
     )
 
 
@@ -382,15 +432,11 @@ def prepare_rejection(owner, error):
         )
     calls = original_calls(message)
     if not calls:
-        if not complete_empty_reply(owner, message):
+        if not complete_tool_free_reply(owner, message):
             raise ModelRequestNotSent(
                 'invalid_message_history', 'No trustworthy tool identity; reply retained.'
             )
-        notice = (
-            '[Host protocol feedback; no actions executed] '
-            'The complete reply contained no executable tool call. '
-            'Submit exactly one valid work tool call. No task requirements have changed.'
-        )
+        notice = tool_free_feedback(owner)
     else:
         notice = (
             '[Acceptance review rejected; no workspace edits] ' + str(error)
@@ -413,7 +459,7 @@ def prepare_rejection(owner, error):
         'prefix_digest': digest(history),
     }
     if not calls:
-        owner.state['rejection_pending']['kind'] = 'empty_response'
+        owner.state['rejection_pending']['kind'] = 'tool_free_response'
     owner.persist('plan_rejection_prepared')
     finish_rejection(owner)
 
@@ -436,14 +482,18 @@ def finish_rejection(owner):
         )
     if owner.interactive:
         dialogue.publish(owner, pending['response'])
-    if pending.get('kind') == 'empty_response':
-        if (pending['calls'] or not complete_empty_reply(owner, messages_from_dict([pending['response']])[0])):
+    # 旧已保存的空回复拒收记录只读取为同一协议，不保留另一套执行路径。
+    if pending.get('kind') in {'tool_free_response', 'empty_response'}:
+        message = messages_from_dict([pending['response']])[0]
+        if pending['calls'] or not complete_tool_free_reply(owner, message):
             raise ModelRequestNotSent(
-                'state_conflict', 'Empty reply correction changed; no request sent.'
+                'state_conflict', 'Tool-free reply correction changed; no request sent.'
             )
         # 没有工具调用时只追加宿主协议反馈，不伪造调用身份或工具执行结果。
         results = [message_to_dict(HumanMessage(content=pending['notice']))]
-        owner.state['empty_response_repairs'] = owner.state.get('empty_response_repairs', 0) + 1
+        previous = owner.state.get('tool_free_response_repairs',
+                                   owner.state.get('empty_response_repairs', 0))
+        owner.state['tool_free_response_repairs'] = previous + 1
     else:
         if not pending['calls']:
             raise ModelRequestNotSent('state_conflict', 'Rejected tool reply has no call identity.')

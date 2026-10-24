@@ -413,6 +413,9 @@ class SourceSnapshot:
                 source, runtime_files, cancel=cancel, project_scope=scope)
             manifest["selection"] = selection
             manifest["runtime_files"] = sorted(runtime_files)
+            manifest["tracked_files"] = sorted(
+                relative.as_posix() for relative, _, tracked in candidates if tracked
+            )
             required = 0
             for relative, skip, tracked in candidates:
                 check_cancel()
@@ -497,6 +500,83 @@ class SourceSnapshot:
                 # 写失败说明也失败时，保留上一份原子清单和最初异常，不能截断原件。
                 pass
             raise
+
+    @source_storage_boundary
+    def build_copy(self, destination):
+        """按原清单复制编译工作区；不能重新扫描而丢失已跟踪的输入。"""
+        from agent.storage.resources import owner_cancelled, preflight_space
+
+        destination = Path(destination).expanduser().resolve()
+        if _within(destination, self.root):
+            raise SnapshotError("Build workspace must be outside the evidence snapshot.")
+        if destination.exists():
+            raise SnapshotError("Build workspace already exists; refusing to overwrite it.")
+        if owner_cancelled():
+            raise InterruptedError("Build workspace copy interrupted; evidence is retained.")
+        if not self.verify_integrity()["valid"]:
+            raise SnapshotError("Source evidence changed before creating the build workspace.")
+        manifest = json.loads(self.manifest_path.read_bytes())
+        if manifest["files"] != self.files or manifest["digest"] != self.digest:
+            raise SnapshotError("Source manifest differs from the captured evidence.")
+        required = sum(_safe_file(self.root, Path(name)).stat().st_size for name in self.files)
+        destination.mkdir(parents=True, exist_ok=False)
+        root = destination / "source"
+        root.mkdir()
+        manifest.update(root=str(root), source_root=str(self.root), status="copying",
+                        evidence_manifest=str(self.manifest_path),
+                        space_budget=preflight_space(destination, required))
+        path = destination / "manifest.json"
+        _save(path, manifest)
+        for name, expected in self.files.items():
+            source = _safe_file(self.root, Path(name))
+            target = root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with source.open("rb") as original, target.open("xb") as output:
+                while chunk := original.read(1024 * 1024):
+                    if owner_cancelled():
+                        raise InterruptedError("Build workspace copy interrupted; evidence is retained.")
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            shutil.copystat(source, target)
+            sha, private = _inspect_file(target)
+            if sha != expected or private:
+                raise SnapshotError(f"Source evidence changed while copying: {name}")
+        if not self.verify_integrity()["valid"]:
+            raise SnapshotError("Source evidence changed while creating the build workspace.")
+        manifest["status"] = "captured"
+        _save(path, manifest)
+        return type(self)(root, dict(self.files), self.digest, path, dict(self.excluded_files))
+
+    def verify_build_integrity(self):
+        """仅编译副本允许已知派生物变化；原件和显式输入仍按字节保护。"""
+        report = self.verify_integrity()
+        manifest = json.loads(self.manifest_path.read_bytes())
+        protected = set(manifest.get("runtime_files", ()))
+        # 旧 Git 清单没有区分跟踪文件，保守保留全部输入保护。
+        protected.update(manifest.get("tracked_files", self.files if manifest.get("selection") == "git" else ()))
+        coq_sources = {Path(name) for name in self.files if Path(name).suffix == ".v"}
+
+        def derived(name):
+            if name in protected:
+                return False
+            path = Path(name)
+            if path.suffix in {".glob", ".vo", ".vos", ".vok"}:
+                return path.with_suffix(".v") in coq_sources
+            if path.name.startswith(".") and path.name.endswith(".aux"):
+                return path.with_name(path.name[1:-4] + ".v") in coq_sources
+            return path.name in {".lia.cache", ".nia.cache"} and any(
+                source.parent == path.parent for source in coq_sources
+            )
+
+        report["build_outputs"] = {}
+        for kind in ("added", "deleted", "modified"):
+            report["build_outputs"][kind] = [name for name in report[kind] if derived(name)]
+            report[kind] = [name for name in report[kind] if not derived(name)]
+        report["valid"] = not report["errors"] and not any(
+            report[kind] for kind in ("added", "deleted", "modified")
+        )
+        return report
 
     @contextmanager
     def environment_like(self, environment, artifact_root, *, read_only=False):

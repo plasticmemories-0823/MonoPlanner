@@ -38,7 +38,6 @@ class TaskDispatch:
             "release_candidate": self.release_candidate,
             "request_plan": self.request_plan,
             "route_response": self.route_response,
-            "reply_text": self.reply_text,
             "reply_web": self.reply_web,
             "read_boundaries": self.read_boundaries,
             "review_acceptance": self.review_acceptance,
@@ -48,7 +47,7 @@ class TaskDispatch:
             "finalize": self.finalize,
         }
         self.rejects = {
-            "request_plan", "route_response", "reply_text", "reply_web",
+            "request_plan", "route_response", "reply_web",
             "review_acceptance", "accept_plan", "read_boundaries",
         }
         destinations = {name: name for name in ("search", "plan", "execute", "accept", END)}
@@ -182,9 +181,7 @@ class TaskDispatch:
         owner.budget.check_request(0)
         if owner.interactive:
             dialogue.publish(owner, state["response"])
-        if isinstance(plan, dialogue.TextReply):
-            action = "reply_text"
-        elif isinstance(plan, dialogue.WebReply):
+        if isinstance(plan, dialogue.WebReply):
             action = "reply_web"
         elif isinstance(plan, boundaries.Lookup):
             action = "read_boundaries"
@@ -201,9 +198,6 @@ class TaskDispatch:
         else:
             action = "accept_plan"
         return {"next_action": action}
-
-    def reply_text(self, state):
-        dialogue.accept_text(self.owner, state["response"])
 
     def reply_web(self, state):
         from agent.execution.web import execute_calls

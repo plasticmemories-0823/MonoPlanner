@@ -1,7 +1,16 @@
 """候选方案的全部操作完成后，统一执行最终验收。"""
 
 import time
+from pathlib import Path
 from agent.acceptance.runner import AcceptanceRun
+from agent.source.snapshots import SnapshotError
+
+
+def require_source_integrity(report):
+    """包括恢复路径在内，源码被改动的验收不能推进已保存游标。"""
+    for field in ("source_integrity", "snapshot_integrity"):
+        if field in report and not report[field]["valid"]:
+            raise SnapshotError("Acceptance source integrity failed; retained evidence requires inspection.")
 
 
 def verify_final(
@@ -9,9 +18,10 @@ def verify_final(
 ):
     """每份候选只在操作全部完成后验收，不逐步调用。"""
     started = time.monotonic()
-    with snapshot.environment_like(environment, directory) as backend:
+    build = snapshot.build_copy(Path(directory) / "build-workspace")
+    with build.environment_like(environment, directory) as backend:
         runner = AcceptanceRun(
-            snapshot.root,
+            build.root,
             spec,
             artifacts_root=directory,
             environment=backend,
@@ -25,7 +35,7 @@ def verify_final(
                 report.update(status="error", reason="Final acceptance time budget exhausted")
             else:
                 extra = AcceptanceRun(
-                    snapshot.root,
+                    build.root,
                     type(spec)(spec.criteria, command=regression_command),
                     artifacts_root=directory,
                     environment=backend,
@@ -36,9 +46,11 @@ def verify_final(
                     report.update(
                         status=extra["status"], reason="Frozen repository regression did not pass"
                     )
-        integrity = snapshot.verify_integrity()
+        integrity = build.verify_build_integrity()
         report["source_integrity"] = integrity
-        if not integrity["valid"]:
+        report["snapshot_integrity"] = snapshot.verify_integrity()
+        report["build_manifest"] = str(build.manifest_path)
+        if not integrity["valid"] or not report["snapshot_integrity"]["valid"]:
             report.update(
                 status="error", reason="Acceptance modified candidate source; result invalid"
             )

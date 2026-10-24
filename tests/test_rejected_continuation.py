@@ -82,7 +82,7 @@ class RejectedContinuationTests(unittest.TestCase):
         result = self.run_replies([response, f.reply(self.candidate())])
         self.assertEqual(result['status'], 'verified_success', result)
         state = self.load_state()
-        self.assertEqual(state.get('empty_response_repairs'), 1)
+        self.assertEqual(state.get('tool_free_response_repairs'), 1)
         self.assertEqual(state['history'][1]['data']['additional_kwargs'], response.additional_kwargs)
         self.assertEqual(state['history'][2]['type'], 'human')
         self.assertIn('Host protocol feedback', state['history'][2]['data']['content'])
@@ -95,7 +95,7 @@ class RejectedContinuationTests(unittest.TestCase):
         result = self.run_replies([self.known_empty(), self.known_empty(), self.stop])
         self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(len(self.model.calls), 3)
-        self.assertEqual(self.load_state()['empty_response_repairs'], 2)
+        self.assertEqual(self.load_state()['tool_free_response_repairs'], 2)
         self.assertIsNone(self.load_state()['response_pending'])
         self.assertEqual(self.load_state()['plan_count'], 0)
 
@@ -106,7 +106,7 @@ class RejectedContinuationTests(unittest.TestCase):
         self.assertEqual(result['status'], 'invalid_message_history', result)
         self.assertEqual(len(self.model.calls), 1)
         self.assertIsNotNone(self.load_state()['response_pending'])
-        self.assertFalse(self.load_state().get('empty_response_repairs'))
+        self.assertFalse(self.load_state().get('tool_free_response_repairs'))
 
     def test_known_empty_reply_resume_after_preparation_does_not_resend(self):
         interrupt, error = interrupt_after_persist('plan_rejection_prepared')
@@ -117,7 +117,7 @@ class RejectedContinuationTests(unittest.TestCase):
         self.assertEqual(result['calls_this_invocation'], 1)
         self.assertEqual(result['planner_calls'], 2)
         state = self.load_state()
-        self.assertEqual(state['empty_response_repairs'], 1)
+        self.assertEqual(state['tool_free_response_repairs'], 1)
         self.assertEqual(sum(m['type'] == 'human' and 'Host protocol feedback' in m['data']['content']
                              for m in state['history']), 1)
 
@@ -142,7 +142,7 @@ class RejectedContinuationTests(unittest.TestCase):
         result = self.engine.run([], 'return 4', StepBudget(max_steps=1))
         self.assertEqual(result['status'], 'budget_exhausted', result)
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(self.load_state()['empty_response_repairs'], 1)
+        self.assertEqual(self.load_state()['tool_free_response_repairs'], 1)
 
     def test_empty_reply_correction_allowance_survives_valid_work_and_resume(self):
         inspect = f.reply({'kind': 'inspect', 'note': 'Read the original', 'steps': [
@@ -150,11 +150,11 @@ class RejectedContinuationTests(unittest.TestCase):
         ]})
         result = self.run_replies([self.known_empty(), inspect], pause_after_steps=1)
         self.assertEqual(result['status'], 'paused', result)
-        self.assertEqual(self.load_state()['empty_response_repairs'], 1)
+        self.assertEqual(self.load_state()['tool_free_response_repairs'], 1)
         result = self.run_replies([self.known_empty(), self.stop])
         self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(result['calls_this_invocation'], 2)
-        self.assertEqual(self.load_state()['empty_response_repairs'], 2)
+        self.assertEqual(self.load_state()['tool_free_response_repairs'], 2)
         self.assertEqual(self.load_state()['plan_count'], 1)
 
     def test_pause_before_empty_feedback_commit_preserves_original_until_resume(self):
@@ -174,7 +174,7 @@ class RejectedContinuationTests(unittest.TestCase):
         result = self.run_replies([self.stop])
         self.assertEqual(result['status'], 'task_cancelled', result)
         self.assertEqual(result['calls_this_invocation'], 1)
-        self.assertEqual(self.load_state()['empty_response_repairs'], 1)
+        self.assertEqual(self.load_state()['tool_free_response_repairs'], 1)
 
     def test_complete_invalid_arguments_are_returned_with_thought_and_original_bytes(self):
         response = self.rejected()

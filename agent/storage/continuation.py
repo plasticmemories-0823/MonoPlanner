@@ -168,6 +168,9 @@ def _verification(loop):
     if (complete['report_digest'] != digest(report)
             or complete['acceptance_digest'] != digest(state['verification_spec'])):
         raise ValueError('Saved acceptance result checksum mismatch')
+    from agent.acceptance.final import require_source_integrity
+
+    require_source_integrity(report)
     manifest = folder / 'candidate/manifest.json'
     body = read(loop.root, manifest.relative_to(loop.root))
     snapshot = SourceSnapshot(Path(body['root']), body['files'], body['digest'], manifest,

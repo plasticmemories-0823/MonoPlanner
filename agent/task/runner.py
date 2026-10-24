@@ -369,14 +369,6 @@ class TaskRunner:
         ):
             return dialogue.WebReply(calls), raw
         if (
-            self.interactive
-            and not calls
-            and not response.invalid_tool_calls
-            and isinstance(response.content, str)
-            and response.content.strip()
-        ):
-            return dialogue.TextReply(response.content), raw
-        if (
             len(calls) == 1
             and not response.invalid_tool_calls
             and calls[0]["name"] in {"freeze_acceptance", "revise_acceptance"}
