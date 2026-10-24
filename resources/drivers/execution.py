@@ -128,11 +128,24 @@ def run_command(check, repo, folder, row, remaining):
         return row
     row.update(producer_source=str(entry.resolve()), producer_source_sha256=sha(entry))
     interpreter = check['interpreter']
+    module = check.get('python_module', '')
+    if module:
+        # 不导入项目来探测入口，避免探测先执行一次包的副作用。
+        parts = module.split('.')
+        for index in range(1, len(parts)):
+            package = repo.joinpath(*parts[:index])
+            if not contained(package, repo) or not (package / '__init__.py').is_file():
+                raise ValueError('Module invocation requires original regular packages inside the repository')
+        package = repo.joinpath(*parts)
+        expected = (package / '__main__.py' if (package / '__init__.py').is_file()
+                    else package.with_suffix('.py'))
+        if expected.resolve() != entry.resolve():
+            raise ValueError('Python module resolution differs from the compiled repository entry')
     if interpreter == 'wine-cmd':
         return run_wine_command(check, repo, entry, folder, row, remaining)
     if interpreter == 'python':
         prefix = [sys.executable, '-B', '-X', 'utf8']
-        compile_argv = prefix + [
+        compile_argv = [sys.executable, '-I', '-B', '-X', 'utf8'] + [
             '-c', 'import py_compile,sys; py_compile.compile(sys.argv[1], '
             'cfile=sys.argv[2], doraise=True)', str(entry.resolve()), str(folder / 'entry.pyc')]
     else:
@@ -152,11 +165,15 @@ def run_command(check, repo, folder, row, remaining):
     if sha(entry) != row['producer_source_sha256']:
         row['error_kind'] = 'integrity'
         raise ValueError('Command entry changed before execution')
-    argv = prefix + [str(entry.resolve())] + check['argv']
+    argv = prefix + (['-m', module] if module else [str(entry.resolve())]) + check['argv']
     stdout, stderr = folder / 'command.stdout', folder / 'command.stderr'
-    row.update(error_kind='environment', argv=argv)
+    # 项目路径只进入实际工作子进程；宿主和编译探针不继承此补充。
+    child_environment = {**os.environ, 'PYTHONPATH': str(repo)}
+    row.update(error_kind='environment', argv=argv, python_module=module,
+               project_import_root=str(repo))
     with stdout.open('wb') as out, stderr.open('wb') as err:
         result = subprocess.run(argv, cwd=str(repo), stdout=out, stderr=err,
+                                env=child_environment,
                                 timeout=max(.1, remaining()))
     row.update(producer_called=True, exit_code=result.returncode,
                producer_result_sha256=sha(stdout), stderr_sha256=sha(stderr),

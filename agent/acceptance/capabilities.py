@@ -39,6 +39,13 @@ def describe(*, repo=None, root=None):
     return {
         'execution_environment': 'Linux Docker; no host shell fallback',
         'repository_entry': ['python', 'node', 'shell', 'wine-cmd'],
+        'python_invocation': {
+            'modes': ['file', 'module (-m)'],
+            'module_binding': 'A repository module .py or regular package __main__.py; '
+                              'parent packages must be regular repository packages, not namespace packages.',
+            'import_scope': 'The repository import root is added only to the executed project child. '
+                            'Compilation uses isolated Python and does not import the project.',
+        },
         'generated_code': {'c': ['numeric expression', 'numeric assignment']},
         'wine_cmd': {
             **wine_environment(repo, root),

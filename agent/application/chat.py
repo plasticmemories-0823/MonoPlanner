@@ -201,9 +201,10 @@ class Chatbot:
             facts[key].pop('request', None)
             confirmed = facts[key].get('confirmed_requirements') or {}
             if 'targets' in confirmed:
-                confirmed['targets'] = [{key: target[key] for key in (
+                confirmed['targets'] = [{**{key: target[key] for key in (
                     'id', 'artifact_type', 'target_runtime', 'entry',
-                )} for target in confirmed['targets']]
+                )}, **({'python_module': target['python_module'], 'argv': target['argv']}
+                        if target.get('python_module') else {})} for target in confirmed['targets']]
         content = encode(facts)
         for _, raw in reversed(self.store.model_history(conversation)):
             if raw['type'] != 'human':

@@ -94,6 +94,10 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "python_module": {
+            "description": "Optional dotted module for Python -m; entry binds the module .py or package __main__.py. Empty preserves file invocation.",
+            "type": "string"
           }
         },
         "required": [
@@ -109,6 +113,7 @@
           "variables",
           "required_values",
           "argv",
+          "python_module",
           "quotes"
         ],
         "type": "object"

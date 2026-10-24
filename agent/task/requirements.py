@@ -37,6 +37,10 @@ class DeliveryTarget(BaseModel):
     variables: list[str] = Field(default_factory=list, max_length=8)
     required_values: list[list[float]] = Field(default_factory=list, max_length=8)
     argv: list[str] = Field(default_factory=list, max_length=32)
+    python_module: str = Field(
+        default="", max_length=1024,
+        description="Optional dotted module for Python -m; entry binds the module .py or package __main__.py. Empty preserves file invocation.",
+    )
     quotes: list[Quote] = Field(min_length=1, max_length=16)
 
     @field_validator("imports", "setup", "expression")
@@ -60,7 +64,7 @@ class DeliveryTarget(BaseModel):
             if (not separator or not module or not name.isidentifier() or not self.expression
                     or not self.imports):
                 raise ValueError("A generated target requires module:entry and its original invocation")
-            if self.argv:
+            if self.argv or self.python_module:
                 raise ValueError("Generated targets cannot substitute a repository command")
         else:
             path = PurePosixPath(self.entry)
@@ -68,6 +72,8 @@ class DeliveryTarget(BaseModel):
                 raise ValueError("A repository target requires a relative entry file")
             if self.imports or self.setup or self.expression or self.variables or self.required_values:
                 raise ValueError("Repository targets cannot contain generated-code input fields")
+            from agent.acceptance.execution import validate_python_module
+            validate_python_module(self.python_module, self.entry, self.target_runtime)
         if any(len(row) != len(self.variables) or any(not math.isfinite(n) for n in row)
                for row in self.required_values):
             raise ValueError('Confirmed required inputs must be finite and match the input arity')
@@ -237,9 +243,11 @@ def check_execution(loop, checks):
                 mismatch(base, "cases", missing, actual,
                          "Execution omits a confirmed required input; retain all required inputs")
         else:
-            for field, original in (("entry_file", "entry"), ("argv", "argv")):
-                if check[field] != target[original]:
-                    mismatch(base, field, target[original], check[field],
+            for field, original in (("entry_file", "entry"), ("argv", "argv"),
+                                    ("python_module", "python_module")):
+                expected = target.get(original, '')
+                if check[field] != expected:
+                    mismatch(base, field, expected, check[field],
                              "Execution entry or arguments differ from the confirmed delivery")
     if covered != set(targets):
         issue(

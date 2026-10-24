@@ -102,9 +102,10 @@ def task_facts(store, task):
             'source_ids': [row['id'] for row in packet['sources']],
         }
         if lifecycle in {'stopped', 'completed'}:
-            confirmed['targets'] = [{key: target[key] for key in (
+            confirmed['targets'] = [{**{key: target[key] for key in (
                 'id', 'artifact_type', 'target_runtime', 'entry', 'behavior', 'input_scope',
-            )} for target in packet['targets']]
+            )}, **({'python_module': target['python_module'], 'argv': target['argv']}
+                    if target.get('python_module') else {})} for target in packet['targets']]
         value['confirmed_requirements'] = confirmed
     return value
 

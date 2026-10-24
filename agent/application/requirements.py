@@ -142,6 +142,10 @@ def prepare(store, conversation, command, *, project_path, create, request_messa
                   "类型／运行环境：" + target["artifact_type"] + " / " + target["target_runtime"],
                   "入口：" + target["entry"], "需求行为：" + target["behavior"],
                   "输入范围：" + target["input_scope"]]
+        if target.get('python_module'):
+            lines.append('运行方式：python -m ' + target['python_module'])
+        if target['artifact_type'] == 'repository_entry':
+            lines.append('运行参数：' + json.dumps(target['argv'], ensure_ascii=False))
         if target["expression"]:
             lines += ["原始导入：" + target["imports"], "实际产物调用：" + target["expression"],
                       "输入构造：" + (target["setup"] or "无额外构造")]

@@ -21,6 +21,7 @@ EXECUTION_CHECK = {
     "id": "public_value", "requirement_quote": "", "artifact_type": "repository_entry",
     "imports": "", "setup": "", "expression": "", "consumer": "command",
     "entry_file": "sample.py", "interpreter": "python", "argv": [],
+    "python_module": "",
     "variables": [], "result_variable": "", "cases": [],
 }
 

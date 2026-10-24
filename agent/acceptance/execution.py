@@ -26,6 +26,17 @@ def parsed(text, mode="exec"):
         raise ValueError("execution_checks contains invalid Python syntax: " + str(error)) from error
 
 
+def validate_python_module(module, entry, interpreter):
+    """模块名只声明调用方式，必须绑定其对应的原始源码文件。"""
+    if not module:
+        return
+    if interpreter != "python" or not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", module, re.ASCII):
+        raise ValueError("python_module requires a dotted Python module name and the Python runtime")
+    path = module.replace(".", "/")
+    if entry not in {path + ".py", path + "/__main__.py"}:
+        raise ValueError("python_module must match the confirmed module file or package __main__.py")
+
+
 class NumericCase(BaseModel):
     model_config = ConfigDict(extra="forbid")
     values: list[float] = Field(max_length=8)
@@ -53,6 +64,10 @@ class ExecutionCheck(BaseModel):
     consumer: Literal["command", "c_expression", "c_statement"]
     entry_file: str = Field(default="", max_length=1024)
     interpreter: Literal["", "python", "node", "shell", "wine-cmd"] = ""
+    python_module: str = Field(
+        default="", max_length=1024,
+        description="Optional dotted module for Python -m; entry_file must be its module .py or package __main__.py. Empty executes the original file.",
+    )
     argv: list[str] = Field(default_factory=list, max_length=32)
     variables: list[str] = Field(default_factory=list, max_length=8)
     result_variable: str = ""
@@ -76,10 +91,11 @@ class ExecutionCheck(BaseModel):
             if self.interpreter == "wine-cmd":
                 from resources.drivers.execution import wine_command
                 wine_command("/testbed/" + self.entry_file, self.argv)
+            validate_python_module(self.python_module, self.entry_file, self.interpreter)
             return self
         if self.artifact_type != "generated_code":
             raise ValueError("Code consumers require the generated_code artifact type")
-        if self.entry_file or self.interpreter or self.argv:
+        if self.entry_file or self.interpreter or self.argv or self.python_module:
             raise ValueError("execution_checks non-command consumer cannot supply command fields")
         if not self.imports or not self.expression:
             raise ValueError("execution_checks requires imported producer and direct expression")
@@ -245,7 +261,14 @@ def validate_originals(output, check, row, repository, map_path):
                     or row.get('cmd_builtin_output_encoding') != 'utf-16-le'):
                 raise ValueError('Wine CMD receipt differs from the unchanged entry and literal arguments')
             return
-        expected_tail = [str(map_path(repository / check['entry_file'])), *check['argv']]
+        module = check.get('python_module', '')
+        if module:
+            if (row.get('python_module') != module
+                    or row.get('project_import_root') != str(map_path(repository))):
+                raise ValueError('Python module receipt lacks its confirmed invocation and scoped import root')
+            expected_tail = ['-m', module, *check['argv']]
+        else:
+            expected_tail = [str(map_path(repository / check['entry_file'])), *check['argv']]
         if row['argv'][-len(expected_tail):] != expected_tail:
             raise ValueError('Execution receipt command differs from confirmed entry and arguments')
         return
