@@ -30,12 +30,7 @@ class Operation(BaseModel):
     query: str = Field(
         default="",
         description=(
-            'Search: one complete case-sensitive literal string. Read: empty normally; '
-            "'reread: <reason>' requests a deliberate verbatim recheck. For oversized tool "
-            'payloads, copy the returned next_query (payload_bytes:<byte offset>) here with '
-            'offset=0 and limit=2000; follow its byte continuation, not a guessed line offset. '
-            'Search text appears once in results; hits[].result and results[].source are '
-            'zero-based indexes into results and sources.'
+            'Search text: one complete case-sensitive literal string.'
         ),
     )
     offset: int = Field(default=0, ge=0)
@@ -59,13 +54,7 @@ class Operation(BaseModel):
         default="", max_length=8192,
         description='Opaque continuation from search or read; empty for an initial request.',
     )
-    from_step: str = Field(
-        default="",
-        description=(
-            'Read only: an earlier search step id in this plan. Up to five matched ranges '
-            'share the same 50 KiB text budget; changed source versions require a new search.'
-        ),
-    )
+    from_step: str = ""
     command: str = Field(
         default="", max_length=30000,
         description=(
@@ -121,15 +110,7 @@ class WorkRequest(BaseModel):
             'repository from cwd, not from the test file __file__.'
         ),
     )
-    test_driver: list[str] = Field(
-        default_factory=list,
-        max_length=32,
-        description=(
-            'Repository Python test entry or -m module plus argv, without a Python executable. '
-            'Include {test_file} or {test_module}; reuse the repository configuration/fixtures. '
-            '[] uses the builtin unittest collector for a new draft, or reuses a frozen driver.'
-        ),
-    )
+    test_driver: list[str] = Field(default_factory=list, max_length=32)
     execution_checks: list[ExecutionCheck] = Field(
         default_factory=list, max_length=8, description=EXECUTION_DESCRIPTION,
     )

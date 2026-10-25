@@ -71,10 +71,6 @@ pnpm --dir web build
 
 ## 执行与验收边界
 
-通用工作提示位于 `resources/prompts/task.txt`，按调查、修复、验证与控制组织；检索约定只注入一次。字段格式及验收修订的序列化细节由工具说明和严格 Schema 提供，必填字段不能省略，后续修复用空值复用已冻结材料。
-
-`agent/task/instructions.py` 按已确认的交付类型与运行时选择执行说明。`confirmed_requirements.execution_guidance` 随初始确认、后续确认变更及压缩后的需求视图提供；同类目标复用一份说明，不按题名或项目文字猜测类型。说明不写回需求原件或改变其摘要，也不改写已发送的系统前缀。Python API 和文件交付说明明确使用 `python_tests`；C 与 Wine 专项说明仅在对应目标存在时提供。原有验收、权限、固定命令和恢复校验保持不变。
-
 `agent/execution/managed_plan.py` 只读解析项目依赖；`managed.py` 管理过滤副本、下载、安装及镜像缓存；`managed_proxy.py` 和 `managed_setup.py` 在独立准备容器内运行，`download_relay.py` 提供仅在准备期间运行的宿主网络转发。`agent/model/network.py` 按请求解析当前系统代理与 PAC；网页搜索和抓取只连接 DeepSeek 工具 API，下载转发继续保留公网地址检查。`preparation.py` 对同一项目合并准备请求，并限制同时准备的项目数。认证接口 `/workspace/environment` 的 GET 只读，POST 接受 prepare、automatic、cancel。准备与重试不调用模型，不执行候选修改。
 
 选择目录只保存会话的授权工作区 `repo`。Chatbot 在开工询问中说明项目位置，使用 `prepare_work` 保存相对路径及交付约束，用户确认后开工；工作记录的 `repo` 指向实际项目，公开快照的 `work.repo` 用于展示及环境操作。新目录在后台首次开工时排他创建，意图和完成凭据分开保存；未知结果不重放。目录创建与范围核对完成后才准备环境并绑定镜像、容器。普通聊天、目录浏览和预览不启动准备或工作容器。手动或正式评测的显式镜像配置继续优先。项目依赖配置变化会使自动环境缓存失效；已绑定任务仍使用原环境。无依赖声明的新项目使用通用 Python/Node 基础环境，不猜测第三方依赖。
