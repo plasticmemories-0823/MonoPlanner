@@ -186,6 +186,37 @@ class ApplicationStore:
             self._message(db, conversation, message_id, 'ai', text, source)
             self._put(db, value)
 
+    def publish_completion(self, work, text):
+        """按完成事实原子去重；显示文案变化不改写已提交的完成通知。"""
+        from agent.application.work_context import COMPLETED
+
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = self._work(db, work['task_id'])
+            if not current or current['status'] not in COMPLETED:
+                return False
+            if any(current.get(key) != work.get(key) for key in (
+                'conversation_id', 'revision', 'status', 'stop_report_id', 'repo',
+            )):
+                return False
+            conversation = current['conversation_id']
+            value = self._get(db, conversation, writable=True)
+            message_id = ':'.join((
+                'completion', 'v1', current['task_id'], current['status'],
+                current.get('stop_report_id') or str(current['revision']),
+            ))
+            old = db.execute('SELECT conversation,data FROM app_messages WHERE id=?',
+                             (message_id,)).fetchone()
+            if old:
+                original = json.loads(old['data'])
+                if (old['conversation'] != conversation or original['id'] != message_id
+                        or original['type'] != 'ai' or original['source'] != 'progress'):
+                    raise Conflict('Completion message identity belongs to another record')
+                return True
+            self._message(db, conversation, message_id, 'ai', text, 'progress')
+            self._put(db, value)
+            return True
+
     def submit(self, conversation, command):
         conversation = identity(conversation)
         allowed = {'id', 'kind', 'text', 'repo', 'runtime_settings', 'acceptance_pause_id', 'confirmed_requirements', 'proposal_id', 'resume_token'}
