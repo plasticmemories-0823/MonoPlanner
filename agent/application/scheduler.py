@@ -707,10 +707,7 @@ class Scheduler:
         notice = completion_notice(work)
         if notice is None:
             return False
-        identity = 'stop-report:' + work['task_id'] + ':' + (work.get(
-            'stop_report_id') or str(work['revision']))
-        self.store.publish(work['conversation_id'], identity, notice, 'progress')
-        return True
+        return self.store.publish_completion(work, notice)
 
     def _report(self, pending):
         task, conversation = pending['task_id'], pending['conversation']

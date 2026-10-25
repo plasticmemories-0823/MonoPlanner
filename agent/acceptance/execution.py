@@ -99,10 +99,27 @@ class ExecutionCheck(BaseModel):
         if self.consumer == "python_tests":
             if self.artifact_type not in {"python_api", "file_artifact"}:
                 raise ValueError("python_tests requires a library API or delivered file artifact")
-            if (self.interpreter != "python" or self.python_module or self.argv
-                    or self.imports or self.setup or self.expression or self.variables
-                    or self.cases or self.result_variable):
-                raise ValueError("python_tests uses the existing unittest code, not a second command or producer")
+            # 已选择 Python 测试时运行环境唯一确定；其他消费方式仍保留各自的空值规则。
+            if not self.interpreter:
+                self.interpreter = "python"
+            elif self.interpreter != "python":
+                raise ValueError(
+                    "python_tests requires interpreter='python'; conflicting value: "
+                    + repr(self.interpreter)
+                )
+            misplaced = [
+                name for name in (
+                    "python_module", "argv", "imports", "setup", "expression",
+                    "variables", "cases", "result_variable",
+                )
+                if getattr(self, name)
+            ]
+            if misplaced:
+                raise ValueError(
+                    "python_tests fields " + ", ".join(misplaced)
+                    + " must be empty. Put test imports, setup and assertions in test_code; "
+                    "bind those tests with test_ids instead of adding a second command or producer."
+                )
             if (not self.test_ids or len(set(self.test_ids)) != len(self.test_ids)
                     or any(not re.fullmatch(r"[A-Za-z_]\w*\.test\w+", name, re.ASCII)
                            for name in self.test_ids)):

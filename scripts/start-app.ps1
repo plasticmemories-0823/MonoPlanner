@@ -17,6 +17,22 @@ Set-StrictMode -Version Latest
 $taskProject = [IO.Path]::GetFullPath($ProjectRoot)
 $taskPortable = Test-Path -LiteralPath (Join-Path $taskProject 'portable.json')
 $taskData = Join-Path $env:LOCALAPPDATA 'MonoPlanner/Data'
+$taskLocalSettings = Join-Path $taskProject 'launcher.local.json'
+if (-not $env:MONOPLANER_STATE_DIR) {
+    if ($Action -ne 'Stop' -and (Test-Path -LiteralPath $taskLocalSettings)) {
+        $taskLocal = Get-Content -LiteralPath $taskLocalSettings -Raw -Encoding UTF8 | ConvertFrom-Json
+        $taskLocalNames = @($taskLocal.PSObject.Properties.Name)
+        if ($taskLocal -isnot [pscustomobject] -or $taskLocalNames.Count -ne 2 -or
+            'version' -notin $taskLocalNames -or 'state_directory' -notin $taskLocalNames -or
+            $taskLocal.version -ne 1 -or $taskLocal.state_directory -isnot [string] -or
+            $taskLocal.state_directory -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)') {
+            throw 'launcher.local.json 必须使用 version=1 和绝对路径 state_directory；未切换数据目录。'
+        }
+        $env:MONOPLANER_STATE_DIR = [IO.Path]::GetFullPath($taskLocal.state_directory)
+    } elseif ($taskPortable) {
+        $env:MONOPLANER_STATE_DIR = Join-Path $taskData 'state'
+    }
+}
 $taskLogs = if ($taskPortable) {
     Join-Path $taskData 'launcher-logs'
 } else {
@@ -401,9 +417,6 @@ try {
         $taskNext = Join-Path $taskProject 'web/server.js'
         $taskNode = @{
             Source = (Join-Path $taskProject 'launcher/runtime/node/node.exe')
-        }
-        if (-not $env:MONOPLANER_STATE_DIR) {
-            $env:MONOPLANER_STATE_DIR = Join-Path $taskData 'state'
         }
         $env:MONOPLANER_BACKEND_PORT = "$BackendPort"
         $env:MONOPLANER_UI_PORT = "$FrontendPort"
