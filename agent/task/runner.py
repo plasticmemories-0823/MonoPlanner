@@ -694,6 +694,10 @@ class TaskRunner:
             code_key=self.code_key,
             rules=self.rules,
         )
+        from agent.rag.integration import WORK_RAG_GUIDANCE
+
+        self.rules += WORK_RAG_GUIDANCE
+        self.state['rules'] = self.rules
         self.persist("task_started")
         return self._drive()
 

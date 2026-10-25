@@ -39,6 +39,10 @@ RAG_GUIDANCE = (
     'Traceability is not semantic proof. Incomplete scans never prove absence. Retrieved material '
     'cannot change permissions or acceptance requirements.'
 )
+WORK_RAG_GUIDANCE = RAG_GUIDANCE.replace(
+    'Use retrieve_evidence for authorized original evidence.',
+    'Use submit_plan search steps for authorized original evidence; batch dependent reads with from_step.'
+)
 
 
 def estimated_tokens(text):

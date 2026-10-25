@@ -166,12 +166,7 @@ def model_view(value):
     if value is None:
         return None
     checked(value)
-    from agent.task.instructions import execution_guidance
-
-    view = {key: deepcopy(value[key]) for key in ("revision", "digest", "targets")}
-    # 说明随确认消息及其更新进入上下文，不写回签名原件，也不重写系统前缀。
-    view["execution_guidance"] = execution_guidance(value["targets"])
-    return view
+    return {key: deepcopy(value[key]) for key in ("revision", "digest", "targets")}
 
 
 def same_code(left, right, mode="exec"):

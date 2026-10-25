@@ -51,8 +51,6 @@ def revise_acceptance(**kwargs) -> dict:
     assertions, drivers, execution checks or regression commands. Original requirements,
     confirmed delivery constraints and user-fixed commands remain protected.
     Every revision needs an original-source trial and a new freeze_acceptance.
-    Only identified corrections supersede old materials; unchanged checks and unrelated
-    historical failures remain effective. Correcting tests does not reset the task budget.
     """
     return kwargs
 
