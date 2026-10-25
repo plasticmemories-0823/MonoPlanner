@@ -45,3 +45,10 @@ htmlcov/
 /.rag-deps/
 /.rag-models/
 /MonoPlanner.exe
+
+# 本机根目录部署的生成文件；不进入源码提交或便携分发。
+/launcher.local.json
+/portable.json
+/checksums.json
+/licenses/
+/web/server.js
