@@ -63,7 +63,7 @@
       },
       "corrections": {
         "type": "array",
-        "description": "Required after freezing; before first freeze use []. Declare every change against the active FROZEN materials, even when revising a pending proposal. Tests, fixtures, inputs, assertions, cases, drivers, execution checks and model-generated regression commands may change with cited evidence. Preserve original requirements and confirmed delivery constraints.",
+        "description": "Required after freezing; before first freeze use []. Declare every change against the active FROZEN materials, even when revising a pending proposal. Tests, fixtures, inputs, assertions, cases, drivers, execution checks and model-generated regression commands may change with cited evidence. Preserve original requirements and confirmed delivery constraints. Text replacements must not overlap and must produce exactly the complete submitted field.",
         "items": {
           "type": "object",
           "properties": {
