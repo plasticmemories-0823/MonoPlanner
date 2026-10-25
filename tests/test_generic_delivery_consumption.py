@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent.acceptance.contracts import VerificationSpec
+from agent.acceptance.execution import ExecutionCheck
 from agent.acceptance.runner import AcceptanceRun
 from agent.execution.local import LocalEnvironment
 from agent.model.errors import ModelRequestNotSent
@@ -22,6 +23,57 @@ def artifact_check(**changes):
     return {"id": "artifact", "artifact_type": "file_artifact", "consumer": "python_tests",
             "interpreter": "python", "entry_file": "output/result.json",
             "test_ids": ["Check.test_value"], **changes}
+
+
+@pytest.mark.parametrize("delivery", ["api", "artifact"])
+@pytest.mark.parametrize("runtime", [None, ""], ids=["omitted", "empty"])
+def test_python_test_runtime_is_implied_by_the_selected_consumer(scene, delivery, runtime):
+    if delivery == "artifact":
+        (scene / "output").mkdir()
+        (scene / "output/result.json").write_text('{"value":42}', encoding="utf-8")
+        check = artifact_check()
+        code = ARTIFACT_TEST
+    else:
+        check = api_check()
+        code = API_TEST
+    if runtime is None:
+        check.pop("interpreter")
+    else:
+        check["interpreter"] = runtime
+
+    _, result = run(scene, code, [check])
+
+    assert result["status"] == "passed" and result["execution_ready"], result
+    receipt = result["execution"]["checks"][0]
+    assert receipt["target_runtime"] == "python"
+    assert receipt["test_ids"] == ["Check.test_value"]
+
+
+@pytest.mark.parametrize("runtime", ["node", "shell", "wine-cmd"])
+def test_python_test_runtime_conflict_names_the_field_without_changing_it(runtime):
+    declaration = api_check(interpreter=runtime)
+
+    with pytest.raises(ValueError, match=r"python_tests requires interpreter='python'"):
+        ExecutionCheck.model_validate(declaration)
+
+    assert declaration["interpreter"] == runtime
+
+
+def test_python_tests_reports_each_misplaced_test_field():
+    declaration = artifact_check(imports="import json", setup="value = 42")
+
+    with pytest.raises(ValueError, match=r"imports, setup.*test_code"):
+        ExecutionCheck.model_validate(declaration)
+
+    assert declaration["imports"] == "import json"
+    assert declaration["setup"] == "value = 42"
+
+
+def test_implied_runtime_keeps_the_existing_frozen_declaration_identical():
+    explicit = ExecutionCheck.model_validate(artifact_check()).model_dump()
+    implicit = ExecutionCheck.model_validate(artifact_check(interpreter="")).model_dump()
+
+    assert implicit == explicit
 
 
 API_TEST = """import unittest
