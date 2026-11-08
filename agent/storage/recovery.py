@@ -150,6 +150,7 @@ def code_key(root=None):
         'resources/boundary-hints.schema.json',
         'resources/drivers/execution.py',
         'resources/drivers/consumption.py',
+        'resources/drivers/api_source.py',
         'agent/acceptance/consumption.py',
         'agent/source/snapshots.py',
         'agent/source/scope.py',

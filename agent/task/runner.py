@@ -535,8 +535,19 @@ class TaskRunner:
                 revisions.stage_candidate(self, plan, response)
                 return
             self.freeze_contract(plan)
-        fingerprint = digest([plan.model_dump(), self.evidence.current,
-                              (self.state.get("requirements") or {}).get("digest")])
+        # 说明和局部编号不构成新操作；只归一化摘要副本，原始计划仍原样留档。
+        plan_identity = plan.model_dump(exclude={"note"})
+        positions = {step["id"]: index for index, step in enumerate(plan_identity["steps"])}
+        for step in plan_identity["steps"]:
+            del step["id"]
+            if step["from_step"]:
+                # 依赖绑定到原执行顺序，不能因去掉编号而混淆读取目标。
+                step["from_step"] = positions[step["from_step"]]
+        fingerprint = digest([
+            plan_identity,
+            self.evidence.current,
+            (self.state.get("requirements") or {}).get("digest"),
+        ])
         if fingerprint in self.state["seen_plans"]:
             raise ValueError(
                 "Identical plan for identical source was already processed. No operations "
