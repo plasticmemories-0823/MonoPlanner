@@ -57,10 +57,16 @@ class TaskDispatchTests(unittest.TestCase):
         self.assertEqual(events.count("model_request_started"), 4)
 
     def test_default_graph_recursion_limit_does_not_reduce_existing_model_budget(self):
+        # 用不同的真实读取覆盖图调度次数，不能靠改说明绕过重复计划检查。
+        (self.repo / "notes.txt").write_text(
+            "".join(f"source line {index}\n" for index in range(12)), encoding="utf-8"
+        )
         plans = [
             {
                 "kind": "inspect", "note": f"Check saved source at stage {index}",
-                "steps": [{"id": "read", "op": "read", "path": "sample.py"}],
+                "steps": [{
+                    "id": "read", "op": "read", "path": "notes.txt", "offset": index, "limit": 1,
+                }],
             }
             for index in range(12)
         ]

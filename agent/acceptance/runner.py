@@ -101,7 +101,9 @@ class AcceptanceRun:
                 json.dumps(self.consumption_checks, ensure_ascii=False), encoding='utf-8')
             helper = self.artifact_dir / 'acceptance_consumption.py'
             helper.write_bytes((PROJECT_ROOT / 'resources/drivers/consumption.py').read_bytes())
-            paths.extend((self.consumption_path, helper))
+            api_source = self.artifact_dir / 'api_source.py'
+            api_source.write_bytes((PROJECT_ROOT / 'resources/drivers/api_source.py').read_bytes())
+            paths.extend((self.consumption_path, helper, api_source))
         if spec.test_code is not None:
             self.test_path.write_text(spec.test_code, encoding="utf-8")
             # 源码文件使用 UTF-8，即使任务运行于 ASCII 区域设置下的 Python 3.6。

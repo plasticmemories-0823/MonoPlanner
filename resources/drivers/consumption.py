@@ -1,12 +1,18 @@
 """在现有 unittest 执行内记录库调用和原始文件读取，不再次执行任务。"""
-import ast
 import hashlib
+import importlib.util
 from pathlib import Path
 import sys
 import types
 
 
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+
+# 固定解析器按绝对路径载入，不能让项目中的同名模块替换源码核验。
+_api_spec = importlib.util.spec_from_file_location(
+    'agent_acceptance_api_source', Path(__file__).resolve().with_name('api_source.py'))
+_api_source = importlib.util.module_from_spec(_api_spec)
+_api_spec.loader.exec_module(_api_source)
 
 
 def digest(path):
@@ -61,36 +67,18 @@ class Witness:
         if not inside(source, self.repo) or not source.is_file():
             row.update(error_kind='environment', reason='The declared repository API source is missing')
             return
-        raw = source.read_bytes()
-        row['source_sha256'] = hashlib.sha256(raw).hexdigest()
         try:
-            tree = ast.parse(raw, filename=str(source.resolve()))
-            compiled = compile(tree, str(source.resolve()), 'exec', dont_inherit=True)
-            body = tree.body
-            node = None
-            for name in symbol.split('.'):
-                matches = [item for item in body if isinstance(
-                    item, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == name]
-                if len(matches) != 1:
-                    raise ValueError('API symbol must identify one original Python function or method')
-                node = matches[0]
-                body = node.body
-            if not isinstance(node, ast.FunctionDef):
-                raise ValueError('API evidence requires a synchronous Python function or method')
-            for name in symbol.split('.'):
-                codes = [item for item in compiled.co_consts
-                         if isinstance(item, types.CodeType) and item.co_name == name]
-                if len(codes) != 1:
-                    raise ValueError('API compiled definition is ambiguous')
-                compiled = codes[0]
-            line = min([node.lineno] + [item.lineno for item in node.decorator_list])
-            key = (str(source.resolve()), node.name, line)
+            row['source_sha256'] = digest(source)
+            evidence, compiled = _api_source.resolve_api(self.repo, check['api_entry'])
+            row.update(evidence)
+            key = (row['source'], compiled.co_name, row['source_line'])
             self.matches.setdefault(key, []).append(row)
             self.expected_code[row['id']] = compiled
-            row.update(syntax_checked=True, source_line=line, symbol=symbol,
-                       compiled_definition_checked=True)
-        except (SyntaxError, ValueError) as exc:
+            row.update(syntax_checked=True, compiled_definition_checked=True)
+        except SyntaxError as exc:
             row.update(error_kind='source', reason=str(exc))
+        except (ValueError, OSError) as exc:
+            row.update(error_kind='declaration', reason=str(exc))
 
     def prepare_artifact(self, check, row):
         path = self.repo / check['entry_file']
@@ -136,14 +124,32 @@ class Witness:
             frame = frame.f_back
         return False
 
+    def match_code(self, code):
+        key = (code.co_filename, code.co_name, code.co_firstlineno)
+        direct = self.matches.get(key)
+        if direct:
+            return direct
+        # Docker 的两个合法挂载路径可能指向同一个源码文件。
+        # 只接受操作系统确认的同一文件；同名或同字节的另一文件仍不匹配。
+        found = []
+        for (source, name, line), rows in self.matches.items():
+            if name != code.co_name or line != code.co_firstlineno:
+                continue
+            try:
+                same_source = Path(code.co_filename).samefile(source)
+            except (OSError, ValueError):
+                same_source = False
+            if same_source:
+                found.extend(rows)
+        return found
+
     def observe(self, frame, event, arg):
         if event != 'call' or not self.active:
             return
         code = frame.f_code
         identity = id(code)
         if identity not in self.profile_cache:
-            self.profile_cache[identity] = (code, self.matches.get(
-                (code.co_filename, code.co_name, code.co_firstlineno), ()))
+            self.profile_cache[identity] = (code, self.match_code(code))
         rows = self.profile_cache[identity][1]
         if rows and self.in_test_body(frame):
             for row in rows:
@@ -184,13 +190,20 @@ class Witness:
         for row in self.rows:
             if row.get('error_kind') in {'integrity', 'environment'}:
                 continue
+            if row['artifact_type'] == 'python_api' and not row['syntax_checked']:
+                # 保留解析/语法错误；零计数是其结果，不能覆盖真正的失败原因。
+                continue
             if not all(name in tests and tests[name]['status'] in {'passed', 'failed', 'error'}
                        and count > 0 for name, count in row['calls'].items()):
                 row.update(error_kind='test', reason='Required API or artifact was not consumed by each bound test')
                 continue
             if row['artifact_type'] == 'python_api':
-                source = Path(row['source'])
-                if not row['syntax_checked'] or digest(source) != row['source_sha256']:
+                try:
+                    evidence, _ = _api_source.resolve_api(self.repo, row['api_entry'])
+                    unchanged = all(row.get(name) == value for name, value in evidence.items())
+                except (SyntaxError, ValueError, OSError):
+                    unchanged = False
+                if not unchanged:
                     row.update(error_kind='integrity', reason='Consumed API source changed')
                     continue
             else:

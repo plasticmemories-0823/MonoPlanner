@@ -46,15 +46,15 @@ def validate_row(output, value, check, row, repository, map_path):
         raise ValueError('Consumption evidence requires the actual saved repository')
     repository = Path(repository)
     if check['artifact_type'] == 'python_api':
-        module, _ = check['api_entry'].split(':')
-        path = Path(*module.split('.'))
-        relative = (path / '__init__.py' if (repository / path / '__init__.py').is_file()
-                    else path.with_suffix('.py'))
-        actual = _safe_file(repository, relative)
+        from resources.drivers.api_source import resolve_api
+        # 宿主从保存的仓库独立解析继承链；不信任回执指定的实现路径和来源清单。
+        evidence, _ = resolve_api(repository, check['api_entry'])
+        for relative in evidence['source_inventory']:
+            _safe_file(repository, Path(relative))
+        evidence['source'] = str(map_path(Path(evidence['source'])))
         if (row['status'] != 'passed' or row.get('syntax_checked') is not True
                 or row.get('compiled_definition_checked') is not True
-                or row.get('source') != str(map_path(actual))
-                or file_hash(actual) != row.get('source_sha256')):
+                or any(row.get(name) != value for name, value in evidence.items())):
             raise ValueError('Consumed API source does not match the original repository')
     else:
         artifact_root = repository
